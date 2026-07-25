@@ -1,13 +1,14 @@
 <script lang="ts">
   import { T, useThrelte, useTask } from '@threlte/core'
   import { OrbitControls, Sky, Grid } from '@threlte/extras'
-  import { World, RigidBody, AutoColliders, CollisionGroups } from '@threlte/rapier'
+  import { World, RigidBody, AutoColliders, CollisionGroups, Collider } from '@threlte/rapier'
   import type { RigidBody as RapierRigidBody } from '@dimforge/rapier3d-compat'
   import { Vector3 } from 'three'
   import { onMount } from 'svelte'
   import Robot from './Robot.svelte'
+  import Balls from './Balls.svelte'
 
-  let { resetTrigger = 0, fov = 75, speed = 10 } = $props();
+  let { resetTrigger = 0, fov = 75, speed = 10, potatoMode = false } = $props();
 
   // Generate 500 balls clustered in a pile on the ground
   const balls = Array.from({ length: 500 }).map((_, i) => {
@@ -95,13 +96,18 @@
 </script>
 
 <T.PerspectiveCamera makeDefault {fov} position={[0, 5, 10]}>
-  <OrbitControls target={cameraTarget} enableDamping />
+  <OrbitControls target={cameraTarget} enableDamping={false} />
 </T.PerspectiveCamera>
 
 <!-- Environment -->
 <Sky elevation={2} />
 <T.AmbientLight intensity={0.5} />
-<T.DirectionalLight position={[10, 10, 5]} intensity={1.5} castShadow />
+<T.DirectionalLight 
+  position={[10, 10, 5]} 
+  intensity={1.5} 
+  castShadow 
+  shadow.mapSize={[potatoMode ? 512 : 1024, potatoMode ? 512 : 1024]}
+/>
 
 <Grid
   position={[0, 0.01, 0]}
@@ -112,7 +118,7 @@
   cellSize={2}
 />
 
-<World framerate={120}>
+<World framerate={potatoMode ? 30 : 60}>
   <Robot {resetTrigger} />
 
   <!-- EVA Foam Ground (FTC Tiles) -->
@@ -123,7 +129,11 @@
           <T.BoxGeometry args={[40, 1, 40]} />
           
           <!-- High-contrast grid for FTC floor visualization (EVA foam tiles) -->
+        {#if potatoMode}
+          <T.MeshLambertMaterial color="#333333" />
+        {:else}
           <T.MeshStandardMaterial color="#333333" roughness={0.9} metalness={0.1} />
+        {/if}
         </T.Mesh>
       </AutoColliders>
     </RigidBody>
@@ -136,7 +146,11 @@
       <AutoColliders shape="cuboid">
         <T.Mesh position={[0, 0.1, -3.5]} castShadow receiveShadow>
           <T.BoxGeometry args={[7.1, 0.2, 0.1]} />
+        {#if potatoMode}
+          <T.MeshLambertMaterial color="#ffffff" transparent opacity={0.4} />
+        {:else}
           <T.MeshStandardMaterial color="#ffffff" roughness={0.1} metalness={0.1} transparent opacity={0.4} />
+        {/if}
         </T.Mesh>
       </AutoColliders>
       
@@ -144,7 +158,11 @@
       <AutoColliders shape="cuboid">
         <T.Mesh position={[0, 0.1, 3.5]} castShadow receiveShadow>
           <T.BoxGeometry args={[7.1, 0.2, 0.1]} />
+        {#if potatoMode}
+          <T.MeshLambertMaterial color="#ffffff" transparent opacity={0.4} />
+        {:else}
           <T.MeshStandardMaterial color="#ffffff" roughness={0.1} metalness={0.1} transparent opacity={0.4} />
+        {/if}
         </T.Mesh>
       </AutoColliders>
       
@@ -152,7 +170,11 @@
       <AutoColliders shape="cuboid">
         <T.Mesh position={[3.5, 0.1, 0]} castShadow receiveShadow>
           <T.BoxGeometry args={[0.1, 0.2, 7.1]} />
+        {#if potatoMode}
+          <T.MeshLambertMaterial color="#ffffff" transparent opacity={0.4} />
+        {:else}
           <T.MeshStandardMaterial color="#ffffff" roughness={0.1} metalness={0.1} transparent opacity={0.4} />
+        {/if}
         </T.Mesh>
       </AutoColliders>
       
@@ -160,34 +182,16 @@
       <AutoColliders shape="cuboid">
         <T.Mesh position={[-3.5, 0.1, 0]} castShadow receiveShadow>
           <T.BoxGeometry args={[0.1, 0.2, 7.1]} />
+        {#if potatoMode}
+          <T.MeshLambertMaterial color="#ffffff" transparent opacity={0.4} />
+        {:else}
           <T.MeshStandardMaterial color="#ffffff" roughness={0.1} metalness={0.1} transparent opacity={0.4} />
+        {/if}
         </T.Mesh>
       </AutoColliders>
     </RigidBody>
   </CollisionGroups>
 
-  <!-- PU Foam Balls (10cm diameter = 0.05m radius) -->
-  {#key resetTrigger}
-    {#each balls as ball (ball.id)}
-      <CollisionGroups groups={[0, 1, 2]}>
-        <T.Group position={[ball.x, ball.y, ball.z]}>
-          <!-- Adding damping simulates rolling resistance against the foam -->
-          <RigidBody 
-            type="dynamic" 
-            linearDamping={0.8} 
-            angularDamping={4.0}
-            ccd={true}
-          >
-            <!-- High friction and lower restitution for PU foam on EVA foam -->
-            <AutoColliders shape="ball" restitution={0.5} friction={1.0} mass={0.062}>
-              <T.Mesh castShadow>
-                <T.SphereGeometry args={[0.05, 16, 16]} />
-                <T.MeshStandardMaterial color={ball.color} roughness={0.9} metalness={0.0} />
-              </T.Mesh>
-            </AutoColliders>
-          </RigidBody>
-        </T.Group>
-      </CollisionGroups>
-    {/each}
-  {/key}
+  <!-- PU Foam Balls -->
+  <Balls ballsData={balls} {potatoMode} {resetTrigger} />
 </World>

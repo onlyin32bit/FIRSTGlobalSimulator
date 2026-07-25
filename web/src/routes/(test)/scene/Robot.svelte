@@ -4,6 +4,7 @@
   import type { RigidBody as RapierRigidBody } from '@dimforge/rapier3d-compat'
   import { Vector3, Quaternion } from 'three'
   import { robotTelemetry } from './telemetry'
+  import { robotPhysicsState } from './stores'
 
   let { resetTrigger = 0 } = $props();
 
@@ -30,6 +31,8 @@
   });
 
   let lastSpeedForTelemetry = 0;
+  let smoothedFps = 60;
+  let timeSinceLastTelemetry = 0;
 
   useTask((delta) => {
     if (!rigidBody) return;
@@ -40,22 +43,35 @@
     const mass = rigidBody.mass();
     
     // --- TELEMETRY ---
+    const currentFps = delta > 0 ? 1 / delta : 0;
+    smoothedFps = smoothedFps * 0.95 + currentFps * 0.05;
+
     const currentSpeedMag = Math.sqrt(linvel.x * linvel.x + linvel.z * linvel.z);
     const accel = (currentSpeedMag - lastSpeedForTelemetry) / delta;
     lastSpeedForTelemetry = currentSpeedMag;
     
-    robotTelemetry.set({
-      x: pos.x,
-      y: pos.y,
-      z: pos.z,
-      speed: currentSpeedMag,
-      turnRate: angvel.y,
-      accel: accel
-    });
+    // --- TELEMETRY THROTTLING ---
+    // Updating Svelte DOM text nodes 60 times a second blocks the main thread with Layout/Paint overhead!
+    // We throttle the UI updates to 10Hz to free up the WebGL and Physics loops.
+    timeSinceLastTelemetry += delta;
+    if (timeSinceLastTelemetry > 0.1) {
+      robotTelemetry.set({
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+        speed: currentSpeedMag,
+        turnRate: angvel.y,
+        accel: accel,
+        fps: smoothedFps
+      });
+      timeSinceLastTelemetry = 0;
+    }
     // -----------------
 
     let forwardInput = 0;
     let turnInput = 0;
+    let intakeBtn = false;
+    let shootBtn = false;
 
     const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
     let gp: Gamepad | null = null;
@@ -72,6 +88,9 @@
       
       forwardInput = Math.abs(rawForward) > 0.1 ? rawForward : 0;
       turnInput = Math.abs(rawTurn) > 0.1 ? rawTurn : 0;
+      
+      intakeBtn = gp.buttons[5]?.pressed || gp.buttons[7]?.pressed || false;
+      shootBtn = gp.buttons[4]?.pressed || gp.buttons[6]?.pressed || false;
     }
 
     let leftPower = forwardInput - turnInput;
@@ -105,6 +124,14 @@
     const quat = new Quaternion(rot.x, rot.y, rot.z, rot.w);
     const forwardVec = new Vector3(0, 0, -1).applyQuaternion(quat);
     
+    // Sync robot state for the Intake/Outtake system
+    robotPhysicsState.set({
+      pos: { x: pos.x, y: pos.y, z: pos.z },
+      forward: { x: forwardVec.x, y: forwardVec.y, z: forwardVec.z },
+      isIntakeActive: intakeBtn,
+      isShootActive: shootBtn
+    });
+
     const targetVelocity = forwardVec.multiplyScalar(currentLinSpeed);
     
     const deltaVx = targetVelocity.x - linvel.x;
@@ -171,7 +198,7 @@
       <T.Group position={[0, -0.5, 0]}>
         <Collider 
           shape="cuboid" 
-          args={[0.23, 0.725, 0.23]} 
+          args={[0.25, 0.725, 0.25]} 
           friction={0.0} 
           restitution={0.1} 
           mass={18.0} 

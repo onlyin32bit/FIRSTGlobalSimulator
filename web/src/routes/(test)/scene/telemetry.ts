@@ -6,5 +6,6 @@ export const robotTelemetry = writable({
   z: 0,
   speed: 0,
   turnRate: 0,
-  accel: 0
+  accel: 0,
+  fps: 0
 });
