@@ -1,12 +1,12 @@
 <script lang="ts">
   import { T, useTask } from '@threlte/core'
-  import { RigidBody, Collider, AutoColliders, CollisionGroups } from '@threlte/rapier'
+  import { RigidBody, Collider, AutoColliders } from '@threlte/rapier'
   import type { RigidBody as RapierRigidBody } from '@dimforge/rapier3d-compat'
   import { Vector3, Quaternion } from 'three'
   import { robotTelemetry } from './telemetry'
   import { robotPhysicsState } from './stores'
 
-  let { resetTrigger = 0 } = $props();
+  let { resetTrigger = 0, spawnPos = [0, 0.225, 3.15] } = $props();
 
   let rigidBody: RapierRigidBody | undefined = $state();
   
@@ -22,7 +22,7 @@
 
   $effect(() => {
     if (resetTrigger > 0 && rigidBody) {
-      rigidBody.setTranslation({ x: 0, y: 0.225, z: 3.15 }, true);
+      rigidBody.setTranslation({ x: spawnPos[0], y: spawnPos[1], z: spawnPos[2] }, true);
       rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
       rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
       currentLinSpeed = 0;
@@ -180,35 +180,25 @@
   });
 </script>
 
-<CollisionGroups groups={[1, 2]}>
-  <T.Group position={[0, 0.225, 3.15]}>
+<T.Group position={[spawnPos[0], spawnPos[1], spawnPos[2]]}>
     <RigidBody 
       bind:rigidBody 
       type="dynamic"
       enabledRotations={[false, true, false]} 
-      enabledTranslations={[true, false, true]}
+      enabledTranslations={[true, true, true]}
       ccd={true}
     >
-      <!-- 
-        The robot's collider extends 1 meter underground!
-        Because we use CollisionGroups to ignore the floor, it doesn't get pushed up.
-        Because it extends infinitely deep, the physics solver's "shortest path out" for a penetrated ball
-        is NEVER downwards. This mathematically guarantees balls will NEVER clip under the robot again!
-      -->
-      <T.Group position={[0, -0.5, 0]}>
-        <Collider 
-          shape="cuboid" 
-          args={[0.25, 0.725, 0.25]} 
-          friction={0.0} 
-          restitution={0.1} 
-          mass={18.0} 
-        />
-      </T.Group>
+      <Collider 
+        shape="cuboid" 
+        args={[0.225, 0.225, 0.225]} 
+        friction={0.0}
+        restitution={0.1} 
+        mass={18.0} 
+      />
       
       <T.Mesh castShadow>
         <T.BoxGeometry args={[0.45, 0.45, 0.45]} />
         <T.MeshStandardMaterial color="#4f46e5" roughness={0.7} metalness={0.5} />
       </T.Mesh>
     </RigidBody>
-  </T.Group>
-</CollisionGroups>
+</T.Group>
