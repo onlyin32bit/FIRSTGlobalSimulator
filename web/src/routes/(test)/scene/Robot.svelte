@@ -1,13 +1,13 @@
 <script lang="ts">
   import { T, useTask } from '@threlte/core'
-  import { RigidBody, Collider, AutoColliders, CollisionGroups } from '@threlte/rapier'
+  import { RigidBody, Collider, AutoColliders } from '@threlte/rapier'
   import type { RigidBody as RapierRigidBody } from '@dimforge/rapier3d-compat'
   import { Vector3, Quaternion } from 'three'
   import { HTML } from '@threlte/extras'
   import { robotTelemetry } from './telemetry'
   import { robotPhysicsState, robotStorage } from './stores'
 
-  let { resetTrigger = 0 } = $props();
+  let { resetTrigger = 0, spawnPos = [0, 0.225, 3.15] } = $props();
 
   let rigidBody: RapierRigidBody | undefined = $state();
   
@@ -23,7 +23,7 @@
 
   $effect(() => {
     if (resetTrigger > 0 && rigidBody) {
-      rigidBody.setTranslation({ x: 0, y: 0.225, z: 3.15 }, true);
+      rigidBody.setTranslation({ x: spawnPos[0], y: spawnPos[1], z: spawnPos[2] }, true);
       rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
       rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
       currentLinSpeed = 0;
@@ -189,12 +189,12 @@
 </script>
 
 <CollisionGroups groups={[1, 2]}>
-  <T.Group position={[0, 0, 3.15]}>
+  <T.Group position={[spawnPos[0], spawnPos[1], spawnPos[2]]}>
     <RigidBody 
       bind:rigidBody 
       type="dynamic"
       enabledRotations={[false, true, false]} 
-      enabledTranslations={[true, false, true]}
+      enabledTranslations={[true, true, true]}
       ccd={true}
     >
       <!-- 
@@ -243,5 +243,4 @@
       </div>
     </HTML>
     </RigidBody>
-  </T.Group>
-</CollisionGroups>
+</T.Group>

@@ -3,6 +3,7 @@
   import Scene from './Scene.svelte'
   import { robotTelemetry } from './telemetry'
   import { robotSpecs, robotStorage, ballsInPlay } from './stores'
+  import { scores } from '$lib/scoreStore'
 
   let resetTrigger = $state(0);
   let fov = $state(75);
@@ -102,6 +103,47 @@ Accel: {$robotTelemetry.accel.toFixed(3)} m/s²
 Turn: {($robotTelemetry.turnRate * (180 / Math.PI)).toFixed(1)}°/s
 Capacity: {$robotStorage} / {$robotSpecs.capacity} balls
 Field Balls: {$ballsInPlay}
+  </div>
+  
+  <!-- Scoreboard HUD -->
+  <div class="absolute top-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
+    <div class="flex items-stretch gap-0 rounded-xl overflow-hidden shadow-2xl border border-white/10 backdrop-blur-md">
+      <!-- Blue Team -->
+      <div class="bg-blue-900/80 px-5 py-3 flex flex-col items-center min-w-[120px]">
+        <span class="text-[10px] font-bold uppercase tracking-widest text-blue-300/80">Blue</span>
+        <div class="flex gap-4 mt-1">
+          <div class="text-center">
+            <span class="text-2xl font-black text-white tabular-nums">{$scores.blueSU}</span>
+            <span class="block text-[9px] font-semibold text-blue-300/70 uppercase">SU</span>
+          </div>
+          <div class="text-center">
+            <span class="text-2xl font-black text-white tabular-nums">{$scores.blueFS}</span>
+            <span class="block text-[9px] font-semibold text-blue-300/70 uppercase">FS</span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Extinguisher (Center) -->
+      <div class="bg-gray-900/90 px-5 py-3 flex flex-col items-center justify-center min-w-[80px] border-x border-white/10">
+        <span class="text-[10px] font-bold uppercase tracking-widest text-orange-300/80">EXT</span>
+        <span class="text-3xl font-black text-orange-400 tabular-nums mt-0.5">{$scores.EXT}</span>
+      </div>
+      
+      <!-- Red Team -->
+      <div class="bg-red-900/80 px-5 py-3 flex flex-col items-center min-w-[120px]">
+        <span class="text-[10px] font-bold uppercase tracking-widest text-red-300/80">Red</span>
+        <div class="flex gap-4 mt-1">
+          <div class="text-center">
+            <span class="text-2xl font-black text-white tabular-nums">{$scores.redSU}</span>
+            <span class="block text-[9px] font-semibold text-red-300/70 uppercase">SU</span>
+          </div>
+          <div class="text-center">
+            <span class="text-2xl font-black text-white tabular-nums">{$scores.redFS}</span>
+            <span class="block text-[9px] font-semibold text-red-300/70 uppercase">FS</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
   
   <!-- Remount Canvas when potatoMode changes -->
