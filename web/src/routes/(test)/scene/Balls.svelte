@@ -3,7 +3,7 @@
   import { useRapier } from '@threlte/rapier';
   import { Object3D } from 'three';
   import { onMount, onDestroy } from 'svelte';
-  import { robotPhysicsState, robotSpecs, robotStorage } from './stores';
+  import { robotPhysicsState, robotSpecs, robotStorage, ballsInPlay } from './stores';
   import { get } from 'svelte/store';
   
   let { potatoMode = false, resetTrigger = 0, ballsData = [] } = $props();
@@ -14,6 +14,8 @@
   const dummyObj = new Object3D();
   let rapierBodies: any[] = [];
   let ballStates: string[] = [];
+  let visualSwallows = new Map();
+  let lastReportedInPlay = 500;
   
   let lastIntakeTime = 0;
   let lastShootTime = 0;
@@ -24,6 +26,8 @@
     rapierBodies = [];
     ballStates = [];
     robotStorage.set(0);
+    ballsInPlay.set(ballsData.length);
+    lastReportedInPlay = ballsData.length;
     
     if (ballsData.length === 0) return;
 
@@ -33,7 +37,7 @@
       .setCcdEnabled(!potatoMode);
       
     const colliderDesc = rapier.ColliderDesc.ball(0.05)
-      .setRestitution(0.5)
+      .setRestitution(0.8)
       .setFriction(1.0)
       .setMass(0.062);
       
@@ -73,35 +77,70 @@
       lastIntakeTime += delta;
       const intakeInterval = 1.0 / specs.intakeRate;
       
-      if (lastIntakeTime >= intakeInterval) {
-        // Intake zone is slightly in front of the robot
-        const intakeX = rState.pos.x + rState.forward.x * 0.4;
-        const intakeZ = rState.pos.z + rState.forward.z * 0.4;
-        const intakeRadiusSq = 0.4 * 0.4;
+      const captureRadiusSq = 0.40 * 0.40;
 
-        for (let i = 0; i < rapierBodies.length; i++) {
-          if (ballStates[i] === 'active') {
-            const bPos = rapierBodies[i].translation();
-            const dx = bPos.x - intakeX;
-            const dz = bPos.z - intakeZ;
-            const dy = Math.abs(bPos.y - rState.pos.y);
-            
-            if (dy < 0.5 && (dx*dx + dz*dz) < intakeRadiusSq) {
-              // Pickup!
-              ballStates[i] = 'stored';
+      for (let i = 0; i < rapierBodies.length; i++) {
+        if (ballStates[i] === 'active') {
+          const bPos = rapierBodies[i].translation();
+          const dx = bPos.x - rState.pos.x;
+          const dz = bPos.z - rState.pos.z;
+          const distSq = dx*dx + dz*dz;
+          const dy = Math.abs(bPos.y - rState.pos.y);
+          
+          // Dot product to ensure ball is in FRONT of the robot
+          const dot = (dx * rState.forward.x) + (dz * rState.forward.z);
+          
+          if (dy < 0.6 && distSq < captureRadiusSq && dot > 0.1) {
+            if (lastIntakeTime >= intakeInterval) {
+              // Begin visually swallowing!
+              ballStates[i] = 'swallowing';
+              
+              // Store visual position for animation
+              visualSwallows.set(i, { x: bPos.x, y: bPos.y, z: bPos.z });
+              
+              // Instantly teleport physics body underground to prevent drift/collisions
               rapierBodies[i].setTranslation(new rapier.Vector3(0, -100, 0), true);
               rapierBodies[i].setLinvel(new rapier.Vector3(0, 0, 0), true);
               rapierBodies[i].setAngvel(new rapier.Vector3(0, 0, 0), true);
+              
               storage++;
               storageChanged = true;
               lastIntakeTime = 0;
-              break; // Only pickup one per interval
             }
           }
         }
       }
     } else {
       lastIntakeTime = 0;
+    }
+    
+    // --- SWALLOWING LOGIC (Visual Only!) ---
+    for (let i = 0; i < rapierBodies.length; i++) {
+      if (ballStates[i] === 'swallowing') {
+        const vState = visualSwallows.get(i);
+        if (!vState) continue;
+        
+        // Target the top center of the robot
+        const targetX = rState.pos.x;
+        const targetY = rState.pos.y + 0.3; // Up over the bumper
+        const targetZ = rState.pos.z;
+        
+        const dx = targetX - vState.x;
+        const dy = targetY - vState.y;
+        const dz = targetZ - vState.z;
+        const distSq = dx*dx + dy*dy + dz*dz;
+        
+        if (distSq < 0.01) {
+          // It has reached the center of the hopper. Fully store it!
+          ballStates[i] = 'stored';
+          visualSwallows.delete(i);
+        } else {
+          // Smoothly interpolate visual position towards the hopper
+          vState.x += dx * 0.2;
+          vState.y += dy * 0.2;
+          vState.z += dz * 0.2;
+        }
+      }
     }
 
     // --- OUTTAKE LOGIC ---
@@ -110,33 +149,79 @@
       const shootInterval = 1.0 / specs.outtakeRate;
       
       if (lastShootTime >= shootInterval) {
+        // Shoot a wide burst of 3-4 balls!
+        const burstCount = Math.min(storage, 3 + Math.floor(Math.random() * 2));
+        
+        let ballsToShoot = [];
         for (let i = 0; i < rapierBodies.length; i++) {
           if (ballStates[i] === 'stored') {
-            // Shoot!
-            ballStates[i] = 'active';
-            
-            // Outtake zone is at the back of the robot
-            const outX = rState.pos.x - rState.forward.x * 0.4;
-            const outY = rState.pos.y + 0.3;
-            const outZ = rState.pos.z - rState.forward.z * 0.4;
-            
-            rapierBodies[i].setTranslation(new rapier.Vector3(outX, outY, outZ), true);
-            
-            // Calculate velocity trajectory
-            const angleRad = specs.outtakeAngle * (Math.PI / 180);
-            const vY = Math.sin(angleRad) * specs.outtakeVelocity;
-            const vHoriz = Math.cos(angleRad) * specs.outtakeVelocity;
-            const vX = -rState.forward.x * vHoriz; // backward
-            const vZ = -rState.forward.z * vHoriz; // backward
-            
-            rapierBodies[i].setLinvel(new rapier.Vector3(vX, vY, vZ), true);
-            
-            storage--;
-            storageChanged = true;
-            lastShootTime = 0;
-            break; // Only shoot one per interval
+            ballsToShoot.push(i);
+            if (ballsToShoot.length === burstCount) break;
           }
         }
+        
+        for (let j = 0; j < ballsToShoot.length; j++) {
+          const i = ballsToShoot[j];
+          ballStates[i] = 'active';
+          
+          const rightX = rState.forward.z;
+          const rightZ = -rState.forward.x;
+          
+          let offsetMag = 0;
+          if (ballsToShoot.length > 1) {
+            // Span across +/- 0.18 meters (0.36m total width, fits inside the 0.5m robot)
+            const maxSpread = 0.18;
+            offsetMag = -maxSpread + (j / (ballsToShoot.length - 1)) * (maxSpread * 2);
+            // Add a little randomness so they aren't perfectly spaced
+            offsetMag += (Math.random() - 0.5) * 0.05;
+          }
+          
+          // Time-stagger simulation: 
+          // By moving the ball slightly forward/backward along the robot's forward vector,
+          // it completely breaks the "perfect mathematical line" and makes them look like
+          // they were fired a few milliseconds apart.
+          const timeStagger = (Math.random() - 0.5) * 0.35; // +/- 17.5 cm stagger
+          
+          // Outtake zone is at the back of the robot, plus the lateral width offset and time stagger
+          const outX = rState.pos.x - rState.forward.x * 0.4 + rightX * offsetMag + rState.forward.x * timeStagger;
+          const outY = rState.pos.y + 0.3 + (Math.random() * 0.05); // tiny vertical jitter
+          const outZ = rState.pos.z - rState.forward.z * 0.4 + rightZ * offsetMag + rState.forward.z * timeStagger;
+          
+          rapierBodies[i].setTranslation(new rapier.Vector3(outX, outY, outZ), true);
+          
+          // Calculate velocity trajectory with entropy (randomness)
+          const verticalVariance = (Math.random() - 0.5) * 4.0;
+          const angleRad = (specs.outtakeAngle + verticalVariance) * (Math.PI / 180);
+          
+          const speedMultiplier = 1.0 + (Math.random() - 0.5) * 0.1;
+          const finalSpeed = specs.outtakeVelocity * speedMultiplier;
+          
+          const vY = Math.sin(angleRad) * finalSpeed;
+          const vHoriz = Math.cos(angleRad) * finalSpeed;
+          
+          const spread = (Math.random() - 0.5) * 0.1;
+          const dirX = -rState.forward.x;
+          const dirZ = -rState.forward.z;
+          const spreadX = dirX * Math.cos(spread) - dirZ * Math.sin(spread);
+          const spreadZ = dirX * Math.sin(spread) + dirZ * Math.cos(spread);
+          
+          const vX = spreadX * vHoriz + rState.vel.x;
+          const vZ = spreadZ * vHoriz + rState.vel.z;
+          const finalVy = vY + rState.vel.y;
+          
+          // Massive backspin
+          const backspin = 40.0 + (Math.random() - 0.5) * 10.0;
+          const spinX = rightX * backspin + (Math.random() - 0.5) * 5.0;
+          const spinY = (Math.random() - 0.5) * 5.0;
+          const spinZ = rightZ * backspin + (Math.random() - 0.5) * 5.0;
+          
+          rapierBodies[i].setAngvel(new rapier.Vector3(spinX, spinY, spinZ), true);
+          rapierBodies[i].setLinvel(new rapier.Vector3(vX, finalVy, vZ), true);
+          
+          storage--;
+          storageChanged = true;
+        }
+        lastShootTime = 0;
       }
     } else {
       lastShootTime = 0;
@@ -146,11 +231,22 @@
       robotStorage.set(storage);
     }
     
+    let currentInPlay = 0;
+    
     // --- MATRIX SYNC ---
     for (let i = 0; i < rapierBodies.length; i++) {
       const body = rapierBodies[i];
-      const pos = body.translation();
+      let pos = body.translation();
       const rot = body.rotation();
+      
+      if (ballStates[i] === 'active') {
+        if (Math.abs(pos.x) <= 3.5 && Math.abs(pos.z) <= 3.5) {
+          currentInPlay++;
+        }
+      } else if (ballStates[i] === 'swallowing' && visualSwallows.has(i)) {
+        const vState = visualSwallows.get(i);
+        pos = { x: vState.x, y: vState.y, z: vState.z };
+      }
       
       dummyObj.position.set(pos.x, pos.y, pos.z);
       dummyObj.quaternion.set(rot.x, rot.y, rot.z, rot.w);
@@ -159,6 +255,11 @@
       instancedMeshRef.setMatrixAt(i, dummyObj.matrix);
     }
     instancedMeshRef.instanceMatrix.needsUpdate = true;
+    
+    if (currentInPlay !== lastReportedInPlay) {
+      ballsInPlay.set(currentInPlay);
+      lastReportedInPlay = currentInPlay;
+    }
   });
 </script>
 

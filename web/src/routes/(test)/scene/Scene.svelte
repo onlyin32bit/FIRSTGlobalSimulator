@@ -124,7 +124,7 @@
   <!-- EVA Foam Ground (FTC Tiles) -->
   <CollisionGroups groups={[0]}>
     <RigidBody type="fixed">
-      <AutoColliders shape="cuboid" friction={1.2} restitution={0.1}>
+      <AutoColliders shape="cuboid" friction={1.2} restitution={0.5}>
         <T.Mesh position={[0, -0.5, 0]} receiveShadow>
           <T.BoxGeometry args={[40, 1, 40]} />
           

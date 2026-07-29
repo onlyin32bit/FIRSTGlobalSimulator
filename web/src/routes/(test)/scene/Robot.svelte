@@ -3,8 +3,9 @@
   import { RigidBody, Collider, AutoColliders, CollisionGroups } from '@threlte/rapier'
   import type { RigidBody as RapierRigidBody } from '@dimforge/rapier3d-compat'
   import { Vector3, Quaternion } from 'three'
+  import { HTML } from '@threlte/extras'
   import { robotTelemetry } from './telemetry'
-  import { robotPhysicsState } from './stores'
+  import { robotPhysicsState, robotStorage } from './stores'
 
   let { resetTrigger = 0 } = $props();
 
@@ -33,6 +34,8 @@
   let lastSpeedForTelemetry = 0;
   let smoothedFps = 60;
   let timeSinceLastTelemetry = 0;
+  
+  let rollerRotation = $state(0);
 
   useTask((delta) => {
     if (!rigidBody) return;
@@ -127,12 +130,17 @@
     // Sync robot state for the Intake/Outtake system
     robotPhysicsState.set({
       pos: { x: pos.x, y: pos.y, z: pos.z },
+      vel: { x: linvel.x, y: linvel.y, z: linvel.z },
       forward: { x: forwardVec.x, y: forwardVec.y, z: forwardVec.z },
       isIntakeActive: intakeBtn,
       isShootActive: shootBtn
     });
 
     const targetVelocity = forwardVec.multiplyScalar(currentLinSpeed);
+    
+    if (intakeBtn) {
+      rollerRotation -= delta * 30; // Spin rapidly inwards
+    }
     
     const deltaVx = targetVelocity.x - linvel.x;
     const deltaVz = targetVelocity.z - linvel.z;
@@ -181,7 +189,7 @@
 </script>
 
 <CollisionGroups groups={[1, 2]}>
-  <T.Group position={[0, 0.225, 3.15]}>
+  <T.Group position={[0, 0, 3.15]}>
     <RigidBody 
       bind:rigidBody 
       type="dynamic"
@@ -190,25 +198,50 @@
       ccd={true}
     >
       <!-- 
-        The robot's collider extends 1 meter underground!
-        Because we use CollisionGroups to ignore the floor, it doesn't get pushed up.
-        Because it extends infinitely deep, the physics solver's "shortest path out" for a penetrated ball
-        is NEVER downwards. This mathematically guarantees balls will NEVER clip under the robot again!
+        The "Deep Pillar" Collider Strategy:
+        Instead of a tiny cube that can tunnel through balls at high speeds, 
+        we make the robot's physical collider extend 50 meters underground!
+        This completely eliminates physics tunneling issues on the X/Z plane.
+        We also expand the bounds by 2.5cm to prevent clipping.
       -->
-      <T.Group position={[0, -0.5, 0]}>
+      <T.Group position={[0, -49.7, 0]}>
         <Collider 
           shape="cuboid" 
-          args={[0.25, 0.725, 0.25]} 
+          args={[0.275, 50, 0.325]} 
           friction={0.0} 
           restitution={0.1} 
           mass={18.0} 
         />
       </T.Group>
       
-      <T.Mesh castShadow>
-        <T.BoxGeometry args={[0.45, 0.45, 0.45]} />
-        <T.MeshStandardMaterial color="#4f46e5" roughness={0.7} metalness={0.5} />
+      <T.Mesh castShadow receiveShadow position={[0, 0.15, 0]}>
+      <T.BoxGeometry args={[0.5, 0.3, 0.6]} />
+      <T.MeshStandardMaterial color="#2563eb" roughness={0.4} metalness={0.2} />
+    </T.Mesh>
+    
+    <!-- Active Intake Mechanism (Compliant Roller) -->
+    <T.Group position={[0, 0.05, -0.35]} rotation={[rollerRotation, 0, 0]}>
+      <!-- The main roller axle -->
+      <T.Mesh rotation={[0, 0, Math.PI / 2]} castShadow>
+        <T.CylinderGeometry args={[0.04, 0.04, 0.48, 16]} />
+        <T.MeshStandardMaterial color="#222222" roughness={0.9} />
       </T.Mesh>
+      
+      <!-- Green compliant wheels on the axle -->
+      {#each [-0.15, 0, 0.15] as xOffset}
+        <T.Mesh position={[xOffset, 0, 0]} rotation={[0, 0, Math.PI / 2]} castShadow>
+          <T.CylinderGeometry args={[0.07, 0.07, 0.05, 16]} />
+          <T.MeshStandardMaterial color="#22c55e" roughness={0.8} />
+        </T.Mesh>
+      {/each}
+    </T.Group>
+    
+    <!-- Floating Storage Indicator -->
+    <HTML position={[0, 0.7, 0]} center>
+      <div class="bg-black/40 text-white font-mono font-bold text-lg px-2 py-0.5 pointer-events-none select-none">
+        {$robotStorage}
+      </div>
+    </HTML>
     </RigidBody>
   </T.Group>
 </CollisionGroups>
