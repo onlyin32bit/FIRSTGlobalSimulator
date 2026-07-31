@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "fieldTransform": {
+    "position": [
+      -2,
+      -5,
+      0
+    ]
+  },
+  "anchors": {
+    "blueSpawn1": [
+      5.724534,
+      6.982478,
+      -0.706369
+    ],
+    "blueSpawn2": [
+      4.307655,
+      6.987011,
+      -0.706369
+    ],
+    "blueSpawn3": [
+      2.943085,
+      6.978094,
+      -0.706369
+    ],
+    "redSpawn1": [
+      5.724534,
+      0.41231,
+      -0.706369
+    ],
+    "redSpawn2": [
+      4.307655,
+      0.41231,
+      -0.706369
+    ],
+    "redSpawn3": [
+      2.943085,
+      0.41231,
+      -0.706369
+    ]
+  },
+  "scoringZones": [
+    {
+      "id": "blueFSscore",
+      "scoreKey": "blueFS",
+      "shape": "cuboid",
+      "position": [
+        5.187749,
+        5.682411,
+        1.9396
+      ],
+      "halfExtents": [
+        0.252557,
+        0.1,
+        0.150489
+      ]
+    },
+    {
+      "id": "blueSUscore",
+      "scoreKey": "blueSU",
+      "shape": "cuboid",
+      "position": [
+        2.853205,
+        6.797233,
+        -3.522635
+      ],
+      "halfExtents": [
+        0.480794,
+        0.1,
+        0.1
+      ]
+    },
+    {
+      "id": "EXTscore",
+      "scoreKey": "EXT",
+      "shape": "cuboid",
+      "position": [
+        1.872348,
+        6.996257,
+        -3.523079
+      ],
+      "halfExtents": [
+        0.463142,
+        0.1,
+        0.1
+      ]
+    },
+    {
+      "id": "redFSscore",
+      "scoreKey": "redFS",
+      "shape": "cuboid",
+      "position": [
+        -1.430923,
+        5.686356,
+        1.910489
+      ],
+      "halfExtents": [
+        0.236133,
+        0.1,
+        0.137952
+      ]
+    },
+    {
+      "id": "redSUscore",
+      "scoreKey": "redSU",
+      "shape": "cuboid",
+      "position": [
+        0.891196,
+        6.812043,
+        -3.526865
+      ],
+      "halfExtents": [
+        0.480848,
+        0.1,
+        0.1
+      ]
+    }
+  ]
+}

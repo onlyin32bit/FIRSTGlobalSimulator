@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "fgc-2026",
+  "name": "2026 FIRST Global Challenge",
+  "game": "Igniting Innovation",
+  "field": {
+    "visual": "field.glb",
+    "physics": "field.physics.json",
+    "semantics": "field.semantics.json"
+  },
+  "directories": {
+    "rules": "rules",
+    "textures": "assets/textures",
+    "sounds": "assets/sounds",
+    "tests": "tests"
+  }
+}

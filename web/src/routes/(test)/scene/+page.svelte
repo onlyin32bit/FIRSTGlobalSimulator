@@ -90,6 +90,8 @@
       <div>WASD: Pan Camera</div>
       <div>Space/Shift: Up/Down</div>
       <div>Mouse Drag: Orbit Look</div>
+      <div>Arrow Keys: Drive Robot</div>
+      <div>E/Q: Intake/Shoot</div>
       <div>Gamepad: Drive Robot</div>
     </div>
   </div>

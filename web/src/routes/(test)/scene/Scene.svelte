@@ -7,8 +7,6 @@
   import { onMount } from 'svelte'
   import Robot from './Robot.svelte'
   import Balls from './Balls.svelte'
-  import Field from '$lib/components/Field.svelte'
-  import { resetScores } from '$lib/scoreStore'
 
   let { resetTrigger = 0, fov = 75, speed = 10, potatoMode = false } = $props();
   let fieldAnchors = $state<Record<string, [number, number, number]>>({});
@@ -23,18 +21,21 @@
   // Extra height offset so robot/balls drop onto the field rather than clipping into it
   const SPAWN_HEIGHT_EXTRA = 3;
 
-  // ── Tune these to move the player spawn point ──────────────────────────────
-  const PLAYER_SPAWN_OFFSET: [number, number, number] = [
+  // The body origin is at the bottom of the chassis. The packed field's surface
+  // is around y=0.60, so this gives it a small, non-penetrating drop on spawn.
+  const ROBOT_SPAWN_Y = 0.65;
+
+  // ── Tune these to move the player spawn point on the field ─────────────────
+  const PLAYER_SPAWN_OFFSET: [number, number] = [
     -4,   // X offset (positive = right)
-    1,   // Y offset (positive = higher above anchor)
     1,   // Z offset (positive = forward)
   ];
   // ───────────────────────────────────────────────────────────────────────────
 
   let robotSpawnPos = $derived<[number, number, number]>([
     (fieldAnchors['blueSpawn1'] || [0, 0, 3.15])[0] + PLAYER_SPAWN_OFFSET[0],
-    (fieldAnchors['blueSpawn1'] || [0, 0, 3.15])[1] + PLAYER_SPAWN_OFFSET[1],
-    (fieldAnchors['blueSpawn1'] || [0, 0, 3.15])[2] + PLAYER_SPAWN_OFFSET[2],
+    ROBOT_SPAWN_Y,
+    (fieldAnchors['blueSpawn1'] || [0, 0, 3.15])[2] + PLAYER_SPAWN_OFFSET[1],
   ]);
 
   let centerGoalPos = $derived(
@@ -48,21 +49,18 @@
     const r = Math.sqrt(Math.random()) * 2.5;
     return {
       id: i,
-      x: centerGoalPos[0] + Math.cos(angle) * r,
-      y: centerGoalPos[1] + SPAWN_HEIGHT_EXTRA + Math.random() * 1.5, // Drop from above the field
-      z: centerGoalPos[2] + Math.sin(angle) * r,
+      x: Math.cos(angle) * r,
+      y: 0.1 + Math.random() * 1.5, // Stacked up to 1.5m high
+      z: Math.sin(angle) * r,
       color: '#f97316' // All balls are now orange
     };
-  }));
+  });
 
   // --- Camera Controls ---
   const keys = { w: false, a: false, s: false, d: false, space: false, shift: false };
   let cameraTarget = $state<[number, number, number]>([0, 1, 0]);
   
   onMount(() => {
-    // Delay robot and ball spawning to let field physics colliders register first
-    const spawnTimer = setTimeout(() => { readyToSpawn = true; }, 2000);
-
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
       if (key === 'w') keys.w = true;
@@ -84,7 +82,6 @@
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     return () => {
-      clearTimeout(spawnTimer);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     }
@@ -154,14 +151,79 @@
 />
 
 <World framerate={potatoMode ? 30 : 60}>
-  <!-- Field loads immediately so collision physics register first -->
-  <Field bind:anchors={fieldAnchors} />
+  <Robot {resetTrigger} />
 
-  <!-- Robot and balls spawn after 2s delay to avoid falling through unloaded geometry -->
-  {#if readyToSpawn}
-    <Robot {resetTrigger} spawnPos={robotSpawnPos} />
+  <!-- EVA Foam Ground (FTC Tiles) -->
+  <CollisionGroups groups={[0]}>
+    <RigidBody type="fixed">
+      <AutoColliders shape="cuboid" friction={1.2} restitution={0.5}>
+        <T.Mesh position={[0, -0.5, 0]} receiveShadow>
+          <T.BoxGeometry args={[40, 1, 40]} />
+          
+          <!-- High-contrast grid for FTC floor visualization (EVA foam tiles) -->
+        {#if potatoMode}
+          <T.MeshLambertMaterial color="#333333" />
+        {:else}
+          <T.MeshStandardMaterial color="#333333" roughness={0.9} metalness={0.1} />
+        {/if}
+        </T.Mesh>
+      </AutoColliders>
+    </RigidBody>
+  </CollisionGroups>
 
-    <!-- PU Foam Balls -->
-    <Balls ballsData={balls} {potatoMode} {resetTrigger} />
-  {/if}
+  <!-- 7m x 7m Perimeter Walls (Polycarbonate style, 20cm tall) -->
+  <CollisionGroups groups={[1]}>
+    <RigidBody type="fixed">
+      <!-- North Wall -->
+      <AutoColliders shape="cuboid">
+        <T.Mesh position={[0, 0.1, -3.5]} castShadow receiveShadow>
+          <T.BoxGeometry args={[7.1, 0.2, 0.1]} />
+        {#if potatoMode}
+          <T.MeshLambertMaterial color="#ffffff" transparent opacity={0.4} />
+        {:else}
+          <T.MeshStandardMaterial color="#ffffff" roughness={0.1} metalness={0.1} transparent opacity={0.4} />
+        {/if}
+        </T.Mesh>
+      </AutoColliders>
+      
+      <!-- South Wall -->
+      <AutoColliders shape="cuboid">
+        <T.Mesh position={[0, 0.1, 3.5]} castShadow receiveShadow>
+          <T.BoxGeometry args={[7.1, 0.2, 0.1]} />
+        {#if potatoMode}
+          <T.MeshLambertMaterial color="#ffffff" transparent opacity={0.4} />
+        {:else}
+          <T.MeshStandardMaterial color="#ffffff" roughness={0.1} metalness={0.1} transparent opacity={0.4} />
+        {/if}
+        </T.Mesh>
+      </AutoColliders>
+      
+      <!-- East Wall -->
+      <AutoColliders shape="cuboid">
+        <T.Mesh position={[3.5, 0.1, 0]} castShadow receiveShadow>
+          <T.BoxGeometry args={[0.1, 0.2, 7.1]} />
+        {#if potatoMode}
+          <T.MeshLambertMaterial color="#ffffff" transparent opacity={0.4} />
+        {:else}
+          <T.MeshStandardMaterial color="#ffffff" roughness={0.1} metalness={0.1} transparent opacity={0.4} />
+        {/if}
+        </T.Mesh>
+      </AutoColliders>
+      
+      <!-- West Wall -->
+      <AutoColliders shape="cuboid">
+        <T.Mesh position={[-3.5, 0.1, 0]} castShadow receiveShadow>
+          <T.BoxGeometry args={[0.1, 0.2, 7.1]} />
+        {#if potatoMode}
+          <T.MeshLambertMaterial color="#ffffff" transparent opacity={0.4} />
+        {:else}
+          <T.MeshStandardMaterial color="#ffffff" roughness={0.1} metalness={0.1} transparent opacity={0.4} />
+        {/if}
+        </T.Mesh>
+      </AutoColliders>
+    </RigidBody>
+  </CollisionGroups>
+
+  <!-- PU Foam Balls -->
+  <Balls ballsData={balls} {potatoMode} {resetTrigger} />
 </World>

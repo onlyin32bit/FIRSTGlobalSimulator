@@ -1,29 +1,89 @@
 <script lang="ts">
   import { T, useTask } from '@threlte/core'
-  import { RigidBody, Collider, AutoColliders } from '@threlte/rapier'
+  import { RigidBody, Collider } from '@threlte/rapier'
   import type { RigidBody as RapierRigidBody } from '@dimforge/rapier3d-compat'
   import { Vector3, Quaternion } from 'three'
   import { HTML } from '@threlte/extras'
+  import { onMount } from 'svelte'
   import { robotTelemetry } from './telemetry'
   import { robotPhysicsState, robotStorage } from './stores'
 
-  let { resetTrigger = 0, spawnPos = [0, 0.225, 3.15] } = $props();
+  let { resetTrigger = 0 } = $props();
 
   let rigidBody: RapierRigidBody | undefined = $state();
   
-  // Lowered max speed to prevent physical tunneling (ghosting). 
-  // 4.0 m/s was moving faster per-frame than the ball's radius!
-  const MAX_SPEED = 2.5; 
-  const MAX_TURN = 8.0; 
-  const ACCEL = 15.0; 
+  // CCD handles fast contacts; these values keep the robot responsive without
+  // letting it push through a pile of game pieces in one physics step.
+  const MAX_SPEED = 4.0; 
+  const MAX_TURN = 7.0; 
+  const ACCEL = 12.0; 
   const TURN_ACCEL = 40.0; 
+  const DRIVE_RESPONSE = 0.55;
+  const LATERAL_GRIP = 0.8;
+  const MAX_DRIVE_IMPULSE = 6.0;
   
   let currentLinSpeed = 0;
   let currentAngSpeed = 0;
+  const keys = {
+    forward: false,
+    reverse: false,
+    left: false,
+    right: false,
+    intake: false,
+    shoot: false
+  };
+
+  function clearKeyboardInput() {
+    for (const key of Object.keys(keys) as Array<keyof typeof keys>) {
+      keys[key] = false;
+    }
+  }
+
+  onMount(() => {
+    const setKey = (event: KeyboardEvent, pressed: boolean) => {
+      switch (event.key.toLowerCase()) {
+        case 'arrowup':
+          keys.forward = pressed;
+          break;
+        case 'arrowdown':
+          keys.reverse = pressed;
+          break;
+        case 'arrowleft':
+          keys.left = pressed;
+          break;
+        case 'arrowright':
+          keys.right = pressed;
+          break;
+        case 'e':
+          keys.intake = pressed;
+          break;
+        case 'q':
+          keys.shoot = pressed;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => setKey(event, true);
+    const handleKeyUp = (event: KeyboardEvent) => setKey(event, false);
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', clearKeyboardInput);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', clearKeyboardInput);
+    };
+  });
 
   $effect(() => {
     if (resetTrigger > 0 && rigidBody) {
-      rigidBody.setTranslation({ x: spawnPos[0], y: spawnPos[1], z: spawnPos[2] }, true);
+      rigidBody.setTranslation({ x: 0, y: 0.225, z: 3.15 }, true);
       rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
       rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
       currentLinSpeed = 0;
@@ -87,7 +147,11 @@
 
     if (gp) {
       const rawForward = -gp.axes[1]; 
-      const rawTurn = -gp.axes[2];    
+      const leftStickTurn = -(gp.axes[0] ?? 0);
+      const rightStickTurn = -(gp.axes[2] ?? 0);
+      const rawTurn = Math.abs(leftStickTurn) >= Math.abs(rightStickTurn)
+        ? leftStickTurn
+        : rightStickTurn;
       
       forwardInput = Math.abs(rawForward) > 0.1 ? rawForward : 0;
       turnInput = Math.abs(rawTurn) > 0.1 ? rawTurn : 0;
@@ -95,6 +159,13 @@
       intakeBtn = gp.buttons[5]?.pressed || gp.buttons[7]?.pressed || false;
       shootBtn = gp.buttons[4]?.pressed || gp.buttons[6]?.pressed || false;
     }
+
+    const keyboardForward = Number(keys.forward) - Number(keys.reverse);
+    const keyboardTurn = Number(keys.left) - Number(keys.right);
+    forwardInput = Math.max(-1, Math.min(1, forwardInput + keyboardForward));
+    turnInput = Math.max(-1, Math.min(1, turnInput + keyboardTurn));
+    intakeBtn ||= keys.intake;
+    shootBtn ||= keys.shoot;
 
     let leftPower = forwardInput - turnInput;
     let rightPower = forwardInput + turnInput;
@@ -126,6 +197,7 @@
     const rot = rigidBody.rotation();
     const quat = new Quaternion(rot.x, rot.y, rot.z, rot.w);
     const forwardVec = new Vector3(0, 0, -1).applyQuaternion(quat);
+    const rightVec = new Vector3(1, 0, 0).applyQuaternion(quat);
     
     // Sync robot state for the Intake/Outtake system
     robotPhysicsState.set({
@@ -136,18 +208,18 @@
       isShootActive: shootBtn
     });
 
-    const targetVelocity = forwardVec.multiplyScalar(currentLinSpeed);
-    
     if (intakeBtn) {
       rollerRotation -= delta * 30; // Spin rapidly inwards
     }
-    
-    const deltaVx = targetVelocity.x - linvel.x;
-    const deltaVz = targetVelocity.z - linvel.z;
-    
-    const linearResponse = 0.5;
-    let impulseX = deltaVx * mass * linearResponse;
-    let impulseZ = deltaVz * mass * linearResponse;
+
+    // Wheel-like traction on EVA foam: drive along the chassis and strongly
+    // resist sideways scrub without making rotation behave like a stuck box.
+    const forwardSpeed = linvel.x * forwardVec.x + linvel.z * forwardVec.z;
+    const lateralSpeed = linvel.x * rightVec.x + linvel.z * rightVec.z;
+    const forwardImpulse = (currentLinSpeed - forwardSpeed) * mass * DRIVE_RESPONSE;
+    const lateralImpulse = -lateralSpeed * mass * LATERAL_GRIP;
+    let impulseX = forwardVec.x * forwardImpulse + rightVec.x * lateralImpulse;
+    let impulseZ = forwardVec.z * forwardImpulse + rightVec.z * lateralImpulse;
     
     // CLAMP THE MAX IMPULSE!
     // This is the true fix for the no-clip:
@@ -155,11 +227,10 @@
     // crushing them through the geometry in a single frame.
     // By clamping the impulse (force), the robot actually slows down realistically when ramming a pile,
     // giving the physics engine time to safely roll the balls away.
-    const maxLinearImpulse = 4.0; // Max pushing power (tuneable)
     const impulseMag = Math.sqrt(impulseX * impulseX + impulseZ * impulseZ);
-    if (impulseMag > maxLinearImpulse) {
-      impulseX = (impulseX / impulseMag) * maxLinearImpulse;
-      impulseZ = (impulseZ / impulseMag) * maxLinearImpulse;
+    if (impulseMag > MAX_DRIVE_IMPULSE) {
+      impulseX = (impulseX / impulseMag) * MAX_DRIVE_IMPULSE;
+      impulseZ = (impulseZ / impulseMag) * MAX_DRIVE_IMPULSE;
     }
     
     rigidBody.applyImpulse({
@@ -170,12 +241,12 @@
 
     const deltaW = currentAngSpeed - angvel.y;
     const inertia = (mass / 12.0) * (0.45 * 0.45 + 0.45 * 0.45);
-    const angularResponse = 0.5;
+    const angularResponse = 1.1;
     
     let torqueImpulse = deltaW * inertia * angularResponse;
     
     // Clamp turning torque as well
-    const maxTorqueImpulse = 1.0;
+    const maxTorqueImpulse = 4.0;
     if (Math.abs(torqueImpulse) > maxTorqueImpulse) {
       torqueImpulse = Math.sign(torqueImpulse) * maxTorqueImpulse;
     }
@@ -188,33 +259,28 @@
   });
 </script>
 
-<CollisionGroups groups={[1, 2]}>
-  <T.Group position={[spawnPos[0], spawnPos[1], spawnPos[2]]}>
-    <RigidBody 
-      bind:rigidBody 
-      type="dynamic"
-      enabledRotations={[false, true, false]} 
-      enabledTranslations={[true, true, true]}
-      ccd={true}
-    >
-      <!-- 
-        The "Deep Pillar" Collider Strategy:
-        Instead of a tiny cube that can tunnel through balls at high speeds, 
-        we make the robot's physical collider extend 50 meters underground!
-        This completely eliminates physics tunneling issues on the X/Z plane.
-        We also expand the bounds by 2.5cm to prevent clipping.
-      -->
-      <T.Group position={[0, -49.7, 0]}>
-        <Collider 
-          shape="cuboid" 
-          args={[0.275, 50, 0.325]} 
-          friction={0.0} 
-          restitution={0.1} 
-          mass={18.0} 
-        />
-      </T.Group>
+<T.Group position={[spawnPos[0], spawnPos[1], spawnPos[2]]}>
+  <RigidBody 
+    bind:rigidBody 
+    type="dynamic"
+    enabledRotations={[false, true, false]} 
+    enabledTranslations={[true, true, true]}
+    linearDamping={0.15}
+    angularDamping={0.8}
+    ccd={true}
+  >
+    <!-- Rounded, low-friction edges act more like wheels and do not catch on field seams. -->
+    <T.Group position={[0, 0.15, 0]}>
+      <Collider 
+        shape="roundCuboid" 
+        args={[0.275, 0.14, 0.325, 0.04]} 
+        friction={0.35} 
+        restitution={0.02} 
+        mass={18.0} 
+      />
+    </T.Group>
       
-      <T.Mesh castShadow receiveShadow position={[0, 0.15, 0]}>
+    <T.Mesh castShadow receiveShadow position={[0, 0.15, 0]}>
       <T.BoxGeometry args={[0.5, 0.3, 0.6]} />
       <T.MeshStandardMaterial color="#2563eb" roughness={0.4} metalness={0.2} />
     </T.Mesh>
@@ -242,5 +308,5 @@
         {$robotStorage}
       </div>
     </HTML>
-    </RigidBody>
+  </RigidBody>
 </T.Group>

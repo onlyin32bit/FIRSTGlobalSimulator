@@ -19,12 +19,24 @@
   
   let lastIntakeTime = 0;
   let lastShootTime = 0;
+
+  // Lightweight PU foam: some rebound, but far less than a rubber ball.
+  const BALL_RESTITUTION = 0.4;
+  const BALL_FRICTION = 0.75;
+  const INTAKE_FORWARD_MIN = 0.08;
+  const INTAKE_FORWARD_MAX = 0.72;
+  const INTAKE_HALF_WIDTH = 0.34;
+  const INTAKE_MAX_HEIGHT = 0.5;
+  const INTAKE_PULL_SPEED = 1.5;
   
   function initPhysics() {
     // Clear existing
     rapierBodies.forEach(b => world.removeRigidBody(b));
     rapierBodies = [];
     ballStates = [];
+    visualSwallows.clear();
+    lastIntakeTime = 0;
+    lastShootTime = 0;
     robotStorage.set(0);
     ballsInPlay.set(ballsData.length);
     lastReportedInPlay = ballsData.length;
@@ -37,8 +49,8 @@
       .setCcdEnabled(!potatoMode);
       
     const colliderDesc = rapier.ColliderDesc.ball(0.05)
-      .setRestitution(0.8)
-      .setFriction(1.0)
+      .setRestitution(BALL_RESTITUTION)
+      .setFriction(BALL_FRICTION)
       .setMass(0.062);
       
     ballsData.forEach((ball: any) => {
@@ -76,39 +88,82 @@
     if (rState.isIntakeActive && storage < specs.capacity) {
       lastIntakeTime += delta;
       const intakeInterval = 1.0 / specs.intakeRate;
-      
-      const captureRadiusSq = 0.40 * 0.40;
+      const rightX = -rState.forward.z;
+      const rightZ = rState.forward.x;
+      let nearestBallIndex = -1;
+      let nearestBallScore = Number.POSITIVE_INFINITY;
 
       for (let i = 0; i < rapierBodies.length; i++) {
         if (ballStates[i] === 'active') {
-          const bPos = rapierBodies[i].translation();
+          const body = rapierBodies[i];
+          const bPos = body.translation();
           const dx = bPos.x - rState.pos.x;
           const dz = bPos.z - rState.pos.z;
-          const distSq = dx*dx + dz*dz;
           const dy = Math.abs(bPos.y - rState.pos.y);
-          
-          // Dot product to ensure ball is in FRONT of the robot
-          const dot = (dx * rState.forward.x) + (dz * rState.forward.z);
-          
-          if (dy < 0.6 && distSq < captureRadiusSq && dot > 0.1) {
-            if (lastIntakeTime >= intakeInterval) {
-              // Begin visually swallowing!
-              ballStates[i] = 'swallowing';
-              
-              // Store visual position for animation
-              visualSwallows.set(i, { x: bPos.x, y: bPos.y, z: bPos.z });
-              
-              // Instantly teleport physics body underground to prevent drift/collisions
-              rapierBodies[i].setTranslation(new rapier.Vector3(0, -100, 0), true);
-              rapierBodies[i].setLinvel(new rapier.Vector3(0, 0, 0), true);
-              rapierBodies[i].setAngvel(new rapier.Vector3(0, 0, 0), true);
-              
-              storage++;
-              storageChanged = true;
-              lastIntakeTime = 0;
-            }
+          const forwardDistance =
+            dx * rState.forward.x + dz * rState.forward.z;
+          const lateralDistance = Math.abs(dx * rightX + dz * rightZ);
+
+          const insideIntakeFunnel =
+            dy < INTAKE_MAX_HEIGHT &&
+            forwardDistance > INTAKE_FORWARD_MIN &&
+            forwardDistance < INTAKE_FORWARD_MAX &&
+            lateralDistance < INTAKE_HALF_WIDTH;
+
+          if (!insideIntakeFunnel) continue;
+
+          // Hold the ball at the roller while the intake-rate cooldown runs.
+          const mouthX = rState.pos.x + rState.forward.x * 0.3;
+          const mouthZ = rState.pos.z + rState.forward.z * 0.3;
+          const pullX = mouthX - bPos.x;
+          const pullZ = mouthZ - bPos.z;
+          const pullLength = Math.hypot(pullX, pullZ);
+
+          if (pullLength > 0.001) {
+            const velocity = body.linvel();
+            const blend = Math.min(1, delta * 12);
+            const targetVx =
+              rState.vel.x + (pullX / pullLength) * INTAKE_PULL_SPEED;
+            const targetVz =
+              rState.vel.z + (pullZ / pullLength) * INTAKE_PULL_SPEED;
+            body.setLinvel(
+              new rapier.Vector3(
+                velocity.x + (targetVx - velocity.x) * blend,
+                velocity.y,
+                velocity.z + (targetVz - velocity.z) * blend
+              ),
+              true
+            );
+          }
+
+          const score =
+            Math.abs(forwardDistance - 0.3) + lateralDistance * 1.5;
+          if (score < nearestBallScore) {
+            nearestBallScore = score;
+            nearestBallIndex = i;
           }
         }
+      }
+
+      if (nearestBallIndex >= 0 && lastIntakeTime >= intakeInterval) {
+        const body = rapierBodies[nearestBallIndex];
+        const bPos = body.translation();
+
+        ballStates[nearestBallIndex] = 'swallowing';
+        visualSwallows.set(nearestBallIndex, {
+          x: bPos.x,
+          y: bPos.y,
+          z: bPos.z
+        });
+
+        // Remove it from physics while the swallowing animation completes.
+        body.setTranslation(new rapier.Vector3(0, -100, 0), true);
+        body.setLinvel(new rapier.Vector3(0, 0, 0), true);
+        body.setAngvel(new rapier.Vector3(0, 0, 0), true);
+
+        storage++;
+        storageChanged = true;
+        lastIntakeTime = 0;
       }
     } else {
       lastIntakeTime = 0;
