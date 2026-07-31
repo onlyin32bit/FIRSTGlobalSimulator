@@ -8,6 +8,8 @@
   import Robot from './Robot.svelte'
   import Balls from './Balls.svelte'
 
+  import { resetScores } from '$lib/scoreStore'
+
   let { resetTrigger = 0, fov = 75, speed = 10, potatoMode = false } = $props();
   let fieldAnchors = $state<Record<string, [number, number, number]>>({});
   let readyToSpawn = $state(false);
@@ -54,7 +56,7 @@
       z: Math.sin(angle) * r,
       color: '#f97316' // All balls are now orange
     };
-  });
+  }));
 
   // --- Camera Controls ---
   const keys = { w: false, a: false, s: false, d: false, space: false, shift: false };

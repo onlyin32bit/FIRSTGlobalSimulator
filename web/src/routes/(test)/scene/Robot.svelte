@@ -8,7 +8,7 @@
   import { robotTelemetry } from './telemetry'
   import { robotPhysicsState, robotStorage } from './stores'
 
-  let { resetTrigger = 0 } = $props();
+  let { resetTrigger = 0, spawnPos = [0, 0.225, 3.15] } = $props();
 
   let rigidBody: RapierRigidBody | undefined = $state();
   

@@ -20,12 +20,15 @@
     SkeletonHelper,
     Vector2,
     Vector3,
-    WebGLRenderer
+    WebGLRenderer,
+    SphereGeometry,
+    MeshStandardMaterial,
+    Euler
   } from 'three'
-  import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
   import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
   import { VertexNormalsHelper } from 'three/examples/jsm/helpers/VertexNormalsHelper.js'
   import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
+  import RAPIER from '@dimforge/rapier3d-compat'
   import type {
     RenderStats,
     RendererDetails,
@@ -75,7 +78,6 @@
   let renderer: WebGLRenderer
   let scene: Scene
   let camera: PerspectiveCamera
-  let controls: OrbitControls
   let model: Object3D | null = null
   let modelFrame: Group
   let grid: GridHelper
@@ -90,6 +92,53 @@
   let resizeObserver: ResizeObserver
   let reportTimer = 0
   let modelSize = new Vector3(1, 1, 1)
+
+  const keys = { w: false, a: false, s: false, d: false, ' ': false, shift: false }
+  let physicsWorld: any = null
+  let dynamicBodies: { id: number, mesh: Mesh, body: any, lastPos: Vector3, radius: number }[] = []
+  let staticBodies: any[] = []
+  let ballCount = 0
+
+  function shootBall() {
+    if (!physicsWorld || !scene || !model) return
+    const radius = 0.05 // exactly 10cm diameter
+    const geometry = new SphereGeometry(radius, 16, 16)
+    const material = new MeshStandardMaterial({ 
+      color: 0xff3300, 
+      emissive: 0xff3300,
+      emissiveIntensity: 0.4,
+      roughness: 0.4, 
+      metalness: 0.1 
+    })
+    const mesh = new Mesh(geometry, material)
+    
+    const direction = new Vector3(0, 0, -1).applyQuaternion(camera.quaternion)
+    
+    // Prevent spawning inside walls
+    const raycaster = new Raycaster(camera.position, direction, 0, 0.3)
+    const hits = raycaster.intersectObject(model, true)
+    let spawnDist = 0.2
+    if (hits.length > 0) spawnDist = Math.max(0.01, hits[0].distance - radius - 0.02)
+    
+    const spawnPos = camera.position.clone().addScaledVector(direction, spawnDist)
+    
+    mesh.position.copy(spawnPos)
+    scene.add(mesh)
+
+    const rigidBodyDesc = RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(spawnPos.x, spawnPos.y, spawnPos.z)
+      .setCcdEnabled(true)
+      
+    const body = physicsWorld.createRigidBody(rigidBodyDesc)
+    const colliderDesc = RAPIER.ColliderDesc.ball(radius).setRestitution(0.7)
+    physicsWorld.createCollider(colliderDesc, body)
+
+    direction.multiplyScalar(8) // Slower speed (8 m/s) to track it easily
+    body.applyImpulse(direction, true)
+
+    ballCount++
+    dynamicBodies.push({ id: ballCount, mesh, body, lastPos: mesh.position.clone(), radius })
+  }
 
   function materialList(material: Material | Material[]): Material[] {
     return Array.isArray(material) ? material : [material]
@@ -275,8 +324,7 @@
     camera.near = Math.max(radius / 1000, 0.001)
     camera.far = Math.max(radius * 100, 100)
     camera.updateProjectionMatrix()
-    controls.target.copy(center)
-    controls.update()
+    camera.lookAt(center)
   }
 
   function setView(direction: 'top' | 'front' | 'right') {
@@ -293,25 +341,59 @@
           : new Vector3(distance, 0, 0)
     camera.position.copy(center).add(offset)
     camera.up.set(0, 1, 0)
-    controls.target.copy(center)
-    controls.update()
+    camera.lookAt(center)
   }
 
-  function handlePointer(event: PointerEvent) {
-    if (!model) return
-    const bounds = canvas.getBoundingClientRect()
-    const pointer = new Vector2(
-      ((event.clientX - bounds.left) / bounds.width) * 2 - 1,
-      -((event.clientY - bounds.top) / bounds.height) * 2 + 1
-    )
-    const raycaster = new Raycaster()
-    raycaster.setFromCamera(pointer, camera)
-    const hit = raycaster.intersectObject(model, true)[0]
-    onselect(hit?.object.uuid ?? null)
+  let isDragging = false
+  let pointerDownPos = new Vector2()
+  let previousMouse = new Vector2()
+
+  function onPointerDown(event: PointerEvent) {
+    if (event.button !== 0 && event.button !== 2) return
+    isDragging = true
+    previousMouse.set(event.clientX, event.clientY)
+    pointerDownPos.set(event.clientX, event.clientY)
+    canvas.setPointerCapture(event.pointerId)
+  }
+
+  function onPointerMove(event: PointerEvent) {
+    if (!isDragging) return
+    const deltaX = event.clientX - previousMouse.x
+    const deltaY = event.clientY - previousMouse.y
+    previousMouse.set(event.clientX, event.clientY)
+
+    const euler = new Euler(0, 0, 0, 'YXZ')
+    euler.setFromQuaternion(camera.quaternion)
+    euler.y -= deltaX * 0.005
+    euler.x -= deltaY * 0.005
+    euler.x = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, euler.x))
+    camera.quaternion.setFromEuler(euler)
+  }
+
+  function onPointerUp(event: PointerEvent) {
+    if (!isDragging) return
+    isDragging = false
+    canvas.releasePointerCapture(event.pointerId)
+    const dist = pointerDownPos.distanceTo(new Vector2(event.clientX, event.clientY))
+    if (dist < 5 && model) {
+      const bounds = canvas.getBoundingClientRect()
+      const pointer = new Vector2(
+        ((event.clientX - bounds.left) / bounds.width) * 2 - 1,
+        -((event.clientY - bounds.top) / bounds.height) * 2 + 1
+      )
+      const raycaster = new Raycaster()
+      raycaster.setFromCamera(pointer, camera)
+      const hit = raycaster.intersectObject(model, true)[0]
+      onselect(hit?.object.uuid ?? null)
+    }
   }
 
   async function loadModel() {
     try {
+      await RAPIER.init()
+      if (physicsWorld) physicsWorld.free()
+      physicsWorld = new RAPIER.World({ x: 0, y: -9.81, z: 0 })
+
       const loader = new GLTFLoader()
       loader.setMeshoptDecoder(MeshoptDecoder)
       const gltf = await loader.parseAsync(buffer.slice(0), '')
@@ -334,6 +416,28 @@
       rebuildNormals()
       rebuildSkeletons()
       frameObject()
+
+      model.traverse((object) => {
+        if (object instanceof Mesh && !(object instanceof InstancedMesh)) {
+          const geometry = object.geometry.clone()
+          geometry.applyMatrix4(object.matrixWorld)
+          const vertices = geometry.attributes.position.array
+          let indices = geometry.index ? geometry.index.array : null
+          
+          if (!indices) {
+             indices = new Uint32Array(vertices.length / 3)
+             for (let i = 0; i < indices.length; i++) indices[i] = i
+          }
+
+          const rigidBodyDesc = RAPIER.RigidBodyDesc.fixed()
+          const rigidBody = physicsWorld.createRigidBody(rigidBodyDesc)
+          
+          const colliderDesc = RAPIER.ColliderDesc.trimesh(vertices as any, indices as any)
+          physicsWorld.createCollider(colliderDesc, rigidBody)
+          staticBodies.push(rigidBody)
+        }
+      })
+
       onloaded(buildReport())
     } catch (error) {
       onerror(error instanceof Error ? error.message : String(error))
@@ -387,9 +491,6 @@
     camera = new PerspectiveCamera(50, 1, 0.01, 10000)
     renderer = new WebGLRenderer({ canvas, antialias: true, alpha: false })
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
-    controls = new OrbitControls(camera, canvas)
-    controls.enableDamping = true
-    controls.dampingFactor = 0.08
 
     modelFrame = new Group()
     normalsGroup = new Group()
@@ -411,14 +512,86 @@
       camera.updateProjectionMatrix()
     })
     resizeObserver.observe(canvas)
-    canvas.addEventListener('pointerup', handlePointer)
+    canvas.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp)
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      
+      const key = e.key.toLowerCase()
+      if (key in keys) {
+        keys[key as keyof typeof keys] = true
+        if (key === ' ' || key === 'shift') e.preventDefault()
+      }
+      if (key === 'f') shootBall()
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase()
+      if (key in keys) keys[key as keyof typeof keys] = false
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
 
     let previous = performance.now()
     const render = (time: number) => {
       const delta = Math.min((time - previous) / 1000, 0.1)
       previous = time
       if (mixer && animationPlaying) mixer.update(delta)
-      controls.update()
+
+      const move = new Vector3()
+      if (keys.w) move.z += 1
+      if (keys.s) move.z -= 1
+      if (keys.a) move.x -= 1
+      if (keys.d) move.x += 1
+      if (keys[' ']) move.y += 1
+      if (keys.shift) move.y -= 1
+      
+      if (move.lengthSq() > 0) {
+        const moveSpeed = Math.max(modelSize.length() * 0.5, 5) * delta
+        move.normalize().multiplyScalar(moveSpeed)
+        
+        const forward = new Vector3(0, 0, -1).applyQuaternion(camera.quaternion)
+        const right = new Vector3(1, 0, 0).applyQuaternion(camera.quaternion)
+        const up = new Vector3(0, 1, 0)
+        
+        const finalMove = new Vector3()
+        finalMove.addScaledVector(forward, move.z)
+        finalMove.addScaledVector(right, move.x)
+        finalMove.addScaledVector(up, move.y)
+        
+        camera.position.add(finalMove)
+      }
+
+      if (physicsWorld) {
+        physicsWorld.step()
+        const raycaster = new Raycaster()
+        for (const b of dynamicBodies) {
+          const t = b.body.translation()
+          const q = b.body.rotation()
+          
+          const from = b.lastPos
+          const to = new Vector3(t.x, t.y, t.z)
+          const dist = from.distanceTo(to)
+          
+          if (dist > 0.0001 && model) {
+             const dir = to.clone().sub(from).normalize()
+             raycaster.set(from, dir)
+             raycaster.far = dist + b.radius
+             const hits = raycaster.intersectObject(model, true)
+             if (hits.length > 0) {
+                const hit = hits[0]
+                console.log(`[Ball ${b.id}] hit mesh "${hit.object.name}" at face index ${hit.faceIndex}`)
+             }
+          }
+          
+          b.mesh.position.copy(to)
+          b.mesh.quaternion.set(q.x, q.y, q.z, q.w)
+          b.lastPos.copy(to)
+        }
+      }
+
       selectionHelper?.update()
       boundsHelper?.update()
       renderer.render(scene, camera)
@@ -442,8 +615,11 @@
     return () => {
       cancelAnimationFrame(frameHandle)
       resizeObserver.disconnect()
-      canvas.removeEventListener('pointerup', handlePointer)
-      controls.dispose()
+      canvas.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
       model?.traverse((object) => {
         if (!(object instanceof Mesh)) return
         object.geometry.dispose()
@@ -461,9 +637,10 @@
     <button class="viewer-button" onclick={() => setView('top')}>Top</button>
     <button class="viewer-button" onclick={() => setView('front')}>Front</button>
     <button class="viewer-button" onclick={() => setView('right')}>Right</button>
+    <button class="viewer-button" onclick={shootBall}>Shoot Ball (F)</button>
   </div>
   <div class="pointer-events-none absolute bottom-3 left-3 rounded-md bg-black/55 px-2 py-1 text-[11px] text-slate-300">
-    Drag: orbit · Wheel: zoom · Right drag: pan · Click: inspect
+    Drag: look around · WASD/Space/Shift: move · Click: inspect · F: shoot
   </div>
 </div>
 
