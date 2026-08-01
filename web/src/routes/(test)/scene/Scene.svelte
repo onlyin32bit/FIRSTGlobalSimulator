@@ -7,6 +7,7 @@
   import { onMount } from 'svelte'
   import Robot from './Robot.svelte'
   import Balls from './Balls.svelte'
+  import Field from '$lib/components/Field.svelte'
 
   import { resetScores } from '$lib/scoreStore'
 
@@ -18,10 +19,20 @@
     if (resetTrigger > 0) resetScores();
   });
 
+  // Delay robot and ball spawning by 3 seconds so the field physics colliders
+  // have time to load and settle before anything falls onto them.
+  const SPAWN_DELAY_MS = 3000;
 
-  const SPAWN_HEIGHT_EXTRA = 3;
+  onMount(() => {
+    const timer = setTimeout(() => {
+      readyToSpawn = true;
+    }, SPAWN_DELAY_MS);
+    return () => clearTimeout(timer);
+  });
 
-  const ROBOT_SPAWN_Y = 0.65;
+  // How high above the field surface to spawn. The field sits at roughly y≈0.
+  // An extra 1.5 m of clearance ensures objects drop onto the field cleanly.
+  const ROBOT_SPAWN_Y = 1.5;
 
   const PLAYER_SPAWN_OFFSET: [number, number] = [
     -4,
@@ -38,13 +49,15 @@
     fieldAnchors['blueZone2'] || [0, 0, 0]
   );
 
+  // Balls spawn at y=1.5 (base) + up to 1.5 m of stagger so they don't all
+  // land simultaneously, giving the field colliders time to receive them.
   const balls = $derived(Array.from({ length: 500 }).map((_, i) => {
     const angle = Math.random() * Math.PI * 2;
     const r = Math.sqrt(Math.random()) * 2.5;
     return {
       id: i,
       x: Math.cos(angle) * r,
-      y: 0.1 + Math.random() * 1.5,
+      y: 1.5 + Math.random() * 1.5,
       z: Math.sin(angle) * r,
       color: '#f97316'
     };
@@ -145,7 +158,12 @@
 />
 
 <World framerate={potatoMode ? 30 : 60}>
-  <Robot {resetTrigger} />
+  {#if readyToSpawn}
+    <Robot {resetTrigger} spawnPos={robotSpawnPos} />
+    <!-- PU Foam Balls -->
+    <Balls ballsData={balls} {potatoMode} {resetTrigger} />
+  {/if}
+  <Field bind:anchors={fieldAnchors} />
 
   <!-- EVA Foam Ground (FTC Tiles) -->
   <CollisionGroups groups={[0]}>
@@ -218,6 +236,4 @@
     </RigidBody>
   </CollisionGroups>
 
-  <!-- PU Foam Balls -->
-  <Balls ballsData={balls} {potatoMode} {resetTrigger} />
 </World>

@@ -4,127 +4,187 @@
   import { RigidBody, Collider } from '@threlte/rapier'
   import {
     Euler,
+    Matrix4,
     Mesh,
     MeshStandardMaterial,
     Object3D,
-    Quaternion
+    Quaternion,
+    Vector3
   } from 'three'
   import { onMount } from 'svelte'
-  import { scores } from '$lib/scoreStore'
 
   type Vector3Tuple = [number, number, number]
-  type QuaternionTuple = [number, number, number, number]
-  type ScoreKey = 'blueSU' | 'redSU' | 'blueFS' | 'redFS' | 'EXT'
 
-  interface PhysicsMaterial {
+  interface ParsedCollider {
+    id: string
+    position: Vector3Tuple
+    rotation: Vector3Tuple
+    vertices: Float32Array
+    indices: Uint32Array
     friction: number
     restitution: number
   }
 
-  interface MaterialRule {
-    idIncludes: string
-    material: string
-  }
-
-  interface CuboidColliderDefinition {
-    id: string
-    shape: 'cuboid'
-    position: Vector3Tuple
-    rotation: QuaternionTuple
-    halfExtents: Vector3Tuple
-    material?: string
-    friction?: number
-    restitution?: number
-  }
-
-  interface CylinderColliderDefinition {
-    id: string
-    shape: 'cylinder'
-    position: Vector3Tuple
-    rotation: QuaternionTuple
-    halfHeight: number
-    radius: number
-    material?: string
-    friction?: number
-    restitution?: number
-  }
-
-  interface PhysicsDefinition {
-    schemaVersion: number
-    coordinateSpace: 'field-local'
-    defaultMaterial?: string
-    materials?: Record<string, PhysicsMaterial>
-    materialRules?: MaterialRule[]
-    colliders: Array<CuboidColliderDefinition | CylinderColliderDefinition>
-  }
-
-  interface ScoringZoneDefinition {
-    id: string
-    scoreKey: ScoreKey
-    shape: 'cuboid'
-    position: Vector3Tuple
-    halfExtents: Vector3Tuple
-  }
-
-  interface SemanticsDefinition {
-    schemaVersion: number
-    fieldTransform: {
-      position: Vector3Tuple
-    }
+  interface ParsedSemantics {
     anchors: Record<string, Vector3Tuple>
-    scoringZones: ScoringZoneDefinition[]
+    zones: Array<{
+      id: string
+      position: Vector3Tuple
+      rotation: Vector3Tuple
+      vertices: Float32Array
+      indices: Uint32Array
+    }>
   }
 
   let { anchors = $bindable({}) } = $props()
 
   const GAME_ASSET_ROOT = '/games/fgc-2026'
-  const DEFAULT_FIELD_POSITION: Vector3Tuple = [-2, -5, 0]
   const SUPPRESSOR_OPACITY = 0.35
   const meshoptDecoder = useMeshopt()
   const visualGltf = useGltf(`${GAME_ASSET_ROOT}/field.glb`, { meshoptDecoder })
   const configuredScenes = new WeakSet<Object3D>()
 
-  let physics = $state<PhysicsDefinition>()
-  let semantics = $state<SemanticsDefinition>()
-  let fieldPosition = $derived(semantics?.fieldTransform.position ?? DEFAULT_FIELD_POSITION)
+  let colliders = $state<ParsedCollider[]>([])
+  let semantics = $state<ParsedSemantics>({ anchors: {}, zones: [] })
+
+  function parseAssimpPhysics(data: any): ParsedCollider[] {
+    if (!data || !data.rootnode || !data.rootnode.children || !data.meshes) return []
+
+    const result: ParsedCollider[] = []
+
+    for (const c of data.rootnode.children) {
+      if (!c.meshes || c.meshes.length === 0) continue
+      const m = data.meshes[c.meshes[0]]
+      if (!m || !m.vertices || !m.faces) continue
+
+      const mat = new Matrix4().fromArray(c.transformation).transpose()
+      const pos = new Vector3()
+      const quat = new Quaternion()
+      const scale = new Vector3()
+      mat.decompose(pos, quat, scale)
+
+      const euler = new Euler().setFromQuaternion(quat)
+
+      const rawVerts = m.vertices
+      const scaledVerts = new Float32Array(rawVerts.length)
+      for (let i = 0; i < rawVerts.length; i += 3) {
+        scaledVerts[i] = rawVerts[i] * scale.x
+        scaledVerts[i + 1] = rawVerts[i + 1] * scale.y
+        scaledVerts[i + 2] = rawVerts[i + 2] * scale.z
+      }
+
+      const indicesArr: number[] = []
+      for (const f of m.faces) {
+        if (Array.isArray(f) && f.length >= 3) {
+          indicesArr.push(f[0], f[1], f[2])
+          if (f.length === 4) {
+            indicesArr.push(f[0], f[2], f[3])
+          }
+        }
+      }
+
+      let friction = 0.45
+      let restitution = 0.05
+      if (c.name.includes('SU') || c.name.includes('polycarbonate')) {
+        friction = 0.35
+        restitution = 0.06
+      } else if (c.name.includes('floor') || c.name.includes('Tile')) {
+        friction = 0.8
+        restitution = 0.02
+      }
+
+      result.push({
+        id: c.name,
+        position: [pos.x, pos.y, pos.z],
+        rotation: [euler.x, euler.y, euler.z],
+        vertices: scaledVerts,
+        indices: new Uint32Array(indicesArr),
+        friction,
+        restitution
+      })
+    }
+
+    return result
+  }
+
+  function parseAssimpSemantics(data: any): ParsedSemantics {
+    const parsedAnchors: Record<string, Vector3Tuple> = {}
+    const parsedZones: ParsedSemantics['zones'] = []
+
+    if (!data || !data.rootnode || !data.rootnode.children) {
+      return { anchors: parsedAnchors, zones: parsedZones }
+    }
+
+    for (const c of data.rootnode.children) {
+      const mat = new Matrix4().fromArray(c.transformation).transpose()
+      const pos = new Vector3()
+      const quat = new Quaternion()
+      const scale = new Vector3()
+      mat.decompose(pos, quat, scale)
+
+      const euler = new Euler().setFromQuaternion(quat)
+      const posTuple: Vector3Tuple = [pos.x, pos.y, pos.z]
+
+      if (!c.meshes || c.meshes.length === 0) {
+        parsedAnchors[c.name] = posTuple
+      } else {
+        const m = data.meshes?.[c.meshes[0]]
+        if (m && m.vertices && m.faces) {
+          const rawVerts = m.vertices
+          const scaledVerts = new Float32Array(rawVerts.length)
+          for (let i = 0; i < rawVerts.length; i += 3) {
+            scaledVerts[i] = rawVerts[i] * scale.x
+            scaledVerts[i + 1] = rawVerts[i + 1] * scale.y
+            scaledVerts[i + 2] = rawVerts[i + 2] * scale.z
+          }
+          const indicesArr: number[] = []
+          for (const f of m.faces) {
+            if (Array.isArray(f) && f.length >= 3) {
+              indicesArr.push(f[0], f[1], f[2])
+              if (f.length === 4) {
+                indicesArr.push(f[0], f[2], f[3])
+              }
+            }
+          }
+          parsedZones.push({
+            id: c.name,
+            position: posTuple,
+            rotation: [euler.x, euler.y, euler.z],
+            vertices: scaledVerts,
+            indices: new Uint32Array(indicesArr)
+          })
+        }
+      }
+    }
+
+    return { anchors: parsedAnchors, zones: parsedZones }
+  }
 
   onMount(() => {
     let cancelled = false
 
-    async function loadJson<T>(fileName: string): Promise<T> {
+    async function loadJson(fileName: string) {
       const response = await fetch(`${GAME_ASSET_ROOT}/${fileName}`)
       if (!response.ok) {
         throw new Error(`Unable to load ${fileName}: ${response.status} ${response.statusText}`)
       }
-      return response.json() as Promise<T>
+      return response.json()
     }
 
     Promise.all([
-      loadJson<PhysicsDefinition>('field.physics.json'),
-      loadJson<SemanticsDefinition>('field.semantics.json')
-    ]).then(([loadedPhysics, loadedSemantics]) => {
+      loadJson('field.physics.json'),
+      loadJson('field.semantics.json')
+    ]).then(([physData, semData]) => {
       if (cancelled) return
-
-      physics = loadedPhysics
-      semantics = loadedSemantics
-      const [offsetX, offsetY, offsetZ] = loadedSemantics.fieldTransform.position
-      anchors = Object.fromEntries(
-        Object.entries(loadedSemantics.anchors).map(([name, [x, y, z]]) => [
-          name,
-          [x + offsetX, y + offsetY, z + offsetZ]
-        ])
-      )
+      colliders = parseAssimpPhysics(physData)
+      semantics = parseAssimpSemantics(semData)
+      anchors = semantics.anchors
     })
 
     return () => {
       cancelled = true
     }
   })
-
-  function quaternionToEuler([x, y, z, w]: QuaternionTuple): Vector3Tuple {
-    const euler = new Euler().setFromQuaternion(new Quaternion(x, y, z, w))
-    return [euler.x, euler.y, euler.z]
-  }
 
   function configureFieldVisual(scene: Object3D): Object3D {
     if (configuredScenes.has(scene)) return scene
@@ -225,63 +285,23 @@ diffuseColor.a *= mix(1.0, ${SUPPRESSOR_OPACITY.toFixed(2)}, transparentPanelMas
     configuredScenes.add(scene)
     return scene
   }
-
-  function resolveColliderMaterial(
-    collider: CuboidColliderDefinition | CylinderColliderDefinition
-  ): PhysicsMaterial {
-    const ruleMaterial = physics?.materialRules?.find((rule) =>
-      collider.id.includes(rule.idIncludes)
-    )?.material
-    const materialName = collider.material ?? ruleMaterial ?? physics?.defaultMaterial
-    const material = materialName ? physics?.materials?.[materialName] : undefined
-
-    return {
-      friction: collider.friction ?? material?.friction ?? 0.5,
-      restitution: collider.restitution ?? material?.restitution ?? 0
-    }
-  }
-
-  function handleScore(key: ScoreKey) {
-    scores.update((score) => ({ ...score, [key]: score[key] + 1 }))
-  }
 </script>
 
-<T.Group position={fieldPosition}>
+<T.Group>
+  <!-- Field Visual Model (field.glb) -->
   {#await visualGltf then gltf}
     <T is={configureFieldVisual(gltf.scene)} />
   {/await}
 
-  {#each physics?.colliders ?? [] as collider (collider.id)}
-    {@const contactMaterial = resolveColliderMaterial(collider)}
-    <T.Group position={collider.position} rotation={quaternionToEuler(collider.rotation)}>
-      <RigidBody type="fixed">
-        {#if collider.shape === 'cuboid'}
-          <Collider
-            shape="cuboid"
-            args={collider.halfExtents}
-            friction={contactMaterial.friction}
-            restitution={contactMaterial.restitution}
-          />
-        {:else}
-          <Collider
-            shape="cylinder"
-            args={[collider.halfHeight, collider.radius]}
-            friction={contactMaterial.friction}
-            restitution={contactMaterial.restitution}
-          />
-        {/if}
-      </RigidBody>
-    </T.Group>
-  {/each}
-
-  {#each semantics?.scoringZones ?? [] as zone (zone.id)}
-    <T.Group position={zone.position}>
+  <!-- Physics Colliders (field.physics.json) -->
+  {#each colliders as collider (collider.id)}
+    <T.Group position={collider.position} rotation={collider.rotation}>
       <RigidBody type="fixed">
         <Collider
-          shape="cuboid"
-          args={zone.halfExtents}
-          sensor
-          onsensorenter={() => handleScore(zone.scoreKey)}
+          shape="trimesh"
+          args={[collider.vertices, collider.indices]}
+          friction={collider.friction}
+          restitution={collider.restitution}
         />
       </RigidBody>
     </T.Group>

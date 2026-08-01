@@ -8,7 +8,7 @@
   import { robotTelemetry } from './telemetry'
   import { robotPhysicsState, robotStorage } from './stores'
 
-  let { resetTrigger = 0, spawnPos = [0, 0.225, 3.15] } = $props();
+  let { resetTrigger = 0, spawnPos = [0, 1.5, 3.15] } = $props();
 
   let rigidBody: RapierRigidBody | undefined = $state();
   
@@ -83,7 +83,7 @@
 
   $effect(() => {
     if (resetTrigger > 0 && rigidBody) {
-      rigidBody.setTranslation({ x: 0, y: 0.225, z: 3.15 }, true);
+      rigidBody.setTranslation({ x: 0, y: 1.5, z: 3.15 }, true);
       rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
       rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
       currentLinSpeed = 0;

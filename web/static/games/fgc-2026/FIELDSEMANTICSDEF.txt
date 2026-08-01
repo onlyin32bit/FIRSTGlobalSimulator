@@ -1,0 +1,33 @@
+Zones:
+"blueFSscore" = Blue alliance Fire Shield scoring zone
+"blueSUscore" = Blue alliance suppression unit scoring zone
+"blueZone2signal" = Blue alliance zone 2 signal zone
+"blueZone3signal" = Blue alliance zone 3 signal zone
+"EXTscore" = Extinguisher scoring zone
+"redFSscore" = Red alliance Fire Shield scoring zone
+"redSUscore" = Red alliance suppression unit scoring zone
+"redZone2signal" = Red alliance zone 2 signal zone
+"redZone3signal" = Red alliance zone 3 signal zone
+"blueDrivezone" = Blue alliance driver zone
+"blueHPzone" = Blue alliance Human Player zone
+"redDrivezone" = Red alliance driver zone
+"redHPzone" = Red alliance Human Player zone
+"redZone1" = Red brace Zone 1
+"redZone2" = Red brace Zone 2
+"redZone3" = Red brace Zone 3
+"blueZone1" = Blue brace Zone 1
+"blueZone2" = Blue brace Zone 2
+"blueZone3" = Blue brace Zone 3
+
+
+Anchors:
+"blueFSballspawn" = Ball spawn to return balls to the field from Blue Fire Shield
+"redFSballspawn" = Ball spawn to return balls to the field from Red Fire Shield
+"blueSpawn1" = Spawn position for Blue robot 1
+"blueSpawn2" = Spawn position for Blue robot 2
+"blueSpawn3" = Spawn position for Blue robot 3
+"redSpawn1" = Spawn position for Red robot 1
+"redSpawn2" = Spawn position for Red robot 2
+"redSpawn3" = Spawn position for Red robot 3
+"EXTballspawn" = Ball spawn position at the beginning of the match(in the Extinguisher)
+
