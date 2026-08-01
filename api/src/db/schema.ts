@@ -72,4 +72,18 @@ export const invitations = sqliteTable('invitations', {
   code: text('code').primaryKey(),
   used: integer('used', { mode: 'boolean' }).notNull().default(false),
   createdAt: integer('createdAt', { mode: 'timestamp' }).notNull(),
+  expiresAt: integer('expiresAt', { mode: 'timestamp' }),
+  revokedAt: integer('revokedAt', { mode: 'timestamp' }),
+  redeemedAt: integer('redeemedAt', { mode: 'timestamp' }),
+  redeemedByUserId: text('redeemedByUserId').references(() => user.id),
+});
+
+export const adminAuditLog = sqliteTable('admin_audit_log', {
+  id: text('id').primaryKey(),
+  actorUserId: text('actorUserId').notNull().references(() => user.id),
+  action: text('action').notNull(),
+  targetType: text('targetType').notNull(),
+  targetId: text('targetId').notNull(),
+  metadata: text('metadata'),
+  createdAt: integer('createdAt', { mode: 'timestamp' }).notNull(),
 });

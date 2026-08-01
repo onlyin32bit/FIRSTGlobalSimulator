@@ -2,10 +2,10 @@
   "name": "api",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "$npm_execpath run build && vite preview",
-    "deploy": "$npm_execpath run build && wrangler deploy",
+    "dev": "wrangler dev --config wrangler.jsonc --port 8787",
+    "build": "wrangler deploy --config wrangler.jsonc --dry-run --outdir dist",
+    "preview": "$npm_execpath run build && wrangler dev --config wrangler.jsonc --port 8787",
+    "deploy": "wrangler deploy --config wrangler.jsonc",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
   },
   "dependencies": {
