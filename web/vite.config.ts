@@ -1,3 +1,4 @@
+import { mdsvex } from 'mdsvex';
 import tailwindcss from '@tailwindcss/vite';
 import adapter from '@sveltejs/adapter-cloudflare';
 import { sveltekit } from '@sveltejs/kit/vite';
@@ -12,7 +13,10 @@ export default defineConfig({
 				runes: ({ filename }) =>
 					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
-			adapter: adapter()
+			adapter: adapter(),
+			preprocess: [mdsvex({ extensions: ['.svx', '.md'] })],
+			extensions: ['.svelte', '.svx', '.md']
 		})
-	]
+	],
+	server: { proxy: { '/api': { target: 'http://localhost:8787' } } }
 });

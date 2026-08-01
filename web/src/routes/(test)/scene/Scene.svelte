@@ -14,25 +14,19 @@
   let fieldAnchors = $state<Record<string, [number, number, number]>>({});
   let readyToSpawn = $state(false);
 
-  // Reset scores when scene resets
   $effect(() => {
     if (resetTrigger > 0) resetScores();
   });
 
 
-  // Extra height offset so robot/balls drop onto the field rather than clipping into it
   const SPAWN_HEIGHT_EXTRA = 3;
 
-  // The body origin is at the bottom of the chassis. The packed field's surface
-  // is around y=0.60, so this gives it a small, non-penetrating drop on spawn.
   const ROBOT_SPAWN_Y = 0.65;
 
-  // ── Tune these to move the player spawn point on the field ─────────────────
   const PLAYER_SPAWN_OFFSET: [number, number] = [
-    -4,   // X offset (positive = right)
-    1,   // Z offset (positive = forward)
+    -4,
+    1,
   ];
-  // ───────────────────────────────────────────────────────────────────────────
 
   let robotSpawnPos = $derived<[number, number, number]>([
     (fieldAnchors['blueSpawn1'] || [0, 0, 3.15])[0] + PLAYER_SPAWN_OFFSET[0],
@@ -44,17 +38,15 @@
     fieldAnchors['blueZone2'] || [0, 0, 0]
   );
 
-  // Generate 500 balls clustered in a pile near the center
   const balls = $derived(Array.from({ length: 500 }).map((_, i) => {
     const angle = Math.random() * Math.PI * 2;
-    // Concentrate them mostly within a 2.5-meter radius
     const r = Math.sqrt(Math.random()) * 2.5;
     return {
       id: i,
       x: Math.cos(angle) * r,
-      y: 0.1 + Math.random() * 1.5, // Stacked up to 1.5m high
+      y: 0.1 + Math.random() * 1.5,
       z: Math.sin(angle) * r,
-      color: '#f97316' // All balls are now orange
+      color: '#f97316'
     };
   }));
 
