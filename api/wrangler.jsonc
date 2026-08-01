@@ -2,5 +2,20 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "api",
   "compatibility_date": "2025-08-03",
-  "main": "./src/index.tsx"
+  "main": "./src/index.ts",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fgc26-local",
+      "database_id": "local",
+      "migrations_dir": "drizzle"
+    }
+  ],
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "vars": {
+    "WEB_ORIGIN": "http://localhost:5173",
+    "API_ORIGIN": "http://localhost:5173"
+  }
 }

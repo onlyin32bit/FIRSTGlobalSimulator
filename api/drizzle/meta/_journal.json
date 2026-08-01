@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1785485588723,
+      "tag": "0000_vengeful_trauma",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1785488129736,
+      "tag": "0001_tricky_emma_frost",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785488183078,
+      "tag": "0002_jittery_toxin",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1785490000000,
+      "tag": "0003_add_user_role",
+      "breakpoints": true
+    }
+  ]
+}
