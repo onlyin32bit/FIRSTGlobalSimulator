@@ -121,7 +121,7 @@ app.post('/api/auth/request-invite', async (c) => {
 })
 
 // Extract better-auth handler
-app.on(['POST', 'GET'], '/api/auth/**', (c) => {
+app.on(['POST', 'GET'], '/api/auth/*', (c) => {
   const auth = createAuth(c.env, c.req.url)
   return auth.handler(c.req.raw)
 })

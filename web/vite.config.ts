@@ -18,5 +18,5 @@ export default defineConfig({
 			extensions: ['.svelte', '.svx', '.md']
 		})
 	],
-	server: { proxy: { '/api': { target: 'http://localhost:8787' } } }
+	server: { proxy: { '/api': { target: 'http://localhost:8787', changeOrigin: true } } }
 });

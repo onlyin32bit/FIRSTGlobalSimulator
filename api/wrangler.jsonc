@@ -16,6 +16,6 @@
   ],
   "vars": {
     "WEB_ORIGIN": "http://localhost:5173",
-    "API_ORIGIN": "http://localhost:5173"
+    "API_ORIGIN": "http://localhost:8787"
   }
 }
