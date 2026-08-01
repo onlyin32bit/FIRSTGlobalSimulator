@@ -10,9 +10,11 @@
   import Field from '$lib/components/Field.svelte'
 
   import { resetScores } from '$lib/scoreStore'
+  import type { ZoneAABB } from '$lib/scoreStore'
 
   let { resetTrigger = 0, fov = 75, speed = 10, potatoMode = false } = $props();
   let fieldAnchors = $state<Record<string, [number, number, number]>>({});
+  let fieldZones = $state<ZoneAABB[]>([]);
   let readyToSpawn = $state(false);
 
   $effect(() => {
@@ -34,15 +36,12 @@
   // An extra 1.5 m of clearance ensures objects drop onto the field cleanly.
   const ROBOT_SPAWN_Y = 1.5;
 
-  const PLAYER_SPAWN_OFFSET: [number, number] = [
-    -4,
-    1,
-  ];
-
+  // Use the redSpawn1 anchor from the field semantics for the robot's XZ position.
+  // Fall back to a safe default until the field data is loaded.
   let robotSpawnPos = $derived<[number, number, number]>([
-    (fieldAnchors['blueSpawn1'] || [0, 0, 3.15])[0] + PLAYER_SPAWN_OFFSET[0],
+    (fieldAnchors['redSpawn1'] ?? [0, 0, 3.15])[0],
     ROBOT_SPAWN_Y,
-    (fieldAnchors['blueSpawn1'] || [0, 0, 3.15])[2] + PLAYER_SPAWN_OFFSET[1],
+    (fieldAnchors['redSpawn1'] ?? [0, 0, 3.15])[2],
   ]);
 
   let centerGoalPos = $derived(
@@ -161,9 +160,14 @@
   {#if readyToSpawn}
     <Robot {resetTrigger} spawnPos={robotSpawnPos} />
     <!-- PU Foam Balls -->
-    <Balls ballsData={balls} {potatoMode} {resetTrigger} />
+    <Balls
+      ballsData={balls}
+      {potatoMode}
+      {resetTrigger}
+      scoringZones={fieldZones}
+    />
   {/if}
-  <Field bind:anchors={fieldAnchors} />
+  <Field bind:anchors={fieldAnchors} bind:zones={fieldZones} />
 
   <!-- EVA Foam Ground (FTC Tiles) -->
   <CollisionGroups groups={[0]}>

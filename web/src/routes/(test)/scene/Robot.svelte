@@ -84,6 +84,8 @@
   $effect(() => {
     if (resetTrigger > 0 && rigidBody) {
       rigidBody.setTranslation({ x: 0, y: 1.5, z: 3.15 }, true);
+      // Restore the 90° right spawn rotation (quaternion for -π/2 around Y)
+      rigidBody.setRotation({ x: 0, y: -0.7071, z: 0, w: 0.7071 }, true);
       rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
       rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
       currentLinSpeed = 0;
@@ -146,13 +148,11 @@
     }
 
     if (gp) {
-      const rawForward = -gp.axes[1]; 
-      const leftStickTurn = -(gp.axes[0] ?? 0);
-      const rightStickTurn = -(gp.axes[2] ?? 0);
-      const rawTurn = Math.abs(leftStickTurn) >= Math.abs(rightStickTurn)
-        ? leftStickTurn
-        : rightStickTurn;
-      
+      // Left stick Y-axis (axes[1]) controls forward/back only.
+      // Right stick X-axis (axes[2]) controls rotation only.
+      const rawForward = -gp.axes[1];
+      const rawTurn = -(gp.axes[2] ?? 0);
+
       forwardInput = Math.abs(rawForward) > 0.1 ? rawForward : 0;
       turnInput = Math.abs(rawTurn) > 0.1 ? rawTurn : 0;
       
@@ -259,7 +259,7 @@
   });
 </script>
 
-<T.Group position={[spawnPos[0], spawnPos[1], spawnPos[2]]}>
+<T.Group position={[spawnPos[0], spawnPos[1], spawnPos[2]]} rotation={[0, -Math.PI / 2, 0]}>
   <RigidBody 
     bind:rigidBody 
     type="dynamic"

@@ -5,8 +5,15 @@
   import { onMount, onDestroy } from 'svelte';
   import { robotPhysicsState, robotSpecs, robotStorage, ballsInPlay } from './stores';
   import { get } from 'svelte/store';
+  import { addScore } from '$lib/scoreStore';
+  import type { ZoneAABB } from '$lib/scoreStore';
   
-  let { potatoMode = false, resetTrigger = 0, ballsData = [] } = $props();
+  let {
+    potatoMode = false,
+    resetTrigger = 0,
+    ballsData = [],
+    scoringZones = [] as ZoneAABB[],
+  } = $props();
   
   const { world, rapier } = useRapier();
   
@@ -14,6 +21,12 @@
   const dummyObj = new Object3D();
   let rapierBodies: any[] = [];
   let ballStates: string[] = [];
+  // Tracks which scoring zone each ball was inside last frame (by zone id or '').
+  // Used for enter-edge detection: score fires only on the transition from outside → inside.
+  let ballZoneState: string[] = [];
+  // The previous physics position is needed because a fast ball can cross a
+  // thin scoring zone between two rendered frames.
+  let previousBallPositions: Array<{ x: number; y: number; z: number }> = [];
   let visualSwallows = new Map();
   let lastReportedInPlay = 500;
   
@@ -28,12 +41,48 @@
   const INTAKE_HALF_WIDTH = 0.34;
   const INTAKE_MAX_HEIGHT = 0.5;
   const INTAKE_PULL_SPEED = 1.5;
+
+  function hasClearIntakePath(
+    mouth: { x: number; y: number; z: number },
+    ball: { x: number; y: number; z: number }
+  ) {
+    const dx = ball.x - mouth.x;
+    const dy = ball.y - mouth.y;
+    const dz = ball.z - mouth.z;
+    const distance = Math.hypot(dx, dy, dz);
+    if (distance < 0.001) return true;
+
+    const ray = new rapier.Ray(
+      new rapier.Vector3(mouth.x, mouth.y, mouth.z),
+      new rapier.Vector3(dx / distance, dy / distance, dz / distance)
+    );
+
+    // Dynamic bodies are the robot and balls. Ignore them so only fixed field
+    // geometry can block the intake path.
+    const hit = world.castRay(
+      ray,
+      distance,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (collider) => {
+        const parent = collider.parent();
+        return !parent || !parent.isDynamic();
+      }
+    );
+
+    return hit === null;
+  }
   
   function initPhysics() {
     // Clear existing
     rapierBodies.forEach(b => world.removeRigidBody(b));
     rapierBodies = [];
     ballStates = [];
+    ballZoneState = [];
+    previousBallPositions = [];
     visualSwallows.clear();
     lastIntakeTime = 0;
     lastShootTime = 0;
@@ -59,6 +108,8 @@
       world.createCollider(colliderDesc, body);
       rapierBodies.push(body);
       ballStates.push('active');
+      ballZoneState.push(''); // not inside any scoring zone yet
+      previousBallPositions.push({ x: ball.x, y: ball.y, z: ball.z });
     });
   }
 
@@ -112,11 +163,16 @@
 
           if (!insideIntakeFunnel) continue;
 
+          const mouth = {
+            x: rState.pos.x + rState.forward.x * 0.3,
+            y: rState.pos.y,
+            z: rState.pos.z + rState.forward.z * 0.3
+          };
+          if (!hasClearIntakePath(mouth, bPos)) continue;
+
           // Hold the ball at the roller while the intake-rate cooldown runs.
-          const mouthX = rState.pos.x + rState.forward.x * 0.3;
-          const mouthZ = rState.pos.z + rState.forward.z * 0.3;
-          const pullX = mouthX - bPos.x;
-          const pullZ = mouthZ - bPos.z;
+          const pullX = mouth.x - bPos.x;
+          const pullZ = mouth.z - bPos.z;
           const pullLength = Math.hypot(pullX, pullZ);
 
           if (pullLength > 0.001) {
@@ -243,6 +299,9 @@
           const outZ = rState.pos.z - rState.forward.z * 0.4 + rightZ * offsetMag + rState.forward.z * timeStagger;
           
           rapierBodies[i].setTranslation(new rapier.Vector3(outX, outY, outZ), true);
+          // Do not sweep from the ball's old stored position when it is shot.
+          previousBallPositions[i] = { x: outX, y: outY, z: outZ };
+          ballZoneState[i] = '';
           
           // Calculate velocity trajectory with entropy (randomness)
           const verticalVariance = (Math.random() - 0.5) * 4.0;
@@ -284,6 +343,86 @@
 
     if (storageChanged) {
       robotStorage.set(storage);
+    }
+
+    // --- ZONE SCORING DETECTION ---
+    // Only run when scoring zones have been loaded from the field semantics.
+    // For each active ball, test both its current position and the segment
+    // travelled since the previous frame. The zones are thin, so checking
+    // only the current centre under-counts fast balls that tunnel through.
+    if (scoringZones.length > 0) {
+      for (let i = 0; i < rapierBodies.length; i++) {
+        const pos = rapierBodies[i].translation();
+        if (ballStates[i] !== 'active') {
+          previousBallPositions[i] = { x: pos.x, y: pos.y, z: pos.z };
+          ballZoneState[i] = '';
+          continue;
+        }
+
+        const previous = previousBallPositions[i] ?? { x: pos.x, y: pos.y, z: pos.z };
+        let hitZone = '';
+
+        for (const zone of scoringZones) {
+          const insideNow =
+            pos.x >= zone.min[0] && pos.x <= zone.max[0] &&
+            pos.y >= zone.min[1] && pos.y <= zone.max[1] &&
+            pos.z >= zone.min[2] && pos.z <= zone.max[2];
+
+          let entry = 0;
+          let exit = 1;
+          const starts = [previous.x, previous.y, previous.z];
+          const deltas = [pos.x - previous.x, pos.y - previous.y, pos.z - previous.z];
+          let crossedZone = true;
+
+          for (let axis = 0; axis < 3; axis++) {
+            const min = zone.min[axis];
+            const max = zone.max[axis];
+            const start = starts[axis];
+            const delta = deltas[axis];
+            if (Math.abs(delta) < 1e-8) {
+              if (start < min || start > max) crossedZone = false;
+              continue;
+            }
+            let near = (min - start) / delta;
+            let far = (max - start) / delta;
+            if (near > far) [near, far] = [far, near];
+            entry = Math.max(entry, near);
+            exit = Math.min(exit, far);
+            if (entry > exit) crossedZone = false;
+          }
+
+          if (insideNow) hitZone = zone.id;
+          if ((insideNow || crossedZone) && ballZoneState[i] !== zone.id) {
+            addScore(zone.id);
+
+            // Balls are consumed when they enter either Fire Shield.
+            if (zone.id === 'blueFSscore' || zone.id === 'redFSscore') {
+              const removedPosition = { x: 0, y: -100, z: 0 };
+              ballStates[i] = 'scored';
+              rapierBodies[i].setTranslation(
+                new rapier.Vector3(removedPosition.x, removedPosition.y, removedPosition.z),
+                true
+              );
+              rapierBodies[i].setLinvel(new rapier.Vector3(0, 0, 0), true);
+              rapierBodies[i].setAngvel(new rapier.Vector3(0, 0, 0), true);
+              previousBallPositions[i] = removedPosition;
+              ballZoneState[i] = '';
+              break;
+            }
+          }
+        }
+
+        ballZoneState[i] = hitZone;
+        previousBallPositions[i] = { x: pos.x, y: pos.y, z: pos.z };
+      }
+    } else {
+      // Keep the baseline current while field semantics are still loading.
+      // Otherwise the first scoring frame could sweep from the spawn point.
+      for (let i = 0; i < rapierBodies.length; i++) {
+        const pos = rapierBodies[i].translation();
+        previousBallPositions[i] = { x: pos.x, y: pos.y, z: pos.z };
+        ballZoneState[i] = '';
+      }
     }
     
     let currentInPlay = 0;

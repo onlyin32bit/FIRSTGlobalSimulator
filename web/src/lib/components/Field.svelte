@@ -12,6 +12,7 @@
     Vector3
   } from 'three'
   import { onMount } from 'svelte'
+  import type { ZoneAABB } from '$lib/scoreStore'
 
   type Vector3Tuple = [number, number, number]
 
@@ -36,7 +37,7 @@
     }>
   }
 
-  let { anchors = $bindable({}) } = $props()
+  let { anchors = $bindable({}), zones = $bindable<ZoneAABB[]>([]) } = $props()
 
   const GAME_ASSET_ROOT = '/games/fgc-2026'
   const SUPPRESSOR_OPACITY = 0.35
@@ -179,6 +180,48 @@
       colliders = parseAssimpPhysics(physData)
       semantics = parseAssimpSemantics(semData)
       anchors = semantics.anchors
+
+      // The 5 zone IDs that affect the scoreboard (from FIELDSEMANTICSDEF.txt)
+      const SCORING_ZONE_IDS = new Set([
+        'blueSUscore', 'redSUscore',
+        'blueFSscore', 'redFSscore',
+        'EXTscore',
+      ])
+
+      // Compute an AABB for every scoring zone from its local vertices, correctly
+      // applying the zone's full rotation so tilted/angled zones are accurate.
+      zones = semantics.zones
+        .filter((zone) => SCORING_ZONE_IDS.has(zone.id))
+        .map((zone) => {
+        const verts = zone.vertices
+        let minX = Infinity, minY = Infinity, minZ = Infinity
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+
+        const [px, py, pz] = zone.position
+        const [rx, ry, rz] = zone.rotation
+
+        // Rebuild the quaternion from the Euler angles stored by parseAssimpSemantics
+        const q = new Quaternion().setFromEuler(new Euler(rx, ry, rz))
+        const tmp = new Vector3()
+
+        for (let i = 0; i < verts.length; i += 3) {
+          // Vertices are already scaled; apply rotation then translate to world space
+          tmp.set(verts[i], verts[i + 1], verts[i + 2])
+          tmp.applyQuaternion(q)
+          const wx = tmp.x + px
+          const wy = tmp.y + py
+          const wz = tmp.z + pz
+          if (wx < minX) minX = wx; if (wx > maxX) maxX = wx
+          if (wy < minY) minY = wy; if (wy > maxY) maxY = wy
+          if (wz < minZ) minZ = wz; if (wz > maxZ) maxZ = wz
+        }
+
+        return {
+          id: zone.id,
+          min: [minX, minY, minZ] as [number, number, number],
+          max: [maxX, maxY, maxZ] as [number, number, number],
+        }
+      })
     })
 
     return () => {
