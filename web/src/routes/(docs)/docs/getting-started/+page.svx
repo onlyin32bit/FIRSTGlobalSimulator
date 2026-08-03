@@ -1,0 +1,32 @@
+---
+title: Getting started
+description: Get an invitation, create an account, and open the dashboard.
+---
+
+# Getting started
+
+The FIRST Global Simulator uses invitation-only accounts so administrators can gradually grow access and support participants.
+
+## Request access
+
+If you do not already have an invitation code, select **Request Invite** on the [home page](/). Share your name, team or organization, and email address so the Team Vietnam maintainers can follow up.
+
+An administrator may also send a code directly. Invitation codes are one-time use, so keep yours private until you are ready to register.
+
+## Create your account
+
+Open [Sign in](/auth) and select **Register**. Enter your name, team, email, password, and invitation code.
+
+After a successful registration, the simulator signs you in and sends you to the dashboard. If you tried to open a protected page first, you return to that page after sign-in.
+
+> If a code is rejected, check its six characters carefully. A code may already have been redeemed, revoked, or expired. Ask the person who issued it for a replacement if needed.
+
+## Open the dashboard
+
+The [dashboard](/dashboard) is the starting point for the simulator experience. From there you can:
+
+- create a FGC 2026 match lobby;
+- open the offline sandbox;
+- enter the [Robot Builder](/robot) to create a robot before future match play.
+
+Use **Sign out** in the protected-page header when you finish on a shared device.

@@ -1,0 +1,30 @@
+---
+title: Robot builder
+description: Configure and save a robot for your simulator account.
+---
+
+# Robot builder
+
+The [Robot Builder](/robot) lets you assemble a basic FGC 2026 robot configuration and save it to your account.
+
+## Configure a build
+
+Give your robot a recognizable name, then select options across the three configuration areas:
+
+- **Drive** — choose a drivetrain such as Mecanum, Tank, Swerve, or H-Drive.
+- **Intake** — select a roller claw, over-the-bumper intake, or no intake.
+- **Scoring** — select a flywheel, catapult, puncher, or no scoring mechanism.
+
+The panel also shows a simple configuration preview and estimated specifications. These are visual guidance for the current prototype, not official FIRST Global robot rules or engineering limits.
+
+## Save your robot
+
+Select **Save build** after configuring your robot. The simulator stores the name and selected module data under your account.
+
+A confirmation message appears after the save succeeds. If saving fails, check your connection, sign in again if needed, and retry.
+
+## Saved builds
+
+Saved robots appear in the list on the builder page, with their most recent update date. The latest saved robot is used by the existing match-ticket API when the game server requests a player build.
+
+> Build persistence is available now. The interactive browser match-joining flow that uses those builds is not yet published.

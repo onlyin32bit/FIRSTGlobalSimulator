@@ -1,0 +1,33 @@
+---
+title: FIRST Global Simulator documentation
+description: Learn how to access, build, and explore the simulator.
+---
+
+# FIRST Global Simulator
+
+Design, build, and explore a 2026 **Igniting Innovation** robot with Team Vietnam's community simulator.
+
+> The simulator is actively evolving. Account access, saved robot builds, match creation, and the offline sandbox are available today. Browser-based lobby joining and live multiplayer gameplay are still in development.
+
+## What you can do
+
+- Request access or register with an invitation code.
+- Configure and save a robot build in the [Robot Builder](/docs/robot-builder).
+- Create a FGC 2026 lobby from the dashboard.
+- Explore the field through the offline sandbox.
+
+## Choose your path
+
+### New to the simulator
+
+Start with [Getting started](/docs/getting-started) to learn how access, sign-in, and the dashboard work.
+
+### Ready to build
+
+Open the [Robot Builder](/docs/robot-builder) to configure your drivetrain, intake, and scoring mechanism.
+
+### Want to simulate
+
+Read the [Simulator guide](/docs/simulator) for lobby creation, sandbox entry, and the current multiplayer status.
+
+If you run into trouble, see the [FAQ](/docs/faq) or contact Team Vietnam at [vietnamteamfgc@gmail.com](mailto:vietnamteamfgc@gmail.com).

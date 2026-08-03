@@ -1,0 +1,40 @@
+---
+title: Frequently asked questions
+description: Answers about invitations, sessions, robot saving, and support.
+---
+
+# Frequently asked questions
+
+## Access and invitations
+
+### Why do I need an invitation code?
+
+The simulator is currently invite-only. This helps the maintainers manage access while the platform and multiplayer capabilities continue to develop.
+
+### Why is my code not working?
+
+Codes contain exactly six letters or digits and must be entered exactly as issued. A code cannot be used again after registration and may be revoked or expired. Contact the administrator or Team Vietnam if you need a new one.
+
+### Can I request access?
+
+Yes. Use **Request Invite** on the [home page](/) and provide your contact details.
+
+## Account and session
+
+### Why was I sent to sign in?
+
+The dashboard and robot builder require an active account. The app remembers the page you requested and returns you after successful sign-in when possible.
+
+### How do I sign out?
+
+Use **Sign out** in the header on any protected simulator page. This ends the browser session and returns you to the public home page.
+
+### My robot did not save. What should I do?
+
+Confirm that you are signed in and have a stable connection, then try saving again. If the error continues, include the visible error message when you contact support.
+
+## Need help?
+
+For access, account, or project questions, email [vietnamteamfgc@gmail.com](mailto:vietnamteamfgc@gmail.com). You can also follow [Team Vietnam on Facebook](https://www.facebook.com/TeamVietnamFGC) and [Instagram](https://www.instagram.com/teamvietnam.fgc/).
+
+FIRST Global Simulator is a Team Vietnam community project and is not affiliated with, sponsored by, or endorsed by FIRST® or FIRST® Global.
