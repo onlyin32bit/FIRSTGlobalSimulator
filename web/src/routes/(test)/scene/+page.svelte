@@ -9,8 +9,13 @@
     humanPlayerCharge,
     humanPlayerThrowMaxSpeed,
     humanPlayerStorage,
-    humanPlayerTargetedBall
+    humanPlayerTargetedBall,
+    matchSlotsStore,
+    activeRobotSlotId,
+    humanPlayerAlliance,
+    showRobotTagsStore
   } from './stores'
+  import GamepadDebug from './GamepadDebug.svelte'
   import { scores } from '$lib/scoreStore'
 
   import { onMount } from 'svelte'
@@ -20,6 +25,7 @@
   let speed = $state(10);
   let potatoMode = $state(false);
   let showPhysicsDebug = $state(true);
+  let showGamepadDebug = $state(false);
   let role = $state<'robot-controller' | 'human-player'>('robot-controller');
   let throwCharge = $state(0);
 
@@ -33,6 +39,11 @@
 
   onMount(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        showRobotTagsStore.set(true);
+        return;
+      }
       // Don't trigger if user is typing in an input
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key.toLowerCase() === 'r' && !e.repeat) {
@@ -45,8 +56,27 @@
         role = role === 'robot-controller' ? 'human-player' : 'robot-controller';
       }
     };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        showRobotTagsStore.set(false);
+      }
+    };
+
+    const handleBlur = () => {
+      showRobotTagsStore.set(false);
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+    };
   });
 </script>
 
@@ -57,6 +87,14 @@
       onclick={resetScene}
     >
       Reset / Unstick Robot (R)
+    </button>
+
+    <button
+      class={`px-2 py-1 text-white w-full text-left cursor-pointer font-bold rounded transition-all flex items-center justify-between border ${showGamepadDebug ? 'bg-amber-600 border-amber-400' : 'bg-gray-800/90 border-gray-700 hover:bg-gray-700'}`}
+      onclick={() => (showGamepadDebug = !showGamepadDebug)}
+    >
+      <span>🎮 Gamepad Diagnostic HUD</span>
+      <span class="text-[9px] px-1.5 py-0.5 rounded bg-black/40 text-amber-300 font-mono font-bold">{showGamepadDebug ? 'OPEN' : 'OFF'}</span>
     </button>
 
     <div class="flex gap-1">
@@ -79,12 +117,108 @@
         <input id="fov-input" type="range" min="30" max="120" bind:value={fov} class="w-full" />
       </div>
 
-      <div class="flex flex-col gap-1">
-        <label for="speed-input" class="flex justify-between">
-          <span>Fly Speed</span>
-          <span>{speed} m/s</span>
-        </label>
-        <input id="speed-input" type="range" min="1" max="50" bind:value={speed} class="w-full" />
+      <!-- MULTIPLAYER & MATCH SETUP CONFIG -->
+      <div class="pt-2 border-t border-gray-500/50 space-y-2">
+        <div class="font-bold text-amber-400 uppercase tracking-wider flex items-center justify-between text-[11px]">
+          <span>MATCH SETUP (6v6 ROSTER)</span>
+        </div>
+
+        {#if role === 'human-player'}
+          <div class="flex flex-col gap-1.5 bg-gray-800/80 p-2 rounded border border-emerald-500/40">
+            <span class="text-emerald-400 font-bold text-[10px] uppercase">HUMAN PLAYER ALLIANCE</span>
+            <div class="flex gap-1">
+              <button
+                class={`px-2 py-1 rounded flex-1 text-center font-bold text-xs transition-colors cursor-pointer ${$humanPlayerAlliance === 'red' ? 'bg-red-600 text-white shadow-md' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
+                onclick={() => ($humanPlayerAlliance = 'red')}
+              >
+                Red Alliance
+              </button>
+              <button
+                class={`px-2 py-1 rounded flex-1 text-center font-bold text-xs transition-colors cursor-pointer ${$humanPlayerAlliance === 'blue' ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
+                onclick={() => ($humanPlayerAlliance = 'blue')}
+              >
+                Blue Alliance
+              </button>
+            </div>
+            <span class="text-[9px] text-gray-300">
+              Positioned at {$humanPlayerAlliance === 'red' ? 'Red HP Zone (redFSscore)' : 'Blue HP Zone (blueFSscore)'}
+            </span>
+          </div>
+        {:else}
+          <div class="flex flex-col gap-1 bg-gray-800/80 p-2 rounded border border-blue-500/40">
+            <span class="text-blue-400 font-bold text-[10px] uppercase">CONTROLLED ROBOT SLOT</span>
+            <select
+              bind:value={$activeRobotSlotId}
+              class="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-white text-xs font-mono cursor-pointer"
+            >
+              {#each $matchSlotsStore.filter((s) => s.controller !== 'disabled') as slot}
+                <option value={slot.id}>
+                  {slot.name} ({slot.alliance.toUpperCase()} · {slot.spawnAnchor})
+                </option>
+              {/each}
+            </select>
+          </div>
+        {/if}
+
+        <!-- 6 ROBOT SLOTS CONFIGURATOR -->
+        <div class="space-y-1.5 mt-2">
+          <div class="text-gray-300 font-bold text-[10px] uppercase">ROBOT SLOTS CONFIGURATION</div>
+          {#each $matchSlotsStore as slot, idx}
+            <div class={`p-1.5 rounded border flex flex-col gap-1 text-[10px] ${slot.alliance === 'red' ? 'bg-red-950/40 border-red-800/60' : 'bg-blue-950/40 border-blue-800/60'}`}>
+              <div class="flex items-center justify-between font-bold">
+                <span class={slot.alliance === 'red' ? 'text-red-400' : 'text-blue-400'}>
+                  {slot.name}
+                </span>
+                {#if role === 'robot-controller' && slot.id === $activeRobotSlotId}
+                  <span class="bg-emerald-500 text-white text-[8px] px-1 rounded font-black">DRIVING</span>
+                {/if}
+              </div>
+
+              <div class="grid grid-cols-2 gap-1">
+                <div>
+                  <label class="text-gray-400 block text-[9px]">Controller</label>
+                  <select
+                    value={slot.controller}
+                    onchange={(e) => {
+                      const val = (e.target as HTMLSelectElement).value as any;
+                      matchSlotsStore.update((slots) => {
+                        slots[idx].controller = val;
+                        return [...slots];
+                      });
+                    }}
+                    class="w-full bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-white text-[10px] cursor-pointer"
+                  >
+                    <option value="human-drive">Human Driver</option>
+                    <option value="ai-bot">AI Bot</option>
+                    <option value="disabled">Disabled</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label class="text-gray-400 block text-[9px]">Spawn Anchor</label>
+                  <select
+                    value={slot.spawnAnchor}
+                    onchange={(e) => {
+                      const val = (e.target as HTMLSelectElement).value;
+                      matchSlotsStore.update((slots) => {
+                        slots[idx].spawnAnchor = val;
+                        return [...slots];
+                      });
+                    }}
+                    class="w-full bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-white text-[10px] cursor-pointer"
+                  >
+                    <option value="redSpawn1">redSpawn1</option>
+                    <option value="redSpawn2">redSpawn2</option>
+                    <option value="redSpawn3">redSpawn3</option>
+                    <option value="blueSpawn1">blueSpawn1</option>
+                    <option value="blueSpawn2">blueSpawn2</option>
+                    <option value="blueSpawn3">blueSpawn3</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          {/each}
+        </div>
       </div>
 
       <!-- INTAKE & OUTTAKE SPECS -->
@@ -275,4 +409,6 @@ Auto-unsticks: {$robotTelemetry.autoUnstickCount}
       </div>
     {/if}
   {/if}
+
+  <GamepadDebug bind:open={showGamepadDebug} />
 </div>

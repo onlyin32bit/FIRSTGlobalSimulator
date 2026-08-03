@@ -6,13 +6,23 @@
   import { HTML } from '@threlte/extras'
   import { onMount } from 'svelte'
   import { robotTelemetry } from './telemetry'
-  import { robotPhysicsState, robotStorage } from './stores'
+  import { robotPhysicsState, robotStorage, robotStorageMap, showRobotTagsStore } from './stores'
 
   let {
     resetTrigger = 0,
     spawnPos = [0, 1.5, 3.15],
-    controllerEnabled = true
+    controllerEnabled = true,
+    slotId = 'red-1',
+    slotName = 'Red 1',
+    alliance = 'red' as 'red' | 'blue',
+    isAi = false,
+    color = undefined as string | undefined
   } = $props();
+
+  let aiTimer = 0;
+  let aiForwardTarget = 0;
+  let aiTurnTarget = 0;
+  let showTagsGamepad = $state(false);
 
   let rigidBody: RapierRigidBody | undefined = $state();
   
@@ -93,11 +103,18 @@
     };
   });
 
+  const spawnRotationY = $derived(alliance === 'blue' ? Math.PI / 2 : -Math.PI / 2);
+  const spawnQuat = $derived(
+    alliance === 'blue'
+      ? { x: 0, y: 0.7071, z: 0, w: 0.7071 }
+      : { x: 0, y: -0.7071, z: 0, w: 0.7071 }
+  );
+
   $effect(() => {
     if (resetTrigger > 0 && rigidBody) {
       rigidBody.setTranslation({ x: spawnPos[0], y: spawnPos[1], z: spawnPos[2] }, true);
-      // Restore the 90° right spawn rotation (quaternion for -π/2 around Y)
-      rigidBody.setRotation({ x: 0, y: -0.7071, z: 0, w: 0.7071 }, true);
+      // Face inwards toward field center (Blue: +90°, Red: -90°)
+      rigidBody.setRotation(spawnQuat, true);
       rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
       rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
       rigidBody.wakeUp();
@@ -192,19 +209,23 @@
     }
 
     if (controllerEnabled && gp) {
-      // Left stick Y-axis (axes[1]) controls forward/back only.
-      // Right stick X-axis (axes[2]) controls rotation only.
-      const rawForward = -gp.axes[1];
-      const rawTurn = -(gp.axes[2] ?? 0);
+      // 1. Forward / Reverse Input (Left Stick Y axis[1] or D-Pad Up/Down)
+      const axisForward = (gp.axes.length > 1 && Math.abs(gp.axes[1]) > 0.1) ? -gp.axes[1] : 0;
+      const dpadForward = (gp.buttons[12]?.pressed ? 1 : 0) - (gp.buttons[13]?.pressed ? 1 : 0);
+      const rawForward = axisForward !== 0 ? axisForward : dpadForward;
 
-      forwardInput = Math.abs(rawForward) > 0.1 ? rawForward : 0;
-      turnInput = Math.abs(rawTurn) > 0.1 ? rawTurn : 0;
-      
-      intakeBtn = gp.buttons[5]?.pressed || gp.buttons[7]?.pressed || false;
-      shootBtn = gp.buttons[4]?.pressed || gp.buttons[6]?.pressed || false;
-      // A (button 0) is intentionally reserved for transfer; intake/shoot use
-      // the shoulder/trigger buttons above and do not overlap this binding.
-      transferBtn = gp.buttons[0]?.pressed || false;
+      // 2. Turning / Steering Input (Right Stick X axis[2] or D-Pad Left/Right)
+      const rightAxisTurn = (gp.axes.length > 2 && Math.abs(gp.axes[2]) > 0.1) ? -gp.axes[2] : 0;
+      const dpadTurn = (gp.buttons[14]?.pressed ? 1 : 0) - (gp.buttons[15]?.pressed ? 1 : 0);
+      const rawTurn = rightAxisTurn !== 0 ? rightAxisTurn : dpadTurn;
+
+      forwardInput = rawForward;
+      turnInput = rawTurn;
+
+      intakeBtn = gp.buttons[5]?.pressed || gp.buttons[7]?.pressed || (gp.axes[5] ?? 0) > 0.3 || false;
+      shootBtn = gp.buttons[4]?.pressed || gp.buttons[6]?.pressed || (gp.axes[4] ?? 0) > 0.3 || false;
+      transferBtn = gp.buttons[0]?.pressed || gp.buttons[2]?.pressed || false;
+      showTagsGamepad = gp.buttons[8]?.pressed || false;
     }
 
     const keyboardForward = controllerEnabled ? Number(keys.forward) - Number(keys.reverse) : 0;
@@ -215,6 +236,15 @@
       intakeBtn ||= keys.intake;
       shootBtn ||= keys.shoot;
       transferBtn ||= keys.transfer;
+    } else if (isAi) {
+      aiTimer += delta;
+      if (aiTimer > 2.2 + Math.random()) {
+        aiForwardTarget = (Math.random() - 0.2) * 0.7;
+        aiTurnTarget = (Math.random() - 0.5) * 1.0;
+        aiTimer = 0;
+      }
+      forwardInput = aiForwardTarget;
+      turnInput = aiTurnTarget;
     }
 
     let leftPower = forwardInput - turnInput;
@@ -241,7 +271,10 @@
     const lateralSpeed = linvel.x * rightVec.x + linvel.z * rightVec.z;
 
     // Check if robot is stuck against an obstacle (driver giving input but movement/rotation is blocked)
-    const hasDriverInput = Math.abs(forwardInput) > 0.15 || Math.abs(turnInput) > 0.15;
+    const hasDriverInput = Math.abs(forwardInput) > 0.10 || Math.abs(turnInput) > 0.10;
+    if (hasDriverInput) {
+      rigidBody.wakeUp();
+    }
     const isStuckAgainstObstacle = hasDriverInput && Math.abs(forwardSpeed) < 0.15 && Math.abs(angvel.y) < 0.4;
 
     // Instant reverse response when blocked by an obstacle (e.g. brace):
@@ -295,15 +328,17 @@
       stuckTimer = 0;
     }
     
-    // Sync robot state for the Intake/Outtake system
-    robotPhysicsState.set({
-      pos: { x: pos.x, y: pos.y, z: pos.z },
-      vel: { x: linvel.x, y: linvel.y, z: linvel.z },
-      forward: { x: forwardVec.x, y: forwardVec.y, z: forwardVec.z },
-      isIntakeActive: intakeBtn,
-      isShootActive: shootBtn,
-      isTransferActive: transferBtn
-    });
+    // Sync robot state for the Intake/Outtake system (only for the active controlled robot)
+    if (controllerEnabled) {
+      robotPhysicsState.set({
+        pos: { x: pos.x, y: pos.y, z: pos.z },
+        vel: { x: linvel.x, y: linvel.y, z: linvel.z },
+        forward: { x: forwardVec.x, y: forwardVec.y, z: forwardVec.z },
+        isIntakeActive: intakeBtn,
+        isShootActive: shootBtn,
+        isTransferActive: transferBtn
+      });
+    }
 
     if (intakeBtn) {
       rollerRotation -= delta * 30; // Spin rapidly inwards
@@ -374,7 +409,7 @@
   });
 </script>
 
-<T.Group position={[spawnPos[0], spawnPos[1], spawnPos[2]]} rotation={[0, -Math.PI / 2, 0]}>
+<T.Group position={[spawnPos[0], spawnPos[1], spawnPos[2]]} rotation={[0, spawnRotationY, 0]}>
   <RigidBody 
     bind:rigidBody 
     type="dynamic"
@@ -400,9 +435,15 @@
       
     <T.Mesh castShadow receiveShadow position={[0, 0.15, 0]}>
       <T.BoxGeometry args={[0.5, 0.3, 0.6]} />
-      <T.MeshStandardMaterial color="#2563eb" roughness={0.4} metalness={0.2} />
+      <T.MeshStandardMaterial color={color || (alliance === 'red' ? '#dc2626' : '#2563eb')} roughness={0.4} metalness={0.2} />
     </T.Mesh>
     
+    <!-- Alliance Bumper Accent -->
+    <T.Mesh position={[0, 0.05, 0]}>
+      <T.BoxGeometry args={[0.52, 0.1, 0.62]} />
+      <T.MeshStandardMaterial color={alliance === 'red' ? '#991b1b' : '#1e3a8a'} roughness={0.6} />
+    </T.Mesh>
+
     <!-- Active Intake Mechanism (Compliant Roller) -->
     <T.Group position={[0, 0.05, -0.35]} rotation={[rollerRotation, 0, 0]}>
       <!-- The main roller axle -->
@@ -420,11 +461,21 @@
       {/each}
     </T.Group>
     
-    <!-- Floating Storage Indicator -->
-    <HTML position={[0, 0.7, 0]} center>
-      <div class="bg-black/40 text-white font-mono font-bold text-lg px-2 py-0.5 pointer-events-none select-none">
-        {$robotStorage}
-      </div>
-    </HTML>
+    <!-- Floating Storage & Slot Indicator (Only shown when TAB key or Select button is held) -->
+    {#if $showRobotTagsStore || showTagsGamepad}
+      <HTML position={[0, 0.75, 0]} center>
+        <div class={`px-2 py-0.5 rounded text-white font-mono font-bold text-xs flex items-center gap-1.5 shadow-lg border backdrop-blur-sm pointer-events-none select-none ${alliance === 'red' ? 'bg-red-950/85 border-red-500/60' : 'bg-blue-950/85 border-blue-500/60'}`}>
+          <span>{slotName}</span>
+          <span class="px-1.5 rounded bg-black/60 text-[10px] text-orange-400 font-black shadow-inner">
+            {$robotStorageMap[slotId] ?? 0}
+          </span>
+          {#if controllerEnabled}
+            <span class="px-1 rounded bg-emerald-500/80 text-[9px] text-white uppercase tracking-tight">YOU</span>
+          {:else if isAi}
+            <span class="px-1 rounded bg-amber-500/80 text-[9px] text-white uppercase tracking-tight">AI</span>
+          {/if}
+        </div>
+      </HTML>
+    {/if}
   </RigidBody>
 </T.Group>

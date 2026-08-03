@@ -50,9 +50,8 @@
   let {
     anchors = $bindable({}),
     zones = $bindable<ZoneAABB[]>([]),
-    humanPlayerPosition = $bindable<[number, number, number]>([0, 1.8, 0]),
-    // redHPzone in field.semantics.json: transform [-4.41658, 2.99308]
-    // with local rectangle [-1, 1] x [-1, 1].
+    humanPlayerAlliance = 'red',
+    humanPlayerPosition = $bindable<[number, number, number]>([-4.41658, 1.8, 2.99308]),
     humanPlayerBounds = $bindable<HumanPlayerBounds>({
       minX: -5.196519,
       maxX: -3.636641,
@@ -63,6 +62,23 @@
 
   const GAME_ASSET_ROOT = '/games/fgc-2026'
   const SUPPRESSOR_OPACITY = 0.35
+
+  let parsedHpZones = $state<Record<string, { pos: [number, number, number]; bounds: HumanPlayerBounds }>>({
+    red: {
+      pos: [-4.41658, 1.8, 2.99308],
+      bounds: { minX: -5.196519, maxX: -3.636641, minZ: 2.320723, maxZ: 3.665437 }
+    },
+    blue: {
+      pos: [4.36804, 1.8, 2.99308],
+      bounds: { minX: 3.588101, maxX: 5.147979, minZ: 2.320723, maxZ: 3.665437 }
+    }
+  })
+
+  $effect(() => {
+    const hp = parsedHpZones[humanPlayerAlliance] ?? parsedHpZones.red
+    humanPlayerPosition = hp.pos
+    humanPlayerBounds = hp.bounds
+  })
   const BRACE_COLLIDER_IDS = new Set(['Cylinder', 'Cylinder.001', 'Cylinder.002', 'Cylinder.003'])
   const meshoptDecoder = useMeshopt()
   const visualGltf = useGltf(`${GAME_ASSET_ROOT}/field.glb`, { meshoptDecoder })

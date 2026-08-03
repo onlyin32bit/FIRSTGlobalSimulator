@@ -12,6 +12,7 @@
 
   import { resetScores } from '$lib/scoreStore'
   import type { ZoneAABB } from '$lib/scoreStore'
+  import { matchSlotsStore, activeRobotSlotId, humanPlayerAlliance } from './stores'
 
   type HumanPlayerBounds = {
     minX: number
@@ -186,11 +187,20 @@
 
 <World framerate={potatoMode ? 30 : 60}>
   {#if readyToSpawn}
-    <Robot
-      {resetTrigger}
-      spawnPos={robotSpawnPos}
-      controllerEnabled={role === 'robot-controller'}
-    />
+    {#each $matchSlotsStore.filter((s) => s.controller !== 'disabled') as slot (slot.id)}
+      {@const anchor = fieldAnchors[slot.spawnAnchor] ?? (slot.alliance === 'blue' ? [3.25, 0, 0.7] : [-3.25, 0, 0.7])}
+      {@const spawnPos: [number, number, number] = [anchor[0], 1.5, anchor[2]]}
+      <Robot
+        {resetTrigger}
+        {spawnPos}
+        slotId={slot.id}
+        slotName={slot.name}
+        alliance={slot.alliance}
+        isAi={slot.controller === 'ai-bot'}
+        controllerEnabled={role === 'robot-controller' && slot.id === $activeRobotSlotId}
+      />
+    {/each}
+
     <!-- PU Foam Balls -->
     <Balls
       ballsData={balls}
@@ -202,6 +212,7 @@
   <Field
     bind:anchors={fieldAnchors}
     bind:zones={fieldZones}
+    humanPlayerAlliance={$humanPlayerAlliance}
     bind:humanPlayerPosition
     bind:humanPlayerBounds
   />

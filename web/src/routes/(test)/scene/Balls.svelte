@@ -14,6 +14,9 @@
     humanPlayerStorage,
     humanPlayerHeldPosition,
     humanPlayerTargetedBall,
+    humanPlayerAlliance,
+    robotStorageMap,
+    activeRobotSlotId,
     type TargetedBallInfo
   } from './stores';
   import { get } from 'svelte/store';
@@ -34,6 +37,7 @@
   const dummyObj = new Object3D();
   let rapierBodies: any[] = [];
   let ballStates: string[] = [];
+  let ballOwnerSlot: string[] = [];
 
   let auraPos = $state<[number, number, number] | null>(null);
   let pulseTimer = 0;
@@ -102,6 +106,7 @@
     rapierBodies.forEach(b => world.removeRigidBody(b));
     rapierBodies = [];
     ballStates = [];
+    ballOwnerSlot = [];
     ballZoneState = [];
     previousBallPositions = [];
     visualSwallows.clear();
@@ -113,6 +118,10 @@
     humanPlayerStorage.set(0);
     humanPlayerTargetedBall.set(null);
     auraPos = null;
+    robotStorageMap.set({
+      'red-1': 0, 'red-2': 0, 'red-3': 0,
+      'blue-1': 0, 'blue-2': 0, 'blue-3': 0
+    });
     robotStorage.set(0);
     ballsInPlay.set(ballsData.length);
     lastReportedInPlay = ballsData.length;
@@ -135,6 +144,7 @@
       world.createCollider(colliderDesc, body);
       rapierBodies.push(body);
       ballStates.push('active');
+      ballOwnerSlot.push('');
       ballZoneState.push(''); // not inside any scoring zone yet
       previousBallPositions.push({ x: ball.x, y: ball.y, z: ball.z });
     });
@@ -173,7 +183,9 @@
     let currentAuraPos: [number, number, number] | null = null;
 
     if (cam && get(humanPlayerStorage) === 0) {
-      const fireShield = scoringZones.find((zone) => zone.id === 'redFSscore');
+      const alliance = get(humanPlayerAlliance);
+      const targetZoneId = alliance === 'blue' ? 'blueFSscore' : 'redFSscore';
+      const fireShield = scoringZones.find((zone) => zone.id === targetZoneId);
       const rayOrigin = cam.position;
       const rayDirection = new Vector3();
       cam.getWorldDirection(rayDirection).normalize();
@@ -193,7 +205,9 @@
           ? (pos.x >= fireShield.min[0] - 0.25 && pos.x <= fireShield.max[0] + 0.25 &&
              pos.y >= 0.4 && pos.y <= 1.8 &&
              pos.z >= fireShield.min[2] - 0.25 && pos.z <= fireShield.max[2] + 0.9)
-          : (pos.x >= -3.6 && pos.x <= -2.9 && pos.y >= 0.4 && pos.y <= 1.8 && pos.z >= 2.2 && pos.z <= 3.6);
+          : (alliance === 'blue'
+              ? (pos.x >= 2.9 && pos.x <= 3.6 && pos.y >= 0.4 && pos.y <= 1.8 && pos.z >= 2.2 && pos.z <= 3.6)
+              : (pos.x >= -3.6 && pos.x <= -2.9 && pos.y >= 0.4 && pos.y <= 1.8 && pos.z >= 2.2 && pos.z <= 3.6));
 
         if (!inFireShield) continue;
 
@@ -307,7 +321,11 @@
     }
 
     // --- INTAKE LOGIC ---
-    if (rState.isIntakeActive && storage < specs.capacity) {
+    const activeSlotId = get(activeRobotSlotId) || 'red-1';
+    const storageMap = get(robotStorageMap);
+    let activeSlotStorage = storageMap[activeSlotId] ?? 0;
+
+    if (rState.isIntakeActive && activeSlotStorage < specs.capacity) {
       lastIntakeTime += delta;
       const intakeInterval = 1.0 / specs.intakeRate;
       const rightX = -rState.forward.z;
@@ -377,6 +395,7 @@
         const bPos = body.translation();
 
         ballStates[nearestBallIndex] = 'swallowing';
+        ballOwnerSlot[nearestBallIndex] = activeSlotId;
         visualSwallows.set(nearestBallIndex, {
           x: bPos.x,
           y: bPos.y,
@@ -388,8 +407,10 @@
         body.setLinvel(new rapier.Vector3(0, 0, 0), true);
         body.setAngvel(new rapier.Vector3(0, 0, 0), true);
 
-        storage++;
-        storageChanged = true;
+        robotStorageMap.update((map) => ({
+          ...map,
+          [activeSlotId]: (map[activeSlotId] || 0) + 1
+        }));
         lastIntakeTime = 0;
       }
     } else {
@@ -426,17 +447,17 @@
     }
 
     // --- OUTTAKE LOGIC ---
-    if (rState.isShootActive && storage > 0) {
+    if (rState.isShootActive && activeSlotStorage > 0) {
       lastShootTime += delta;
       const shootInterval = 1.0 / specs.outtakeRate;
       
       if (lastShootTime >= shootInterval) {
         // Shoot a wide burst of 3-4 balls!
-        const burstCount = Math.min(storage, 3 + Math.floor(Math.random() * 2));
+        const burstCount = Math.min(activeSlotStorage, 3 + Math.floor(Math.random() * 2));
         
-        let ballsToShoot = [];
+        let ballsToShoot: number[] = [];
         for (let i = 0; i < rapierBodies.length; i++) {
-          if (ballStates[i] === 'stored') {
+          if (ballStates[i] === 'stored' && ballOwnerSlot[i] === activeSlotId) {
             ballsToShoot.push(i);
             if (ballsToShoot.length === burstCount) break;
           }
@@ -445,6 +466,7 @@
         for (let j = 0; j < ballsToShoot.length; j++) {
           const i = ballsToShoot[j];
           ballStates[i] = 'active';
+          ballOwnerSlot[i] = '';
           
           const rightX = rState.forward.z;
           const rightZ = -rState.forward.x;
@@ -503,8 +525,10 @@
           rapierBodies[i].setAngvel(new rapier.Vector3(spinX, spinY, spinZ), true);
           rapierBodies[i].setLinvel(new rapier.Vector3(vX, finalVy, vZ), true);
           
-          storage--;
-          storageChanged = true;
+          robotStorageMap.update((map) => ({
+            ...map,
+            [activeSlotId]: Math.max(0, (map[activeSlotId] || 0) - 1)
+          }));
         }
         lastShootTime = 0;
       }
@@ -514,7 +538,7 @@
 
     // --- TRANSFER LOGIC ---
     // Transfers 3-4 balls at a time out of the FRONT (intake side) of the robot
-    if (rState.isTransferActive && storage > 0) {
+    if (rState.isTransferActive && activeSlotStorage > 0) {
       lastTransferTime += delta;
       const transferInterval = 1.0 / (specs.transferRate || 2.5);
       
@@ -523,13 +547,13 @@
         const burstMin = Math.max(1, Math.floor(specs.transferBurstMin ?? 3));
         const burstMax = Math.max(burstMin, Math.floor(specs.transferBurstMax ?? 4));
         const burstCount = Math.min(
-          storage,
+          activeSlotStorage,
           burstMin + Math.floor(Math.random() * (burstMax - burstMin + 1))
         );
         
         let ballsToTransfer: number[] = [];
         for (let i = 0; i < rapierBodies.length; i++) {
-          if (ballStates[i] === 'stored') {
+          if (ballStates[i] === 'stored' && ballOwnerSlot[i] === activeSlotId) {
             ballsToTransfer.push(i);
             if (ballsToTransfer.length === burstCount) break;
           }
@@ -538,6 +562,7 @@
         for (let j = 0; j < ballsToTransfer.length; j++) {
           const i = ballsToTransfer[j];
           ballStates[i] = 'active';
+          ballOwnerSlot[i] = '';
           
           const rightX = rState.forward.z;
           const rightZ = -rState.forward.x;
@@ -591,8 +616,10 @@
           rapierBodies[i].setAngvel(new rapier.Vector3(spinX, spinY, spinZ), true);
           rapierBodies[i].setLinvel(new rapier.Vector3(vX, finalVy, vZ), true);
           
-          storage--;
-          storageChanged = true;
+          robotStorageMap.update((map) => ({
+            ...map,
+            [activeSlotId]: Math.max(0, (map[activeSlotId] || 0) - 1)
+          }));
         }
         lastTransferTime = 0;
       }
