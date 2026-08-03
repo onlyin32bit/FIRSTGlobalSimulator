@@ -1,129 +1,120 @@
-use axum::{
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    response::Response,
-    routing::get,
-    Router,
-};
-use std::net::SocketAddr;
+use axum::{extract::ws::{Message, WebSocket, WebSocketUpgrade}, response::Response, routing::get, Router};
+use axum::extract::Query;
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-pub mod game;
 pub mod auth;
+pub mod game;
 
+use auth::verify_ticket;
+use game::match_registry::{MatchInput, MatchRegistry, TEST_MATCH_ID};
 use game::pack_loader::PackLoader;
 use game::rhai_engine::RhaiEngine;
-use auth::verify_ticket;
-use axum::extract::Query;
-use std::collections::HashMap;
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ClientMessage {
+    Input { sequence: u64, move_x: f32, move_z: f32 },
+    Ping { nonce: u64 },
+}
+
+#[derive(Serialize)]
+struct PongMessage {
+    r#type: &'static str,
+    nonce: u64,
+}
 
 #[tokio::main]
 async fn main() {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
+    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+    let subscriber = FmtSubscriber::builder().with_max_level(Level::INFO).finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
     info!("Starting FGC 2026 Game Server (Engine v0.1.0)...");
 
     let loader = PackLoader::new("0.1.0");
-    let manifest = loader.load_manifest("../pkgs/games/fgc-2026/manifest.json");
+    if let Ok(_) = loader.load_manifest("../pkgs/games/fgc-2026/manifest.json") { let mut rhai = RhaiEngine::new(); rhai.load_script("../pkgs/games/fgc-2026/rules/scoring.rhai"); }
 
-    if let Ok(manifest) = manifest {
-        let mut rhai = RhaiEngine::new();
-        rhai.load_script("../pkgs/games/fgc-2026/rules/scoring.rhai");
-    } else {
-        tracing::error!("Failed to load game pack: {:?}", manifest.unwrap_err());
-    }
-
-    let registry = std::sync::Arc::new(game::match_registry::MatchRegistry::new());
-
-    let app = Router::new()
-        .route("/health", get(|| async { "OK" }))
-        .route("/ws/match/:match_id", get(ws_handler))
-        .with_state(registry);
-
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    info!("Listening on {}", addr);
-    
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let registry = Arc::new(MatchRegistry::new());
+    registry.start_test_match().await;
+    start_heartbeat(registry.clone());
+    let app = Router::new().route("/health", get(|| async { "OK" })).route("/ws/match/{match_id}", get(ws_handler)).with_state(registry);
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 3000))).await.unwrap();
+    info!("Listening on 0.0.0.0:3000; always-on match: {TEST_MATCH_ID}");
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    axum::extract::State(registry): axum::extract::State<std::sync::Arc<game::match_registry::MatchRegistry>>,
-    axum::extract::Path(match_id): axum::extract::Path<String>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let ticket = match params.get("ticket") {
-        Some(t) => t,
-        None => return Response::builder().status(401).body("Missing ticket".into()).unwrap(),
+fn start_heartbeat(registry: Arc<MatchRegistry>) {
+    let Some(control_plane) = std::env::var("CONTROL_PLANE_URL").ok().filter(|value| !value.is_empty()) else {
+        info!("CONTROL_PLANE_URL is not configured; game server heartbeat disabled");
+        return;
     };
-
-    let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "secret".to_string());
-    
-    match verify_ticket(ticket, &secret) {
-        Ok(claims) => {
-            if claims.match_id != match_id {
-                return Response::builder().status(403).body("Invalid match ID".into()).unwrap();
+    let Some(key) = std::env::var("GAME_SERVER_KEY").ok().filter(|value| !value.is_empty()) else {
+        tracing::warn!("GAME_SERVER_KEY is not configured; game server heartbeat disabled");
+        return;
+    };
+    let endpoint = format!("{}/api/game-servers/heartbeat", control_plane.trim_end_matches('/'));
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let slots = std::env::var("GAME_SERVER_SLOTS").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(10);
+        loop {
+            let active_matches = registry.match_count().await as u64;
+            let result = client.post(&endpoint)
+                .header("X-Game-Server-Key", &key)
+                .json(&serde_json::json!({ "activeUsers": 0, "activeMatches": active_matches, "slots": slots, "version": env!("CARGO_PKG_VERSION") }))
+                .send().await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "game server heartbeat failed");
             }
-            ws.on_upgrade(move |socket| handle_socket(socket, claims, registry))
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
-        Err(e) => {
-            tracing::error!("Ticket verification failed: {:?}", e);
-            Response::builder().status(401).body("Invalid ticket".into()).unwrap()
+    });
+}
+
+async fn ws_handler(ws: WebSocketUpgrade, axum::extract::State(registry): axum::extract::State<Arc<MatchRegistry>>, axum::extract::Path(match_id): axum::extract::Path<String>, Query(params): Query<HashMap<String, String>>) -> Response {
+    let Some(ticket) = params.get("ticket") else { return Response::builder().status(401).body("Missing ticket".into()).unwrap() };
+    let secret = match std::env::var("JWT_SECRET") {
+        Ok(secret) if !secret.is_empty() => secret,
+        _ => {
+            tracing::warn!("Using the development JWT_SECRET fallback; configure JWT_SECRET before deployment");
+            "fgc26-local-development-jwt-secret-change-before-deploy".to_string()
         }
+    };
+    match verify_ticket(ticket, &secret) {
+        Ok(claims) if claims.match_id == match_id => ws.on_upgrade(move |socket| handle_socket(socket, claims, registry)),
+        Ok(_) => Response::builder().status(403).body("Invalid match ID".into()).unwrap(),
+        Err(_) => Response::builder().status(401).body("Invalid ticket".into()).unwrap(),
     }
 }
 
-async fn handle_socket(mut socket: WebSocket, claims: auth::TicketClaims, registry: std::sync::Arc<game::match_registry::MatchRegistry>) {
-    info!("New WebSocket connection from user {} (Team: {}) for match {}", claims.sub, claims.team_name, claims.match_id);
-
+async fn handle_socket(socket: WebSocket, claims: auth::TicketClaims, registry: Arc<MatchRegistry>) {
     let match_handle = registry.get_or_create_match(&claims.match_id).await;
-    
-    // Notify match that a player joined
-    let _ = match_handle.input_tx.send(game::match_registry::MatchInput::PlayerJoin {
-        user_id: claims.sub.clone(),
-        robot_data: claims.robot_data.clone(),
-    }).await;
-
-    let mut state_rx = match_handle.state_rx.subscribe();
-
+    let _ = match_handle.input_tx.send(MatchInput::PlayerJoin { user_id: claims.sub.clone(), name: claims.display_name, team_name: claims.team_name }).await;
+    let mut state_rx = match_handle.state_tx.subscribe();
+    let (mut sender, mut receiver) = socket.split();
     loop {
         tokio::select! {
-            msg = socket.recv() => {
-                let msg = match msg {
-                    Some(Ok(msg)) => msg,
-                    _ => break, // Disconnected or error
-                };
-
-                match msg {
-                    Message::Binary(data) => {
-                        // Forward inputs to game loop
-                        let _ = match_handle.input_tx.send(game::match_registry::MatchInput::PlayerInput {
-                            user_id: claims.sub.clone(),
-                            gamepad_data: data.to_vec(),
-                        }).await;
+            message = receiver.next() => match message {
+                Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
+                    Ok(ClientMessage::Input { sequence, move_x, move_z }) => {
+                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, sequence }).await;
                     }
-                    Message::Text(t) => {
-                        info!("Received from {}: {}", claims.sub, t);
+                    Ok(ClientMessage::Ping { nonce }) => {
+                        if let Ok(message) = serde_json::to_string(&PongMessage { r#type: "pong", nonce }) {
+                            if sender.send(Message::Text(message.into())).await.is_err() { break; }
+                        }
                     }
-                    _ => {}
-                }
-            }
+                    Err(_) => {}
+                },
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                _ => {}
+            },
             Ok(state) = state_rx.recv() => {
-                // Send physics state to client
-                // Here we would encode state.transforms into binary and send it
-                // let _ = socket.send(Message::Binary(state.transforms)).await;
+                if let Ok(message) = serde_json::to_string(&state) { if sender.send(Message::Text(message.into())).await.is_err() { break; } }
             }
         }
     }
-
-    // Notify match that a player left
-    let _ = match_handle.input_tx.send(game::match_registry::MatchInput::PlayerLeave {
-        user_id: claims.sub.clone(),
-    }).await;
-    
-    info!("User {} disconnected from match {}", claims.sub, claims.match_id);
+    let _ = match_handle.input_tx.send(MatchInput::PlayerLeave { user_id: claims.sub }).await;
 }

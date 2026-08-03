@@ -1,4 +1,4 @@
-use rhai::{Engine, Scope, AST};
+use rhai::{Engine, AST};
 use std::fs;
 use tracing::{info, error};
 
