@@ -10,6 +10,7 @@ import robotRoutes from './routes/robot'
 import matchesRoutes from './routes/matches'
 import gamePacksRoutes from './routes/game-packs'
 import adminRoutes from './routes/admin'
+import gameServerRoutes from './routes/game-servers'
 
 const app = new Hono<{ Bindings: Bindings }>()
 
@@ -32,6 +33,7 @@ app.route('/api/robot', robotRoutes)
 app.route('/api/matches', matchesRoutes)
 app.route('/api/game-packs', gamePacksRoutes)
 app.route('/api/admin', adminRoutes)
+app.route('/api/game-servers', gameServerRoutes)
 
 app.get('/', (c) => {
   return c.text('FGC 2026 Simulator API (Hono)')

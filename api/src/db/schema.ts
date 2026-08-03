@@ -8,6 +8,8 @@ export const user = sqliteTable("user", {
 	image: text("image"),
 	team: text("team"),
 	role: text("role").notNull().default("user"),
+	disabledAt: integer("disabledAt", { mode: "timestamp" }),
+	disabledReason: text("disabledReason"),
 	createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
 	updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull()
 });
@@ -65,7 +67,28 @@ export const matches = sqliteTable('matches', {
   gamePackId: text('gamePackId').notNull(),
   status: text('status').notNull(), // "LOBBY", "IN_PROGRESS", "FINISHED"
   maxPlayers: integer('maxPlayers').notNull(),
+  updatedAt: integer('updatedAt', { mode: 'timestamp' }).notNull(),
+  cancelledAt: integer('cancelledAt', { mode: 'timestamp' }),
+  cancelReason: text('cancelReason'),
+  gameServerId: text('gameServerId').references(() => gameServers.id),
   createdAt: integer('createdAt', { mode: 'timestamp' }).notNull(),
+});
+
+export const gameServers = sqliteTable('game_servers', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  origin: text('origin').notNull(),
+  keyHash: text('keyHash').notNull().unique(),
+  maxUsers: integer('maxUsers').notNull().default(50),
+  maxMatches: integer('maxMatches').notNull().default(10),
+  slots: integer('slots').notNull().default(10),
+  activeUsers: integer('activeUsers').notNull().default(0),
+  activeMatches: integer('activeMatches').notNull().default(0),
+  status: text('status').notNull().default('provisioning'),
+  lastHeartbeatAt: integer('lastHeartbeatAt', { mode: 'timestamp' }),
+  createdAt: integer('createdAt', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updatedAt', { mode: 'timestamp' }).notNull(),
+  disabledAt: integer('disabledAt', { mode: 'timestamp' }),
 });
 
 export const invitations = sqliteTable('invitations', {

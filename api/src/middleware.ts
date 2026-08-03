@@ -9,6 +9,11 @@ export async function requireUser(c: Context<{ Bindings: Bindings }>) {
   const auth = createAuth(c.env, c.req.url)
   const session = await auth.api.getSession({ headers: c.req.raw.headers })
   if (!session) return null
+
+  const db = drizzle(c.env.DB, { schema })
+  const currentUser = await db.query.user.findFirst({ where: eq(schema.user.id, session.user.id) })
+  if (!currentUser || currentUser.disabledAt) return null
+
   return session as typeof session & { user: AuthenticatedUser }
 }
 

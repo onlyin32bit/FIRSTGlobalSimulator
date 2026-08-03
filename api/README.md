@@ -30,6 +30,8 @@ The first administrator must be promoted through D1 during bootstrap. Thereafter
 - Set `WEB_ORIGIN` to the public web origin and `API_ORIGIN` to the API worker origin.
 - Store `JWT_SECRET` with `wrangler secret put JWT_SECRET`; do not set it in `wrangler.jsonc` or commit it.
 - Set `GAME_SERVER_ORIGIN` to the public `wss://` game server endpoint when match ticketing is enabled.
+- In the admin control center, create a Game server and copy its one-time key to the host as `GAME_SERVER_KEY`.
+- Configure the Rust host with `CONTROL_PLANE_URL=https://your-api.example.com`, `GAME_SERVER_KEY=...`, and optionally `GAME_SERVER_SLOTS=10`. It will heartbeat every 10 seconds; ticket routing only uses hosts whose heartbeat is less than 30 seconds old and whose configured capacity is not full.
 - Set `N8N_WEBHOOK_URL` only when the public invitation-request form is connected to an automation endpoint. Without it, the API responds honestly with `503` rather than claiming a request was delivered.
 
 ## Commands
