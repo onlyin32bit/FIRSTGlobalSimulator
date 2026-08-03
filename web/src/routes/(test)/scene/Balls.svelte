@@ -32,6 +32,7 @@
   
   let lastIntakeTime = 0;
   let lastShootTime = 0;
+  let lastTransferTime = 0;
 
   // Lightweight PU foam: some rebound, but far less than a rubber ball.
   const BALL_RESTITUTION = 0.4;
@@ -86,6 +87,7 @@
     visualSwallows.clear();
     lastIntakeTime = 0;
     lastShootTime = 0;
+    lastTransferTime = 0;
     robotStorage.set(0);
     ballsInPlay.set(ballsData.length);
     lastReportedInPlay = ballsData.length;
@@ -339,6 +341,94 @@
       }
     } else {
       lastShootTime = 0;
+    }
+
+    // --- TRANSFER LOGIC ---
+    // Transfers 3-4 balls at a time out of the FRONT (intake side) of the robot
+    if (rState.isTransferActive && storage > 0) {
+      lastTransferTime += delta;
+      const transferInterval = 1.0 / (specs.transferRate || 2.5);
+      
+      if (lastTransferTime >= transferInterval) {
+        // Transfer a cluster of 3-4 balls at a time to simulate physics unexpectedness!
+        const burstMin = Math.max(1, Math.floor(specs.transferBurstMin ?? 3));
+        const burstMax = Math.max(burstMin, Math.floor(specs.transferBurstMax ?? 4));
+        const burstCount = Math.min(
+          storage,
+          burstMin + Math.floor(Math.random() * (burstMax - burstMin + 1))
+        );
+        
+        let ballsToTransfer: number[] = [];
+        for (let i = 0; i < rapierBodies.length; i++) {
+          if (ballStates[i] === 'stored') {
+            ballsToTransfer.push(i);
+            if (ballsToTransfer.length === burstCount) break;
+          }
+        }
+        
+        for (let j = 0; j < ballsToTransfer.length; j++) {
+          const i = ballsToTransfer[j];
+          ballStates[i] = 'active';
+          
+          const rightX = rState.forward.z;
+          const rightZ = -rState.forward.x;
+          
+          let offsetMag = 0;
+          if (ballsToTransfer.length > 1) {
+            // Span across +/- 0.16 meters across front intake width
+            const maxSpread = 0.16;
+            offsetMag = -maxSpread + (j / (ballsToTransfer.length - 1)) * (maxSpread * 2);
+            offsetMag += (Math.random() - 0.5) * 0.04;
+          }
+          
+          // Time-stagger along forward direction to create realistic physical cluster
+          const timeStagger = (Math.random() - 0.5) * 0.25;
+          
+          // Transfer origin is at the FRONT of the robot (+0.35m forward), elevated by transferHeight
+          const outX = rState.pos.x + rState.forward.x * 0.35 + rightX * offsetMag + rState.forward.x * timeStagger;
+          const outY = rState.pos.y + (specs.transferHeight ?? 0.20) + (Math.random() * 0.04);
+          const outZ = rState.pos.z + rState.forward.z * 0.35 + rightZ * offsetMag + rState.forward.z * timeStagger;
+          
+          rapierBodies[i].setTranslation(new rapier.Vector3(outX, outY, outZ), true);
+          previousBallPositions[i] = { x: outX, y: outY, z: outZ };
+          ballZoneState[i] = '';
+          
+          // Calculate trajectory in FORWARD direction (+rState.forward)
+          const verticalVariance = (Math.random() - 0.5) * 5.0;
+          const angleRad = ((specs.transferAngle ?? 20) + verticalVariance) * (Math.PI / 180);
+          
+          const speedMultiplier = 1.0 + (Math.random() - 0.5) * 0.12;
+          const finalSpeed = (specs.transferVelocity ?? 5.0) * speedMultiplier;
+          
+          const vY = Math.sin(angleRad) * finalSpeed;
+          const vHoriz = Math.cos(angleRad) * finalSpeed;
+          
+          const spread = (Math.random() - 0.5) * 0.12;
+          const dirX = rState.forward.x;
+          const dirZ = rState.forward.z;
+          const spreadX = dirX * Math.cos(spread) - dirZ * Math.sin(spread);
+          const spreadZ = dirX * Math.sin(spread) + dirZ * Math.cos(spread);
+          
+          const vX = spreadX * vHoriz + rState.vel.x;
+          const vZ = spreadZ * vHoriz + rState.vel.z;
+          const finalVy = vY + rState.vel.y;
+          
+          // Topspin / forward spin when ejected out the front
+          const spinMag = 30.0 + (Math.random() - 0.5) * 10.0;
+          const spinX = -rightX * spinMag + (Math.random() - 0.5) * 4.0;
+          const spinY = (Math.random() - 0.5) * 4.0;
+          const spinZ = -rightZ * spinMag + (Math.random() - 0.5) * 4.0;
+          
+          rapierBodies[i].setAngvel(new rapier.Vector3(spinX, spinY, spinZ), true);
+          rapierBodies[i].setLinvel(new rapier.Vector3(vX, finalVy, vZ), true);
+          
+          storage--;
+          storageChanged = true;
+        }
+        lastTransferTime = 0;
+      }
+    } else {
+      lastTransferTime = 0;
     }
 
     if (storageChanged) {

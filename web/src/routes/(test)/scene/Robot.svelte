@@ -24,13 +24,18 @@
   
   let currentLinSpeed = 0;
   let currentAngSpeed = 0;
+  let stuckTimer = 0;
+  let autoUnstickCount = 0;
+  let maxContactForce = 0;
+  const activeContacts = new Map<number, string>();
   const keys = {
     forward: false,
     reverse: false,
     left: false,
     right: false,
     intake: false,
-    shoot: false
+    shoot: false,
+    transfer: false
   };
 
   function clearKeyboardInput() {
@@ -60,6 +65,9 @@
         case 'q':
           keys.shoot = pressed;
           break;
+        case 'f':
+          keys.transfer = pressed;
+          break;
         default:
           return;
       }
@@ -83,13 +91,18 @@
 
   $effect(() => {
     if (resetTrigger > 0 && rigidBody) {
-      rigidBody.setTranslation({ x: 0, y: 1.5, z: 3.15 }, true);
+      rigidBody.setTranslation({ x: spawnPos[0], y: spawnPos[1], z: spawnPos[2] }, true);
       // Restore the 90° right spawn rotation (quaternion for -π/2 around Y)
       rigidBody.setRotation({ x: 0, y: -0.7071, z: 0, w: 0.7071 }, true);
       rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
       rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      rigidBody.wakeUp();
       currentLinSpeed = 0;
       currentAngSpeed = 0;
+      stuckTimer = 0;
+      autoUnstickCount = 0;
+      maxContactForce = 0;
+      activeContacts.clear();
     }
   });
 
@@ -98,6 +111,42 @@
   let timeSinceLastTelemetry = 0;
   
   let rollerRotation = $state(0);
+
+  type PhysicsEvent = {
+    targetCollider: { handle: number; userData?: unknown };
+    targetRigidBody: RapierRigidBody | null;
+  };
+
+  function contactLabel(event: PhysicsEvent) {
+    const colliderData = event.targetCollider.userData as { fieldColliderId?: string } | undefined;
+    const bodyData = event.targetRigidBody?.userData as { fieldColliderId?: string } | undefined;
+    return colliderData?.fieldColliderId ?? bodyData?.fieldColliderId ?? `collider-${event.targetCollider.handle}`;
+  }
+
+  function logCollision(event: PhysicsEvent, phase: 'enter' | 'exit') {
+    const label = contactLabel(event);
+    console.debug(`[robot-physics] collision ${phase}`, {
+      collider: label,
+      position: rigidBody?.translation(),
+      velocity: rigidBody?.linvel(),
+      angularVelocity: rigidBody?.angvel(),
+      activeContacts: [...activeContacts.values()]
+    });
+  }
+
+  function handleCollisionEnter(event: PhysicsEvent) {
+    activeContacts.set(event.targetCollider.handle, contactLabel(event));
+    logCollision(event, 'enter');
+  }
+
+  function handleCollisionExit(event: PhysicsEvent) {
+    activeContacts.delete(event.targetCollider.handle);
+    logCollision(event, 'exit');
+  }
+
+  function handleContact(event: PhysicsEvent & { totalForceMagnitude: number }) {
+    maxContactForce = Math.max(maxContactForce, event.totalForceMagnitude);
+  }
 
   useTask((delta) => {
     if (!rigidBody) return;
@@ -119,24 +168,15 @@
     // Updating Svelte DOM text nodes 60 times a second blocks the main thread with Layout/Paint overhead!
     // We throttle the UI updates to 10Hz to free up the WebGL and Physics loops.
     timeSinceLastTelemetry += delta;
-    if (timeSinceLastTelemetry > 0.1) {
-      robotTelemetry.set({
-        x: pos.x,
-        y: pos.y,
-        z: pos.z,
-        speed: currentSpeedMag,
-        turnRate: angvel.y,
-        accel: accel,
-        fps: smoothedFps
-      });
-      timeSinceLastTelemetry = 0;
-    }
+    const shouldPublishTelemetry = timeSinceLastTelemetry > 0.1;
+    if (shouldPublishTelemetry) timeSinceLastTelemetry = 0;
     // -----------------
 
     let forwardInput = 0;
     let turnInput = 0;
     let intakeBtn = false;
     let shootBtn = false;
+    let transferBtn = false;
 
     const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
     let gp: Gamepad | null = null;
@@ -158,6 +198,9 @@
       
       intakeBtn = gp.buttons[5]?.pressed || gp.buttons[7]?.pressed || false;
       shootBtn = gp.buttons[4]?.pressed || gp.buttons[6]?.pressed || false;
+      // A (button 0) is intentionally reserved for transfer; intake/shoot use
+      // the shoulder/trigger buttons above and do not overlap this binding.
+      transferBtn = gp.buttons[0]?.pressed || false;
     }
 
     const keyboardForward = Number(keys.forward) - Number(keys.reverse);
@@ -166,6 +209,7 @@
     turnInput = Math.max(-1, Math.min(1, turnInput + keyboardTurn));
     intakeBtn ||= keys.intake;
     shootBtn ||= keys.shoot;
+    transferBtn ||= keys.transfer;
 
     let leftPower = forwardInput - turnInput;
     let rightPower = forwardInput + turnInput;
@@ -182,6 +226,27 @@
     const targetSpeed = driveSpeed * MAX_SPEED;
     const targetTurn = turnSpeed * MAX_TURN;
 
+    const rot = rigidBody.rotation();
+    const quat = new Quaternion(rot.x, rot.y, rot.z, rot.w);
+    const forwardVec = new Vector3(0, 0, -1).applyQuaternion(quat);
+    const rightVec = new Vector3(1, 0, 0).applyQuaternion(quat);
+
+    const forwardSpeed = linvel.x * forwardVec.x + linvel.z * forwardVec.z;
+    const lateralSpeed = linvel.x * rightVec.x + linvel.z * rightVec.z;
+
+    // Check if robot is stuck against an obstacle (driver giving input but movement/rotation is blocked)
+    const hasDriverInput = Math.abs(forwardInput) > 0.15 || Math.abs(turnInput) > 0.15;
+    const isStuckAgainstObstacle = hasDriverInput && Math.abs(forwardSpeed) < 0.15 && Math.abs(angvel.y) < 0.4;
+
+    // Instant reverse response when blocked by an obstacle (e.g. brace):
+    // If input direction flips while blocked or ramping, snap currentLinSpeed to targetSpeed directly
+    // so reverse force is applied immediately instead of continuing to push into the brace.
+    if (Math.sign(targetSpeed) !== Math.sign(currentLinSpeed) && targetSpeed !== 0) {
+      currentLinSpeed = targetSpeed;
+    } else if (forwardInput === 0 && Math.abs(forwardSpeed) < 0.1) {
+      currentLinSpeed = 0;
+    }
+
     if (currentLinSpeed < targetSpeed) {
       currentLinSpeed = Math.min(targetSpeed, currentLinSpeed + ACCEL * delta);
     } else if (currentLinSpeed > targetSpeed) {
@@ -194,10 +259,35 @@
       currentAngSpeed = Math.max(targetTurn, currentAngSpeed - TURN_ACCEL * delta);
     }
 
-    const rot = rigidBody.rotation();
-    const quat = new Quaternion(rot.x, rot.y, rot.z, rot.w);
-    const forwardVec = new Vector3(0, 0, -1).applyQuaternion(quat);
-    const rightVec = new Vector3(1, 0, 0).applyQuaternion(quat);
+    // Auto-unstick helper: if driver is giving input but robot is trapped in a wedge/brace for > 0.35s,
+    // apply a strong pulse backwards, upwards & rotational pop to break wedging friction.
+    if (isStuckAgainstObstacle) {
+      stuckTimer += delta;
+      if (stuckTimer > 0.35) {
+        const popDir = forwardInput > 0.1 ? -1 : (forwardInput < -0.1 ? 1 : -1);
+        rigidBody.applyImpulse({
+          x: popDir * forwardVec.x * 5.0 + (Math.random() - 0.5) * 2.0,
+          y: 2.5,
+          z: popDir * forwardVec.z * 5.0 + (Math.random() - 0.5) * 2.0
+        }, true);
+        rigidBody.applyTorqueImpulse({
+          x: 0,
+          y: (autoUnstickCount % 2 === 0 ? 6.0 : -6.0),
+          z: 0
+        }, true);
+        autoUnstickCount += 1;
+        console.debug('[robot-physics] auto-unstick impulse', {
+          count: autoUnstickCount,
+          stuckTime: stuckTimer,
+          position: rigidBody.translation(),
+          velocity: rigidBody.linvel(),
+          contacts: [...activeContacts.values()]
+        });
+        stuckTimer = 0;
+      }
+    } else {
+      stuckTimer = 0;
+    }
     
     // Sync robot state for the Intake/Outtake system
     robotPhysicsState.set({
@@ -205,32 +295,51 @@
       vel: { x: linvel.x, y: linvel.y, z: linvel.z },
       forward: { x: forwardVec.x, y: forwardVec.y, z: forwardVec.z },
       isIntakeActive: intakeBtn,
-      isShootActive: shootBtn
+      isShootActive: shootBtn,
+      isTransferActive: transferBtn
     });
 
     if (intakeBtn) {
       rollerRotation -= delta * 30; // Spin rapidly inwards
+    } else if (transferBtn) {
+      rollerRotation += delta * 30; // Spin rapidly outwards for front transfer!
     }
 
-    // Wheel-like traction on EVA foam: drive along the chassis and strongly
-    // resist sideways scrub without making rotation behave like a stuck box.
-    const forwardSpeed = linvel.x * forwardVec.x + linvel.z * forwardVec.z;
-    const lateralSpeed = linvel.x * rightVec.x + linvel.z * rightVec.z;
+    // Ease lateral scrub when turning or stuck against an obstacle so robot pivots free easily
+    const effectiveLateralGrip = isStuckAgainstObstacle ? 0.15 : LATERAL_GRIP;
+
     const forwardImpulse = (currentLinSpeed - forwardSpeed) * mass * DRIVE_RESPONSE;
-    const lateralImpulse = -lateralSpeed * mass * LATERAL_GRIP;
+    const lateralImpulse = -lateralSpeed * mass * effectiveLateralGrip;
     let impulseX = forwardVec.x * forwardImpulse + rightVec.x * lateralImpulse;
     let impulseZ = forwardVec.z * forwardImpulse + rightVec.z * lateralImpulse;
     
-    // CLAMP THE MAX IMPULSE!
-    // This is the true fix for the no-clip:
-    // Without clamping, the motor asks for infinite force to maintain speed when hitting balls,
-    // crushing them through the geometry in a single frame.
-    // By clamping the impulse (force), the robot actually slows down realistically when ramming a pile,
-    // giving the physics engine time to safely roll the balls away.
+    // CLAMP THE MAX IMPULSE! Boost available drive impulse when dislodging from an obstacle
+    const currentMaxDriveImpulse = isStuckAgainstObstacle ? 12.0 : MAX_DRIVE_IMPULSE;
     const impulseMag = Math.sqrt(impulseX * impulseX + impulseZ * impulseZ);
-    if (impulseMag > MAX_DRIVE_IMPULSE) {
-      impulseX = (impulseX / impulseMag) * MAX_DRIVE_IMPULSE;
-      impulseZ = (impulseZ / impulseMag) * MAX_DRIVE_IMPULSE;
+    if (impulseMag > currentMaxDriveImpulse) {
+      impulseX = (impulseX / impulseMag) * currentMaxDriveImpulse;
+      impulseZ = (impulseZ / impulseMag) * currentMaxDriveImpulse;
+    }
+
+    if (shouldPublishTelemetry) {
+      robotTelemetry.set({
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+        speed: currentSpeedMag,
+        turnRate: angvel.y,
+        accel,
+        fps: smoothedFps,
+        forwardSpeed,
+        requestedForwardSpeed: currentLinSpeed,
+        driveImpulse: impulseMag,
+        contactForce: maxContactForce,
+        contactCount: activeContacts.size,
+        contacts: [...activeContacts.values()],
+        stuckTime: stuckTimer,
+        autoUnstickCount
+      });
+      maxContactForce = 0;
     }
     
     rigidBody.applyImpulse({
@@ -241,12 +350,12 @@
 
     const deltaW = currentAngSpeed - angvel.y;
     const inertia = (mass / 12.0) * (0.45 * 0.45 + 0.45 * 0.45);
-    const angularResponse = 1.1;
+    const angularResponse = 1.2;
     
     let torqueImpulse = deltaW * inertia * angularResponse;
     
-    // Clamp turning torque as well
-    const maxTorqueImpulse = 4.0;
+    // Boost turning torque when stuck so driver can easily pivot away from collision surfaces
+    const maxTorqueImpulse = isStuckAgainstObstacle ? 10.0 : 4.0;
     if (Math.abs(torqueImpulse) > maxTorqueImpulse) {
       torqueImpulse = Math.sign(torqueImpulse) * maxTorqueImpulse;
     }
@@ -268,13 +377,16 @@
     linearDamping={0.15}
     angularDamping={0.8}
     ccd={true}
+    oncollisionenter={handleCollisionEnter}
+    oncollisionexit={handleCollisionExit}
+    oncontact={handleContact}
   >
     <!-- Rounded, low-friction edges act more like wheels and do not catch on field seams. -->
     <T.Group position={[0, 0.15, 0]}>
       <Collider 
         shape="roundCuboid" 
-        args={[0.275, 0.14, 0.325, 0.04]} 
-        friction={0.35} 
+        args={[0.275, 0.14, 0.325, 0.05]} 
+        friction={0.25} 
         restitution={0.02} 
         mass={18.0} 
       />

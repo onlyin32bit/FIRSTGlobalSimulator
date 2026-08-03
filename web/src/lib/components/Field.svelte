@@ -24,6 +24,9 @@
     indices: Uint32Array
     friction: number
     restitution: number
+    primitive?: 'cylinder' | 'capsule'
+    cylinderHalfHeight?: number
+    cylinderRadius?: number
   }
 
   interface ParsedSemantics {
@@ -41,6 +44,7 @@
 
   const GAME_ASSET_ROOT = '/games/fgc-2026'
   const SUPPRESSOR_OPACITY = 0.35
+  const BRACE_COLLIDER_IDS = new Set(['Cylinder', 'Cylinder.001', 'Cylinder.002', 'Cylinder.003'])
   const meshoptDecoder = useMeshopt()
   const visualGltf = useGltf(`${GAME_ASSET_ROOT}/field.glb`, { meshoptDecoder })
   const configuredScenes = new WeakSet<Object3D>()
@@ -86,13 +90,19 @@
 
       let friction = 0.45
       let restitution = 0.05
-      if (c.name.includes('SU') || c.name.includes('polycarbonate')) {
+      if (BRACE_COLLIDER_IDS.has(c.name)) {
+        // Lower friction for smooth metal brace/post tubes so robots don't stick to them
+        friction = 0.12
+        restitution = 0.05
+      } else if (c.name.includes('SU') || c.name.includes('polycarbonate')) {
         friction = 0.35
         restitution = 0.06
       } else if (c.name.includes('floor') || c.name.includes('Tile')) {
         friction = 0.8
         restitution = 0.02
       }
+
+      const isBrace = BRACE_COLLIDER_IDS.has(c.name)
 
       result.push({
         id: c.name,
@@ -101,7 +111,16 @@
         vertices: scaledVerts,
         indices: new Uint32Array(indicesArr),
         friction,
-        restitution
+        restitution,
+        ...(isBrace
+          ? {
+              primitive: 'capsule' as const,
+              // Using capsule primitive eliminates sharp flat end-cap rims
+              // that cause dynamic colliders to snag or get wedged at angles.
+              cylinderHalfHeight: scale.y,
+              cylinderRadius: Math.min(scale.x, scale.z)
+            }
+          : {})
       })
     }
 
@@ -339,13 +358,29 @@ diffuseColor.a *= mix(1.0, ${SUPPRESSOR_OPACITY.toFixed(2)}, transparentPanelMas
   <!-- Physics Colliders (field.physics.json) -->
   {#each colliders as collider (collider.id)}
     <T.Group position={collider.position} rotation={collider.rotation}>
-      <RigidBody type="fixed">
-        <Collider
-          shape="trimesh"
-          args={[collider.vertices, collider.indices]}
-          friction={collider.friction}
-          restitution={collider.restitution}
-        />
+      <RigidBody type="fixed" userData={{ fieldColliderId: collider.id }}>
+        {#if collider.primitive === 'capsule'}
+          <Collider
+            shape="capsule"
+            args={[collider.cylinderHalfHeight!, collider.cylinderRadius!]}
+            friction={collider.friction}
+            restitution={collider.restitution}
+          />
+        {:else if collider.primitive === 'cylinder'}
+          <Collider
+            shape="cylinder"
+            args={[collider.cylinderHalfHeight!, collider.cylinderRadius!]}
+            friction={collider.friction}
+            restitution={collider.restitution}
+          />
+        {:else}
+          <Collider
+            shape="trimesh"
+            args={[collider.vertices, collider.indices]}
+            friction={collider.friction}
+            restitution={collider.restitution}
+          />
+        {/if}
       </RigidBody>
     </T.Group>
   {/each}
