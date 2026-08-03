@@ -8,13 +8,35 @@
   import Robot from './Robot.svelte'
   import Balls from './Balls.svelte'
   import Field from '$lib/components/Field.svelte'
+  import HumanPlayer from './HumanPlayer.svelte'
 
   import { resetScores } from '$lib/scoreStore'
   import type { ZoneAABB } from '$lib/scoreStore'
 
-  let { resetTrigger = 0, fov = 75, speed = 10, potatoMode = false } = $props();
+  type HumanPlayerBounds = {
+    minX: number
+    maxX: number
+    minZ: number
+    maxZ: number
+  }
+
+  type MatchRole = 'robot-controller' | 'human-player'
+  let {
+    resetTrigger = 0,
+    fov = 75,
+    speed = 10,
+    potatoMode = false,
+    role = 'robot-controller' as MatchRole
+  } = $props();
   let fieldAnchors = $state<Record<string, [number, number, number]>>({});
   let fieldZones = $state<ZoneAABB[]>([]);
+  let humanPlayerPosition = $state<[number, number, number]>([-4.41658, 1.8, 2.99308]);
+  let humanPlayerBounds = $state<HumanPlayerBounds>({
+    minX: -5.196519,
+    maxX: -3.636641,
+    minZ: 2.320723,
+    maxZ: 3.665437
+  });
   let readyToSpawn = $state(false);
 
   $effect(() => {
@@ -69,6 +91,7 @@
   onMount(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
+      if (role === 'human-player') return;
       if (key === 'w') keys.w = true;
       if (key === 'a') keys.a = true;
       if (key === 's') keys.s = true;
@@ -78,6 +101,7 @@
     };
     const handleKeyUp = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
+      if (role === 'human-player') return;
       if (key === 'w') keys.w = false;
       if (key === 'a') keys.a = false;
       if (key === 's') keys.s = false;
@@ -133,9 +157,13 @@
   });
 </script>
 
-<T.PerspectiveCamera makeDefault {fov} position={[0, 5, 10]}>
-  <OrbitControls target={cameraTarget} enableDamping={false} />
-</T.PerspectiveCamera>
+{#if role === 'human-player'}
+  <HumanPlayer position={humanPlayerPosition} bounds={humanPlayerBounds} {fov} />
+{:else}
+  <T.PerspectiveCamera makeDefault {fov} position={[0, 5, 10]}>
+    <OrbitControls target={cameraTarget} enableDamping={false} />
+  </T.PerspectiveCamera>
+{/if}
 
 <!-- Environment -->
 <Sky elevation={2} />
@@ -158,7 +186,11 @@
 
 <World framerate={potatoMode ? 30 : 60}>
   {#if readyToSpawn}
-    <Robot {resetTrigger} spawnPos={robotSpawnPos} />
+    <Robot
+      {resetTrigger}
+      spawnPos={robotSpawnPos}
+      controllerEnabled={role === 'robot-controller'}
+    />
     <!-- PU Foam Balls -->
     <Balls
       ballsData={balls}
@@ -167,7 +199,12 @@
       scoringZones={fieldZones}
     />
   {/if}
-  <Field bind:anchors={fieldAnchors} bind:zones={fieldZones} />
+  <Field
+    bind:anchors={fieldAnchors}
+    bind:zones={fieldZones}
+    bind:humanPlayerPosition
+    bind:humanPlayerBounds
+  />
 
   <!-- EVA Foam Ground (FTC Tiles) -->
   <CollisionGroups groups={[0]}>

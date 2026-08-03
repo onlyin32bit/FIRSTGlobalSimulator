@@ -8,7 +8,11 @@
   import { robotTelemetry } from './telemetry'
   import { robotPhysicsState, robotStorage } from './stores'
 
-  let { resetTrigger = 0, spawnPos = [0, 1.5, 3.15] } = $props();
+  let {
+    resetTrigger = 0,
+    spawnPos = [0, 1.5, 3.15],
+    controllerEnabled = true
+  } = $props();
 
   let rigidBody: RapierRigidBody | undefined = $state();
   
@@ -187,7 +191,7 @@
       }
     }
 
-    if (gp) {
+    if (controllerEnabled && gp) {
       // Left stick Y-axis (axes[1]) controls forward/back only.
       // Right stick X-axis (axes[2]) controls rotation only.
       const rawForward = -gp.axes[1];
@@ -203,13 +207,15 @@
       transferBtn = gp.buttons[0]?.pressed || false;
     }
 
-    const keyboardForward = Number(keys.forward) - Number(keys.reverse);
-    const keyboardTurn = Number(keys.left) - Number(keys.right);
+    const keyboardForward = controllerEnabled ? Number(keys.forward) - Number(keys.reverse) : 0;
+    const keyboardTurn = controllerEnabled ? Number(keys.left) - Number(keys.right) : 0;
     forwardInput = Math.max(-1, Math.min(1, forwardInput + keyboardForward));
     turnInput = Math.max(-1, Math.min(1, turnInput + keyboardTurn));
-    intakeBtn ||= keys.intake;
-    shootBtn ||= keys.shoot;
-    transferBtn ||= keys.transfer;
+    if (controllerEnabled) {
+      intakeBtn ||= keys.intake;
+      shootBtn ||= keys.shoot;
+      transferBtn ||= keys.transfer;
+    }
 
     let leftPower = forwardInput - turnInput;
     let rightPower = forwardInput + turnInput;

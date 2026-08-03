@@ -2,7 +2,15 @@
   import { Canvas } from '@threlte/core'
   import Scene from './Scene.svelte'
   import { robotTelemetry } from './telemetry'
-  import { robotSpecs, robotStorage, ballsInPlay } from './stores'
+  import {
+    robotSpecs,
+    robotStorage,
+    ballsInPlay,
+    humanPlayerCharge,
+    humanPlayerThrowMaxSpeed,
+    humanPlayerStorage,
+    humanPlayerTargetedBall
+  } from './stores'
   import { scores } from '$lib/scoreStore'
 
   import { onMount } from 'svelte'
@@ -12,6 +20,12 @@
   let speed = $state(10);
   let potatoMode = $state(false);
   let showPhysicsDebug = $state(true);
+  let role = $state<'robot-controller' | 'human-player'>('robot-controller');
+  let throwCharge = $state(0);
+
+  $effect(() => {
+    throwCharge = $humanPlayerCharge;
+  });
 
   function resetScene() {
     resetTrigger += 1;
@@ -27,6 +41,9 @@
       if (e.key.toLowerCase() === 'p' && !e.repeat) {
         showPhysicsDebug = !showPhysicsDebug;
       }
+      if (e.key.toLowerCase() === 'v' && !e.repeat) {
+        role = role === 'robot-controller' ? 'human-player' : 'robot-controller';
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
@@ -41,6 +58,17 @@
     >
       Reset / Unstick Robot (R)
     </button>
+
+    <div class="flex gap-1">
+      <button
+        class={`px-2 py-1 rounded flex-1 ${role === 'robot-controller' ? 'bg-blue-600 hover:bg-blue-500' : 'bg-gray-700/80 hover:bg-gray-600'}`}
+        onclick={() => (role = 'robot-controller')}
+      >Robot Controller</button>
+      <button
+        class={`px-2 py-1 rounded flex-1 ${role === 'human-player' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-gray-700/80 hover:bg-gray-600'}`}
+        onclick={() => (role = 'human-player')}
+      >Human Player</button>
+    </div>
     
     <div class="space-y-2 mt-1">
       <div class="flex flex-col gap-1">
@@ -148,6 +176,22 @@
           <span>Potato Mode (Performance)</span>
         </label>
       </div>
+
+      <div class="pt-1 mt-1 border-t border-gray-500/50 space-y-1">
+        <label for="human-throw-max-speed" class="flex justify-between">
+          <span>Human Throw Max Speed</span>
+          <span>{$humanPlayerThrowMaxSpeed.toFixed(1)} m/s</span>
+        </label>
+        <input
+          id="human-throw-max-speed"
+          type="range"
+          min="3"
+          max="20"
+          step="0.5"
+          bind:value={$humanPlayerThrowMaxSpeed}
+          class="w-full"
+        />
+      </div>
     </div>
     
     <div class="pt-1 mt-1 border-t border-gray-500/50 space-y-0.5 text-gray-300">
@@ -159,6 +203,8 @@
       <div>P: Toggle Physics Debug</div>
       <div>R: Unstick / Reset Robot</div>
       <div>Gamepad: Drive, Intake/Shoot (R1/L1), Transfer (A)</div>
+      <div>V: Switch Role · Human Player: WASD/mouse or gamepad</div>
+      <div>Human: E/Click/X grab ball under crosshair · hold/release mouse or A to throw</div>
     </div>
   </div>
   
@@ -170,6 +216,7 @@ Speed: {$robotTelemetry.speed.toFixed(3)} m/s
 Accel: {$robotTelemetry.accel.toFixed(3)} m/s²
 Turn: {($robotTelemetry.turnRate * (180 / Math.PI)).toFixed(1)}°/s
 Capacity: {$robotStorage} / {$robotSpecs.capacity} balls
+Human Player Balls: {$humanPlayerStorage}
 Field Balls: {$ballsInPlay}
 {#if showPhysicsDebug}
 --- PHYSICS DEBUG ---
@@ -196,7 +243,36 @@ Auto-unsticks: {$robotTelemetry.autoUnstickCount}
 
   {#key potatoMode}
     <Canvas dpr={potatoMode ? 1 : undefined}>
-      <Scene {resetTrigger} {fov} {speed} {potatoMode} />
+      <Scene {resetTrigger} {fov} {speed} {potatoMode} {role} />
     </Canvas>
   {/key}
+
+  {#if role === 'human-player'}
+    <div class="absolute inset-0 z-20 pointer-events-none flex items-center justify-center">
+      <div class="relative flex h-8 w-8 items-center justify-center text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]">
+        <span class={`absolute h-5 w-0.5 transition-colors duration-150 ${$humanPlayerTargetedBall ? 'bg-cyan-400 shadow-[0_0_8px_rgba(56,189,248,0.8)]' : 'bg-white'}`}></span>
+        <span class={`absolute h-0.5 w-5 transition-colors duration-150 ${$humanPlayerTargetedBall ? 'bg-cyan-400 shadow-[0_0_8px_rgba(56,189,248,0.8)]' : 'bg-white'}`}></span>
+        {#if throwCharge > 0}
+          <span
+            class="absolute -bottom-5 h-1 rounded bg-emerald-400"
+            style={`width: ${throwCharge * 32}px`}
+          ></span>
+        {/if}
+      </div>
+    </div>
+
+    {#if $humanPlayerTargetedBall && $humanPlayerTargetedBall.visible && $humanPlayerStorage === 0}
+      <div
+        class="pointer-events-none absolute z-30 flex items-center gap-2.5 rounded-xl bg-gray-950/85 px-3.5 py-2 text-white shadow-xl shadow-cyan-500/20 border border-cyan-400/50 backdrop-blur-md transition-all duration-200 ease-out animate-in fade-in zoom-in-95"
+        style={`left: ${$humanPlayerTargetedBall.screenX}px; top: ${$humanPlayerTargetedBall.screenY}px; transform: translate(-50%, -100%);`}
+      >
+        <kbd class="flex h-6 w-6 items-center justify-center rounded-md bg-cyan-500/25 border border-cyan-300/80 font-mono text-xs font-black text-cyan-200 shadow-[0_0_10px_rgba(56,189,248,0.4)]">
+          E
+        </kbd>
+        <span class="text-xs font-bold tracking-wider text-cyan-50 uppercase drop-shadow">
+          Pick Up Ball
+        </span>
+      </div>
+    {/if}
+  {/if}
 </div>

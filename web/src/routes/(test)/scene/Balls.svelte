@@ -1,9 +1,21 @@
 <script lang="ts">
-  import { useTask, T } from '@threlte/core';
+  import { useTask, useThrelte, T } from '@threlte/core';
   import { useRapier } from '@threlte/rapier';
-  import { Object3D } from 'three';
+  import { Object3D, Vector3 } from 'three';
   import { onMount, onDestroy } from 'svelte';
-  import { robotPhysicsState, robotSpecs, robotStorage, ballsInPlay } from './stores';
+  import {
+    robotPhysicsState,
+    robotSpecs,
+    robotStorage,
+    ballsInPlay,
+    humanPlayerThrow,
+    humanPlayerThrowMaxSpeed,
+    humanPlayerGrabRequest,
+    humanPlayerStorage,
+    humanPlayerHeldPosition,
+    humanPlayerTargetedBall,
+    type TargetedBallInfo
+  } from './stores';
   import { get } from 'svelte/store';
   import { addScore } from '$lib/scoreStore';
   import type { ZoneAABB } from '$lib/scoreStore';
@@ -16,11 +28,17 @@
   } = $props();
   
   const { world, rapier } = useRapier();
-  
+  const { camera } = useThrelte();
+
   let instancedMeshRef: any = $state();
   const dummyObj = new Object3D();
   let rapierBodies: any[] = [];
   let ballStates: string[] = [];
+
+  let auraPos = $state<[number, number, number] | null>(null);
+  let pulseTimer = 0;
+  let auraScale = $state(1.0);
+  let auraOpacity = $state(0.5);
   // Tracks which scoring zone each ball was inside last frame (by zone id or '').
   // Used for enter-edge detection: score fires only on the transition from outside → inside.
   let ballZoneState: string[] = [];
@@ -33,6 +51,8 @@
   let lastIntakeTime = 0;
   let lastShootTime = 0;
   let lastTransferTime = 0;
+  let lastHumanThrowId = 0;
+  let lastHumanGrabRequest = 0;
 
   // Lightweight PU foam: some rebound, but far less than a rubber ball.
   const BALL_RESTITUTION = 0.4;
@@ -88,6 +108,11 @@
     lastIntakeTime = 0;
     lastShootTime = 0;
     lastTransferTime = 0;
+    lastHumanThrowId = get(humanPlayerThrow).id;
+    lastHumanGrabRequest = get(humanPlayerGrabRequest).id;
+    humanPlayerStorage.set(0);
+    humanPlayerTargetedBall.set(null);
+    auraPos = null;
     robotStorage.set(0);
     ballsInPlay.set(ballsData.length);
     lastReportedInPlay = ballsData.length;
@@ -127,6 +152,8 @@
   
   onDestroy(() => {
     rapierBodies.forEach(b => world.removeRigidBody(b));
+    humanPlayerTargetedBall.set(null);
+    auraPos = null;
   });
 
   useTask((delta) => {
@@ -136,6 +163,148 @@
     const specs = get(robotSpecs);
     let storage = get(robotStorage);
     let storageChanged = false;
+
+    pulseTimer += delta;
+    auraScale = 1.0 + Math.sin(pulseTimer * 6.0) * 0.08;
+    auraOpacity = 0.45 + Math.sin(pulseTimer * 6.0) * 0.2;
+
+    const cam = camera.current;
+    let currentTargeted: TargetedBallInfo | null = null;
+    let currentAuraPos: [number, number, number] | null = null;
+
+    if (cam && get(humanPlayerStorage) === 0) {
+      const fireShield = scoringZones.find((zone) => zone.id === 'redFSscore');
+      const rayOrigin = cam.position;
+      const rayDirection = new Vector3();
+      cam.getWorldDirection(rayDirection).normalize();
+
+      let targetIndex = -1;
+      let closestCrosshairDistance = Number.POSITIVE_INFINITY;
+      let closestRayDistance = Number.POSITIVE_INFINITY;
+      let targetPos = { x: 0, y: 0, z: 0 };
+
+      for (let index = 0; index < rapierBodies.length; index++) {
+        const body = rapierBodies[index];
+        if (ballStates[index] !== 'active') continue;
+        const pos = body.translation();
+
+        // Check if ball is within Fire Shield bounds (physical Fire Shield structure)
+        const inFireShield = fireShield
+          ? (pos.x >= fireShield.min[0] - 0.25 && pos.x <= fireShield.max[0] + 0.25 &&
+             pos.y >= 0.4 && pos.y <= 1.8 &&
+             pos.z >= fireShield.min[2] - 0.25 && pos.z <= fireShield.max[2] + 0.9)
+          : (pos.x >= -3.6 && pos.x <= -2.9 && pos.y >= 0.4 && pos.y <= 1.8 && pos.z >= 2.2 && pos.z <= 3.6);
+
+        if (!inFireShield) continue;
+
+        const toBallX = pos.x - rayOrigin.x;
+        const toBallY = pos.y - rayOrigin.y;
+        const toBallZ = pos.z - rayOrigin.z;
+        const rayDistance =
+          toBallX * rayDirection.x +
+          toBallY * rayDirection.y +
+          toBallZ * rayDirection.z;
+        if (rayDistance <= 0 || rayDistance > 15.0) continue;
+
+        const closestX = rayOrigin.x + rayDirection.x * rayDistance;
+        const closestY = rayOrigin.y + rayDirection.y * rayDistance;
+        const closestZ = rayOrigin.z + rayDirection.z * rayDistance;
+        const crosshairDistance = Math.hypot(
+          pos.x - closestX,
+          pos.y - closestY,
+          pos.z - closestZ
+        );
+
+        const isBetterTarget =
+          crosshairDistance < closestCrosshairDistance ||
+          (Math.abs(crosshairDistance - closestCrosshairDistance) < 1e-5 &&
+            rayDistance < closestRayDistance);
+
+        if (crosshairDistance <= 0.18 && isBetterTarget) {
+          targetIndex = index;
+          closestCrosshairDistance = crosshairDistance;
+          closestRayDistance = rayDistance;
+          targetPos = { x: pos.x, y: pos.y, z: pos.z };
+        }
+      }
+
+      if (targetIndex >= 0) {
+        const projVec = new Vector3(targetPos.x, targetPos.y + 0.08, targetPos.z);
+        projVec.project(cam);
+
+        const width = typeof window !== 'undefined' ? window.innerWidth : 1920;
+        const height = typeof window !== 'undefined' ? window.innerHeight : 1080;
+        const screenX = (projVec.x * 0.5 + 0.5) * width;
+        const screenY = (-projVec.y * 0.5 + 0.5) * height;
+
+        currentTargeted = {
+          id: targetIndex,
+          x: targetPos.x,
+          y: targetPos.y,
+          z: targetPos.z,
+          screenX,
+          screenY,
+          visible: projVec.z < 1.0
+        };
+        currentAuraPos = [targetPos.x, targetPos.y, targetPos.z];
+      }
+    }
+
+    auraPos = currentAuraPos;
+    humanPlayerTargetedBall.set(currentTargeted);
+
+    // Human players can pick up the targeted ball on grab request.
+    const grabRequest = get(humanPlayerGrabRequest);
+    if (grabRequest.id !== lastHumanGrabRequest) {
+      lastHumanGrabRequest = grabRequest.id;
+      if (get(humanPlayerStorage) === 0 && currentTargeted) {
+        const grabbedIndex = currentTargeted.id;
+        if (grabbedIndex >= 0 && ballStates[grabbedIndex] === 'active') {
+          ballStates[grabbedIndex] = 'human-held';
+          visualSwallows.delete(grabbedIndex);
+          rapierBodies[grabbedIndex].setTranslation(
+            new rapier.Vector3(0, -100, 0),
+            true
+          );
+          rapierBodies[grabbedIndex].setLinvel(new rapier.Vector3(0, 0, 0), true);
+          rapierBodies[grabbedIndex].setAngvel(new rapier.Vector3(0, 0, 0), true);
+          humanPlayerStorage.update((count) => count + 1);
+          humanPlayerTargetedBall.set(null);
+          auraPos = null;
+        }
+      }
+    }
+
+    // Throw an actual ball held by the human player. No active field ball is
+    // teleported in, and no new ball is spawned for this action.
+    const throwRequest = get(humanPlayerThrow);
+    if (throwRequest.id !== lastHumanThrowId) {
+      lastHumanThrowId = throwRequest.id;
+      const throwIndex = ballStates.findIndex((state) => state === 'human-held')
+      if (throwIndex >= 0) {
+        const origin = throwRequest.origin;
+        const direction = throwRequest.direction;
+        const maxThrowSpeed = Math.max(1, get(humanPlayerThrowMaxSpeed));
+        const throwSpeed = Math.min(maxThrowSpeed, 2.0 + Math.min(1, throwRequest.power) * (maxThrowSpeed - 2.0));
+        const body = rapierBodies[throwIndex];
+
+        ballStates[throwIndex] = 'active';
+        humanPlayerStorage.update((count) => Math.max(0, count - 1));
+        visualSwallows.delete(throwIndex);
+        body.setTranslation(new rapier.Vector3(origin.x, origin.y, origin.z), true);
+        body.setLinvel(
+          new rapier.Vector3(
+            direction.x * throwSpeed,
+            direction.y * throwSpeed,
+            direction.z * throwSpeed
+          ),
+          true
+        );
+        body.setAngvel(new rapier.Vector3(0, 18, 0), true);
+        previousBallPositions[throwIndex] = { x: origin.x, y: origin.y, z: origin.z };
+        ballZoneState[throwIndex] = '';
+      }
+    }
 
     // --- INTAKE LOGIC ---
     if (rState.isIntakeActive && storage < specs.capacity) {
@@ -484,21 +653,6 @@
           if (insideNow) hitZone = zone.id;
           if ((insideNow || crossedZone) && ballZoneState[i] !== zone.id) {
             addScore(zone.id);
-
-            // Balls are consumed when they enter either Fire Shield.
-            if (zone.id === 'blueFSscore' || zone.id === 'redFSscore') {
-              const removedPosition = { x: 0, y: -100, z: 0 };
-              ballStates[i] = 'scored';
-              rapierBodies[i].setTranslation(
-                new rapier.Vector3(removedPosition.x, removedPosition.y, removedPosition.z),
-                true
-              );
-              rapierBodies[i].setLinvel(new rapier.Vector3(0, 0, 0), true);
-              rapierBodies[i].setAngvel(new rapier.Vector3(0, 0, 0), true);
-              previousBallPositions[i] = removedPosition;
-              ballZoneState[i] = '';
-              break;
-            }
           }
         }
 
@@ -530,6 +684,10 @@
       } else if (ballStates[i] === 'swallowing' && visualSwallows.has(i)) {
         const vState = visualSwallows.get(i);
         pos = { x: vState.x, y: vState.y, z: vState.z };
+      } else if (ballStates[i] === 'human-held') {
+        // The held ball is rendered by HumanPlayer.svelte. Keep its physics
+        // body suspended until the throw releases it.
+        pos = { x: 0, y: -100, z: 0 };
       }
       
       dummyObj.position.set(pos.x, pos.y, pos.z);
@@ -560,4 +718,29 @@
       <T.MeshStandardMaterial color="#f97316" roughness={0.9} metalness={0.0} />
     {/if}
   </T.InstancedMesh>
+{/if}
+
+{#if auraPos}
+  <!-- Soft glowing emissive aura around targeted ball -->
+  <T.Mesh position={auraPos} scale={[auraScale, auraScale, auraScale]}>
+    <T.SphereGeometry args={[0.055, 24, 24]} />
+    <T.MeshBasicMaterial
+      color="#38bdf8"
+      transparent={true}
+      opacity={auraOpacity}
+      depthWrite={false}
+    />
+  </T.Mesh>
+
+  <!-- Accent wireframe rim shell for crisp interactable outline -->
+  <T.Mesh position={auraPos} scale={[auraScale * 1.08, auraScale * 1.08, auraScale * 1.08]}>
+    <T.SphereGeometry args={[0.055, 16, 16]} />
+    <T.MeshBasicMaterial
+      color="#7dd3fc"
+      wireframe={true}
+      transparent={true}
+      opacity={auraOpacity * 0.7}
+      depthWrite={false}
+    />
+  </T.Mesh>
 {/if}

@@ -40,7 +40,26 @@
     }>
   }
 
-  let { anchors = $bindable({}), zones = $bindable<ZoneAABB[]>([]) } = $props()
+  type HumanPlayerBounds = {
+    minX: number
+    maxX: number
+    minZ: number
+    maxZ: number
+  }
+
+  let {
+    anchors = $bindable({}),
+    zones = $bindable<ZoneAABB[]>([]),
+    humanPlayerPosition = $bindable<[number, number, number]>([0, 1.8, 0]),
+    // redHPzone in field.semantics.json: transform [-4.41658, 2.99308]
+    // with local rectangle [-1, 1] x [-1, 1].
+    humanPlayerBounds = $bindable<HumanPlayerBounds>({
+      minX: -5.196519,
+      maxX: -3.636641,
+      minZ: 2.320723,
+      maxZ: 3.665437
+    })
+  } = $props()
 
   const GAME_ASSET_ROOT = '/games/fgc-2026'
   const SUPPRESSOR_OPACITY = 0.35
@@ -199,6 +218,38 @@
       colliders = parseAssimpPhysics(physData)
       semantics = parseAssimpSemantics(semData)
       anchors = semantics.anchors
+      const redHumanPlayerZone = semantics.zones.find((zone) => zone.id === 'redHPzone')
+      if (redHumanPlayerZone) {
+        humanPlayerPosition = [redHumanPlayerZone.position[0], 1.8, redHumanPlayerZone.position[2]]
+
+        const zoneQuaternion = new Quaternion().setFromEuler(
+          new Euler(...redHumanPlayerZone.rotation)
+        )
+        const transformedVertex = new Vector3()
+        let minX = Infinity
+        let maxX = -Infinity
+        let minZ = Infinity
+        let maxZ = -Infinity
+
+        for (let i = 0; i < redHumanPlayerZone.vertices.length; i += 3) {
+          transformedVertex
+            .set(
+              redHumanPlayerZone.vertices[i],
+              redHumanPlayerZone.vertices[i + 1],
+              redHumanPlayerZone.vertices[i + 2]
+            )
+            .applyQuaternion(zoneQuaternion)
+
+          minX = Math.min(minX, transformedVertex.x + redHumanPlayerZone.position[0])
+          maxX = Math.max(maxX, transformedVertex.x + redHumanPlayerZone.position[0])
+          minZ = Math.min(minZ, transformedVertex.z + redHumanPlayerZone.position[2])
+          maxZ = Math.max(maxZ, transformedVertex.z + redHumanPlayerZone.position[2])
+        }
+
+        if (Number.isFinite(minX) && Number.isFinite(minZ)) {
+          humanPlayerBounds = { minX, maxX, minZ, maxZ }
+        }
+      }
 
       // The 5 zone IDs that affect the scoreboard (from FIELDSEMANTICSDEF.txt)
       const SCORING_ZONE_IDS = new Set([
