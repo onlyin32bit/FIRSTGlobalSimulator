@@ -200,6 +200,26 @@ export class APIClient {
 		);
 	}
 
+	getGamePackMetadata(id: string) {
+		return this.request<{
+			manifest: {
+				id: string;
+				name: string;
+				version: string;
+				engineVersion: string;
+				field: Record<string, unknown>;
+				objects: Array<Record<string, unknown>>;
+				phases: Array<Record<string, unknown>>;
+				scripts: Record<string, string>;
+			};
+			scripts: Array<{
+				path: string;
+				functions: Array<{ name: string; parameters: string[] }>;
+				engineCalls: string[];
+			}>;
+		}>(`/api/game-packs/${encodeURIComponent(id)}/metadata`);
+	}
+
 	getAdminOverview() {
 		return this.request<{
 			metrics: {

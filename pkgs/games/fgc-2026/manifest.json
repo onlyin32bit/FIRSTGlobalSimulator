@@ -27,7 +27,8 @@
   "scripts": {
     "scoring": "rules/scoring.rhai",
     "penalties": "rules/penalties.rhai",
-    "robot_rules": "rules/robot.rhai"
+    "robot_rules": "rules/robot.rhai",
+    "arena": "rules/arena.rhai"
   },
   "directories": {
     "rules": "rules",

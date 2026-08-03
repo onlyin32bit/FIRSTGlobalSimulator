@@ -15,7 +15,17 @@
 		yaw: number;
 		color: string;
 	};
+	type FieldObject = {
+		id: string;
+		objectId: string;
+		x: number;
+		y: number;
+		z: number;
+		radius: number;
+		color: string;
+	};
 	let players = $state<Player[]>([]);
+	let objects = $state<FieldObject[]>([]);
 	let status = $state('Connecting…');
 	let error = $state('');
 	let localId = $state('');
@@ -23,6 +33,7 @@
 	let sequence = 0;
 	let pingNonce = 0;
 	let pingMs = $state<number | null>(null);
+	let packVersion = $state('Loading pack…');
 	const pendingPings = new Map<number, number>();
 	const pressed = new Set<string>();
 	const inputKeys = new Set([
@@ -93,7 +104,11 @@
 			socket.onmessage = (event) => {
 				try {
 					const message = JSON.parse(event.data);
-					if (message.type === 'state') players = message.players;
+					if (message.type === 'state') {
+						players = message.players;
+						objects = message.objects ?? [];
+						packVersion = `${message.gamePackId ?? 'fgc-2026'} · v${message.gamePackVersion ?? '—'}`;
+					}
 					if (message.type === 'pong') {
 						const started = pendingPings.get(message.nonce);
 						if (started !== undefined) {
@@ -128,6 +143,7 @@
 				? '—'
 				: `${Math.round(pingMs)} ms`}
 		</p>
+		<p class="mt-1 text-xs text-white/60">Pack: {packVersion}</p>
 		<p class="mt-2 text-xs text-white/60">W/S drive · A/D turn · Arrow keys also work</p>
 		{#if error}<p class="mt-2 text-red-300">{error}</p>{/if}
 	</div>
@@ -159,7 +175,11 @@
 			sectionSize={4}
 			fadeDistance={30}
 		/><T.Group
-			>{#each players as player}<T.Group
+			>{#each objects as object}<T.Mesh position={[object.x, object.y, object.z]} castShadow
+					><T.SphereGeometry args={[object.radius, 12, 8]} /><T.MeshStandardMaterial
+						color={object.color}
+					/></T.Mesh
+				>{/each}{#each players as player}<T.Group
 					position={[player.x, player.y, player.z]}
 					rotation={[0, player.yaw, 0]}
 					><T.Mesh castShadow
