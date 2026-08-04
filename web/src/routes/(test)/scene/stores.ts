@@ -165,3 +165,4 @@ export type TargetedBallInfo = {
 };
 
 export const humanPlayerTargetedBall = writable<TargetedBallInfo | null>(null);
+export const handleLiftActive = writable<boolean>(false);

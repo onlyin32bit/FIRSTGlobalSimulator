@@ -1,18 +1,22 @@
 <script lang="ts">
-  import { T } from '@threlte/core'
-  import { useGltf, useMeshopt } from '@threlte/extras'
+  import { T, useTask, useThrelte } from '@threlte/core'
+  import { useGltf, useMeshopt, HTML } from '@threlte/extras'
   import { RigidBody, Collider } from '@threlte/rapier'
   import {
     Euler,
     Matrix4,
     Mesh,
     MeshStandardMaterial,
+    MeshBasicMaterial,
     Object3D,
     Quaternion,
-    Vector3
+    Vector3,
+    Raycaster
   } from 'three'
   import { onMount } from 'svelte'
+  import { get } from 'svelte/store'
   import type { ZoneAABB } from '$lib/scoreStore'
+  import { handleLiftActive } from '../../routes/(test)/scene/stores'
 
   type Vector3Tuple = [number, number, number]
 
@@ -86,6 +90,84 @@
 
   let colliders = $state<ParsedCollider[]>([])
   let semantics = $state<ParsedSemantics>({ anchors: {}, zones: [] })
+  let redHandleMesh: Object3D | null = null
+  let blueHandleMesh: Object3D | null = null
+  let initialRedQuat = new Quaternion()
+  let initialBlueQuat = new Quaternion()
+  const localXAxis = new Vector3(1, 0, 0)
+  const tmpQuat = new Quaternion()
+  let currentRedAngleOffset = 0
+  let currentBlueAngleOffset = 0
+  const HANDLE_LIFT_RAD = -8.3 * (Math.PI / 180)
+
+  let isRedPulling = false
+  let isBluePulling = false
+
+  let pulseTimer = 0
+  let auraScale = $state(1.0)
+  let auraOpacity = $state(0.5)
+  let targetedHandlePos = $state<[number, number, number] | null>(null)
+  let targetedHandleMesh = $state<Object3D | null>(null)
+  let crosshairTextPos = $state<[number, number, number] | null>(null)
+
+  let redHandleAura: Object3D | null = null
+  let blueHandleAura: Object3D | null = null
+
+  function createHandleAura(source: Object3D) {
+    // Clean up any old auras from HMR
+    for (let i = source.children.length - 1; i >= 0; i--) {
+      if (source.children[i].name === 'HandleAuraWrapper') {
+        source.remove(source.children[i])
+      }
+    }
+
+    const wrapper = new Object3D()
+    wrapper.name = 'HandleAuraWrapper'
+    
+    const wireframeMesh = source.clone(true)
+    wireframeMesh.position.set(0, 0, 0)
+    wireframeMesh.quaternion.identity()
+    wireframeMesh.scale.set(1, 1, 1)
+
+    wireframeMesh.traverse((child) => {
+      if (child instanceof Mesh) {
+        child.material = new MeshBasicMaterial({
+          color: '#7dd3fc',
+          wireframe: true,
+          transparent: true,
+          opacity: 0.5,
+          depthWrite: false,
+          depthTest: false
+        })
+      }
+    })
+
+    const coreMesh = source.clone(true)
+    coreMesh.position.set(0, 0, 0)
+    coreMesh.quaternion.identity()
+    coreMesh.scale.set(1, 1, 1)
+
+    coreMesh.traverse((child) => {
+      if (child instanceof Mesh) {
+        child.material = new MeshBasicMaterial({
+          color: '#38bdf8',
+          transparent: true,
+          opacity: 0.3,
+          depthWrite: false,
+          depthTest: false
+        })
+      }
+    })
+
+    wrapper.add(wireframeMesh)
+    wrapper.add(coreMesh)
+    wrapper.visible = false
+    
+    source.add(wrapper)
+    return wrapper
+  }
+
+  const { camera } = useThrelte()
 
   function parseAssimpPhysics(data: any): ParsedCollider[] {
     if (!data || !data.rootnode || !data.rootnode.children || !data.meshes) return []
@@ -234,12 +316,12 @@
       colliders = parseAssimpPhysics(physData)
       semantics = parseAssimpSemantics(semData)
       anchors = semantics.anchors
-      const redHumanPlayerZone = semantics.zones.find((zone) => zone.id === 'redHPzone')
-      if (redHumanPlayerZone) {
-        humanPlayerPosition = [redHumanPlayerZone.position[0], 1.8, redHumanPlayerZone.position[2]]
+      const computeZoneData = (zoneId: string) => {
+        const zone = semantics.zones.find((z) => z.id === zoneId)
+        if (!zone) return null
 
         const zoneQuaternion = new Quaternion().setFromEuler(
-          new Euler(...redHumanPlayerZone.rotation)
+          new Euler(...zone.rotation)
         )
         const transformedVertex = new Vector3()
         let minX = Infinity
@@ -247,24 +329,41 @@
         let minZ = Infinity
         let maxZ = -Infinity
 
-        for (let i = 0; i < redHumanPlayerZone.vertices.length; i += 3) {
+        for (let i = 0; i < zone.vertices.length; i += 3) {
           transformedVertex
             .set(
-              redHumanPlayerZone.vertices[i],
-              redHumanPlayerZone.vertices[i + 1],
-              redHumanPlayerZone.vertices[i + 2]
+              zone.vertices[i],
+              zone.vertices[i + 1],
+              zone.vertices[i + 2]
             )
             .applyQuaternion(zoneQuaternion)
 
-          minX = Math.min(minX, transformedVertex.x + redHumanPlayerZone.position[0])
-          maxX = Math.max(maxX, transformedVertex.x + redHumanPlayerZone.position[0])
-          minZ = Math.min(minZ, transformedVertex.z + redHumanPlayerZone.position[2])
-          maxZ = Math.max(maxZ, transformedVertex.z + redHumanPlayerZone.position[2])
+          minX = Math.min(minX, transformedVertex.x + zone.position[0])
+          maxX = Math.max(maxX, transformedVertex.x + zone.position[0])
+          minZ = Math.min(minZ, transformedVertex.z + zone.position[2])
+          maxZ = Math.max(maxZ, transformedVertex.z + zone.position[2])
         }
 
         if (Number.isFinite(minX) && Number.isFinite(minZ)) {
-          humanPlayerBounds = { minX, maxX, minZ, maxZ }
+          return {
+            pos: [zone.position[0], 1.8, zone.position[2]] as [number, number, number],
+            bounds: { minX, maxX, minZ, maxZ }
+          }
         }
+        return null
+      }
+
+      const redParsed = computeZoneData('redHPzone')
+      const blueParsed = computeZoneData('blueHPzone')
+
+      if (redParsed || blueParsed) {
+        parsedHpZones = {
+          red: redParsed ?? parsedHpZones.red,
+          blue: blueParsed ?? parsedHpZones.blue
+        }
+        const currentHp = parsedHpZones[humanPlayerAlliance] ?? parsedHpZones.red
+        humanPlayerPosition = currentHp.pos
+        humanPlayerBounds = currentHp.bounds
       }
 
       // The 5 zone IDs that affect the scoreboard (from FIELDSEMANTICSDEF.txt)
@@ -310,8 +409,157 @@
       })
     })
 
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === 'e') {
+        handleLiftActive.set(true)
+      }
+    }
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === 'e') {
+        handleLiftActive.set(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+
     return () => {
       cancelled = true
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+    }
+  })
+
+  useTask((delta) => {
+    pulseTimer += delta
+    auraScale = 1.0 + Math.sin(pulseTimer * 6.0) * 0.08
+    auraOpacity = 0.45 + Math.sin(pulseTimer * 6.0) * 0.2
+
+    const cam = camera.current
+    let newTargetedPos: [number, number, number] | null = null
+    let newTargetedMesh: Object3D | null = null
+
+    if (cam) {
+      const rayOrigin = cam.position
+      const rayDirection = new Vector3()
+      cam.getWorldDirection(rayDirection).normalize()
+
+      const raycaster = new Raycaster()
+      raycaster.set(rayOrigin, rayDirection)
+      
+      let closestDist = 15.0
+      
+      const checkHandle = (handleMesh: Object3D | null) => {
+        if (!handleMesh) return false
+        const intersects = raycaster.intersectObject(handleMesh, true)
+        let hit = false
+        for (const intersect of intersects) {
+          // Ignore any object that is an aura or inside HandleAuraWrapper
+          let isAura = false
+          intersect.object.traverseAncestors((ancestor) => {
+            if (ancestor.name === 'HandleAuraWrapper') isAura = true
+          })
+          if (isAura || intersect.object.name === 'HandleAuraWrapper') continue
+          if ((intersect.object as Mesh).material instanceof MeshBasicMaterial) continue
+
+          if (intersect.distance < closestDist) {
+            closestDist = intersect.distance
+            hit = true
+          }
+        }
+        return hit
+      }
+
+      let hitRed = checkHandle(redHandleMesh)
+      let hitBlue = checkHandle(blueHandleMesh)
+      if (hitBlue) hitRed = false // Only target the closest one
+
+      if (hitRed && redHandleMesh) {
+        newTargetedMesh = redHandleMesh
+        const pos = new Vector3()
+        redHandleMesh.getWorldPosition(pos)
+        pos.y += 0.05
+        pos.z += 0.1
+        newTargetedPos = [pos.x, pos.y, pos.z]
+      } else if (hitBlue && blueHandleMesh) {
+        newTargetedMesh = blueHandleMesh
+        const pos = new Vector3()
+        blueHandleMesh.getWorldPosition(pos)
+        pos.y += 0.05
+        pos.z += 0.1
+        newTargetedPos = [pos.x, pos.y, pos.z]
+      }
+    }
+    targetedHandlePos = newTargetedPos
+    targetedHandleMesh = newTargetedMesh
+
+    const isLiftPressed = get(handleLiftActive)
+
+    if (isLiftPressed) {
+      if (!isRedPulling && targetedHandleMesh === redHandleMesh) {
+        isRedPulling = true
+      }
+      if (!isBluePulling && targetedHandleMesh === blueHandleMesh) {
+        isBluePulling = true
+      }
+    } else {
+      isRedPulling = false
+      isBluePulling = false
+    }
+
+    const redTargetOffset = isRedPulling ? HANDLE_LIFT_RAD : 0
+    const blueTargetOffset = isBluePulling ? HANDLE_LIFT_RAD : 0
+
+    const lerpFactor = Math.min(1.0, 15.0 * delta)
+
+    currentRedAngleOffset += (redTargetOffset - currentRedAngleOffset) * lerpFactor
+    currentBlueAngleOffset += (blueTargetOffset - currentBlueAngleOffset) * lerpFactor
+
+    if (redHandleMesh) {
+      tmpQuat.setFromAxisAngle(localXAxis, currentRedAngleOffset)
+      redHandleMesh.quaternion.copy(initialRedQuat).multiply(tmpQuat)
+    }
+    if (blueHandleMesh) {
+      tmpQuat.setFromAxisAngle(localXAxis, currentBlueAngleOffset)
+      blueHandleMesh.quaternion.copy(initialBlueQuat).multiply(tmpQuat)
+    }
+
+    if (targetedHandleMesh && cam) {
+      const forward = new Vector3()
+      cam.getWorldDirection(forward)
+      const right = new Vector3().crossVectors(forward, new Vector3(0, 1, 0)).normalize()
+      const up = new Vector3(0, 1, 0)
+
+      const textPos = new Vector3()
+        .copy(cam.position)
+        .addScaledVector(forward, 0.8)
+        .addScaledVector(right, 0.15)
+        .addScaledVector(up, -0.05)
+
+      crosshairTextPos = [textPos.x, textPos.y, textPos.z]
+    } else {
+      crosshairTextPos = null
+    }
+
+    if (redHandleAura) {
+      redHandleAura.visible = (targetedHandleMesh === redHandleMesh)
+      if (redHandleAura.visible) {
+        redHandleAura.traverse(c => {
+          if (c instanceof Mesh) {
+            c.material.opacity = c.material.wireframe ? auraOpacity * 0.7 : auraOpacity
+          }
+        })
+      }
+    }
+    if (blueHandleAura) {
+      blueHandleAura.visible = (targetedHandleMesh === blueHandleMesh)
+      if (blueHandleAura.visible) {
+        blueHandleAura.traverse(c => {
+          if (c instanceof Mesh) {
+            c.material.opacity = c.material.wireframe ? auraOpacity * 0.7 : auraOpacity
+          }
+        })
+      }
     }
   })
 
@@ -321,6 +569,21 @@
     const transparentMaterials = new Map<MeshStandardMaterial, MeshStandardMaterial>()
 
     scene.traverse((object) => {
+      if (object.name === 'RedHandle') {
+        redHandleMesh = object
+        if (!object.userData.initialQuat) {
+          object.userData.initialQuat = object.quaternion.clone()
+        }
+        initialRedQuat.copy(object.userData.initialQuat)
+      }
+      if (object.name === 'BlueHandle') {
+        blueHandleMesh = object
+        if (!object.userData.initialQuat) {
+          object.userData.initialQuat = object.quaternion.clone()
+        }
+        initialBlueQuat.copy(object.userData.initialQuat)
+      }
+
       if (!(object instanceof Mesh)) return
 
       const sourceMaterials = Array.isArray(object.material)
@@ -411,6 +674,13 @@ diffuseColor.a *= mix(1.0, ${SUPPRESSOR_OPACITY.toFixed(2)}, transparentPanelMas
         : configuredMaterials[0]
     })
 
+    if (redHandleMesh && !redHandleAura) {
+      redHandleAura = createHandleAura(redHandleMesh)
+    }
+    if (blueHandleMesh && !blueHandleAura) {
+      blueHandleAura = createHandleAura(blueHandleMesh)
+    }
+
     configuredScenes.add(scene)
     return scene
   }
@@ -451,4 +721,12 @@ diffuseColor.a *= mix(1.0, ${SUPPRESSOR_OPACITY.toFixed(2)}, transparentPanelMas
       </RigidBody>
     </T.Group>
   {/each}
+
+  {#if crosshairTextPos}
+    <HTML position={crosshairTextPos} center pointerEvents="none">
+      <div class="pointer-events-none text-white text-xs font-bold bg-black/70 px-2.5 py-1 rounded-md shadow-lg border border-white/20 whitespace-nowrap">
+        Press E to Pull Handle
+      </div>
+    </HTML>
+  {/if}
 </T.Group>

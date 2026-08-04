@@ -8,7 +8,8 @@
     humanPlayerThrow,
     humanPlayerGrabRequest,
     humanPlayerStorage,
-    humanPlayerHeldPosition
+    humanPlayerHeldPosition,
+    handleLiftActive
   } from './stores'
 
   type HumanPlayerBounds = {
@@ -86,7 +87,10 @@
 
   function setKey(event: KeyboardEvent, pressed: boolean) {
     const key = event.key.toLowerCase()
-    if (pressed && key === 'e' && !event.repeat) requestGrab()
+    if (key === 'e') {
+      handleLiftActive.set(pressed)
+      if (pressed && !event.repeat) requestGrab()
+    }
     if (key === 'w') keys.forward = pressed
     if (key === 's') keys.back = pressed
     if (key === 'a') keys.left = pressed
@@ -179,6 +183,11 @@
 
     if (gamepadGrabbing && !gamepadWasGrabbing) requestGrab()
     gamepadWasGrabbing = gamepadGrabbing
+
+    const gamepadLiftHandle = gamepad?.buttons[2]?.pressed || gamepad?.buttons[5]?.pressed || false
+    if (gamepadLiftHandle) {
+      handleLiftActive.set(true)
+    }
 
     cam.rotation.set(pitch, yaw, 0, 'YXZ')
 
