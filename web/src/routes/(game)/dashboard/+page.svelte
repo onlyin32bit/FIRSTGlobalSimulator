@@ -1,119 +1,254 @@
 <script lang="ts">
+	import {
+		IconActivity,
+		IconArrowRight,
+		IconBox,
+		IconPlayerPlay,
+		IconPlus,
+		IconRobot,
+		IconWorld
+	} from '@tabler/icons-svelte';
 	import { Button } from '$lib/components/ui/button';
 	import * as Card from '$lib/components/ui/card';
-	import { Input } from '$lib/components/ui/input';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
-	import { api } from '$lib/api';
+	import { ApiError, api } from '$lib/api';
 
-	// Svelte 5 state runes
 	let matchId = $state('');
 	let showCreateMatch = $state(false);
+	let isCreating = $state(false);
+	let errorMessage = $state('');
 
-	// Basic interactions mocked
 	function joinMatch() {
-		if (!matchId) return;
-		window.location.href = `/join/${matchId}`;
-	}
-
-	function openCreateMatch() {
-		showCreateMatch = true;
+		const normalizedMatchId = matchId.trim();
+		if (normalizedMatchId === 'test-match') {
+			window.location.href = '/match/test-match';
+			return;
+		}
+		errorMessage = 'Only the always-on test-match is available to join right now.';
 	}
 
 	async function submitCreateMatch() {
-		// Just a simple mock/actual fetch
+		isCreating = true;
+		errorMessage = '';
 		try {
 			const { match_id } = await api.createMatch({ gamePackId: 'fgc-2026' });
-			window.location.href = `/join/${match_id}`;
-		} catch (e) {
-			console.error('Network error creating match:', e);
+			matchId = match_id;
+			showCreateMatch = false;
+			errorMessage = `Match ${match_id} was created. Match joining will be available in a follow-up release.`;
+		} catch (error) {
+			errorMessage =
+				error instanceof ApiError ? error.message : 'Unable to create a match. Please try again.';
+		} finally {
+			isCreating = false;
 		}
 	}
 </script>
 
 <div
-	class="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-background p-6 text-foreground"
+	class="relative min-h-[calc(100vh-3.5rem)] overflow-hidden bg-background px-5 py-8 text-foreground sm:px-8 lg:px-12 lg:py-12"
 >
-	<!-- Abstract shapes for a modern flat background vibe -->
 	<div
-		class="pointer-events-none absolute -top-40 -left-40 h-96 w-96 rounded-full bg-primary/20 blur-3xl"
+		class="pointer-events-none absolute -top-48 -left-32 h-[32rem] w-[32rem] rounded-full bg-primary/15 blur-3xl"
 	></div>
 	<div
-		class="pointer-events-none absolute -right-40 -bottom-40 h-96 w-96 rounded-full bg-primary/20 blur-3xl"
+		class="pointer-events-none absolute -right-48 bottom-0 h-[28rem] w-[28rem] rounded-full bg-primary/10 blur-3xl"
 	></div>
 
-	<main class="z-10 flex w-full max-w-xl flex-col gap-8 text-center">
-		<!-- Hero Section -->
-		<div class="flex flex-col gap-2">
-			<h1 class="text-5xl font-bold tracking-tight text-primary">FGC 2026</h1>
-			<p class="text-xl font-semibold tracking-widest text-muted-foreground uppercase">
-				Igniting Innovation
-			</p>
-		</div>
+	<main class="relative z-10 mx-auto flex w-full max-w-6xl flex-col gap-8">
+		<section class="flex flex-col justify-between gap-6 md:flex-row md:items-end">
+			<div class="max-w-2xl">
+				<p class="text-xs font-semibold tracking-[0.24em] text-primary uppercase">
+					Simulator control
+				</p>
+				<h1 class="mt-3 text-4xl font-semibold tracking-tight sm:text-5xl">
+					Ready to run the next match?
+				</h1>
+				<p class="mt-3 max-w-xl text-base leading-7 text-muted-foreground">
+					Build, test, and join the FGC 2026 field from one place. Start with the live arena or open
+					a private lobby.
+				</p>
+			</div>
+			<div
+				class="flex items-center gap-2 rounded-full border border-border bg-card/70 px-3 py-2 text-sm shadow-sm backdrop-blur"
+			>
+				<span
+					class="size-2 rounded-full bg-emerald-500 shadow-[0_0_0_4px_color-mix(in_oklab,#22c55e_20%,transparent)]"
+				></span>
+				<span class="font-medium">Systems operational</span>
+			</div>
+		</section>
 
-		<!-- Action Cards -->
-		<Card.Root class="w-full border-border bg-card/50 shadow-xl backdrop-blur">
-			<Card.Header>
-				<Card.Title class="text-2xl">Match Simulator</Card.Title>
-			</Card.Header>
-			<Card.Content class="flex flex-col gap-6">
-				<!-- Join Match -->
-				<div class="flex flex-col gap-2">
-					<Label for="match-id" class="sr-only text-left">Match ID</Label>
-					<div class="flex gap-2">
-						<Input
-							id="match-id"
-							placeholder="Enter Match ID (e.g. 1234-abcd)"
-							bind:value={matchId}
-							class="bg-input/50"
-						/>
-						<Button onclick={joinMatch} variant="default" class="w-24">Join</Button>
-					</div>
-				</div>
+		{#if errorMessage}
+			<div
+				class="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+				role="alert"
+			>
+				{errorMessage}
+			</div>
+		{/if}
 
-				<!-- Divider -->
-				<div class="relative">
-					<div class="absolute inset-0 flex items-center">
-						<span class="w-full border-t border-border"></span>
+		<section class="grid gap-4 md:grid-cols-3">
+			<Card.Root class="border-primary/30 bg-card/80 shadow-lg backdrop-blur md:col-span-2">
+				<Card.Header class="flex flex-row items-start justify-between gap-4 space-y-0">
+					<div>
+						<Card.Title class="flex items-center gap-2 text-xl"
+							><IconActivity class="size-5 text-primary" /> Live test arena</Card.Title
+						><Card.Description class="mt-2 max-w-lg"
+							>Jump into the always-on arena to validate your robot and controls in real time.</Card.Description
+						>
 					</div>
-					<div class="relative flex justify-center text-xs uppercase">
-						<span class="bg-card px-2 font-semibold text-muted-foreground">Or</span>
-					</div>
-				</div>
-
-				<!-- Other Actions -->
-				<div class="flex flex-col gap-3">
-					<Button variant="secondary" class="w-full" onclick={openCreateMatch}
-						>Create New Match</Button
+					<span
+						class="rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-600"
+						>Online</span
 					>
-					<Button variant="outline" class="w-full" href="/scene">Enter Sandbox (Offline)</Button>
-					<Button variant="ghost" class="w-full" href="/robot">Robot Builder</Button>
+				</Card.Header>
+				<Card.Footer class="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
+					<Button href="/match/test-match" class="sm:w-auto"
+						>Join live match <IconArrowRight data-icon="inline-end" /></Button
+					>
+					<span class="text-xs text-muted-foreground"
+						>Match ID: <code class="font-medium">test-match</code></span
+					>
+				</Card.Footer>
+			</Card.Root>
+			<Card.Root class="border-border bg-card/70 shadow-sm backdrop-blur">
+				<Card.Header
+					><Card.Title class="text-base">Game pack</Card.Title><Card.Description
+						>Current simulation ruleset</Card.Description
+					></Card.Header
+				>
+				<Card.Content
+					><div class="flex items-center gap-3">
+						<span
+							class="flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary"
+							><IconBox class="size-5" /></span
+						>
+						<div>
+							<p class="font-semibold">Igniting Innovation</p>
+							<p class="text-xs text-muted-foreground">FGC 2026 · v1.0.0</p>
+						</div>
+					</div></Card.Content
+				>
+			</Card.Root>
+		</section>
+
+		<section class="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+			<Card.Root class="border-border bg-card/80 shadow-sm backdrop-blur">
+				<Card.Header
+					><Card.Title class="text-xl">Enter a match</Card.Title><Card.Description
+						>Have a match ID from a teammate? Enter it here to connect.</Card.Description
+					></Card.Header
+				>
+				<Card.Content class="flex flex-col gap-2 sm:flex-row sm:items-end">
+					<div class="flex-1">
+						<Label for="match-id">Match ID</Label><Input
+							id="match-id"
+							class="mt-2 bg-background/70"
+							placeholder="e.g. test-match"
+							bind:value={matchId}
+							onkeydown={(event) => event.key === 'Enter' && joinMatch()}
+						/>
+					</div>
+					<Button onclick={joinMatch} class="sm:w-24">Join</Button>
+				</Card.Content>
+			</Card.Root>
+			<Card.Root class="border-border bg-card/80 shadow-sm backdrop-blur">
+				<Card.Header
+					><Card.Title class="text-xl">Create a lobby</Card.Title><Card.Description
+						>Set up a new match for your team.</Card.Description
+					></Card.Header
+				>
+				<Card.Footer
+					><Button
+						variant="secondary"
+						class="w-full"
+						onclick={() => {
+							errorMessage = '';
+							showCreateMatch = true;
+						}}><IconPlus data-icon="inline-start" /> Create new match</Button
+					></Card.Footer
+				>
+			</Card.Root>
+		</section>
+
+		<section class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+			<a
+				href="/robot"
+				class="group rounded-xl border border-border bg-card/50 p-5 transition-colors hover:border-primary/50 hover:bg-card"
+				><div class="flex items-center justify-between">
+					<span class="flex size-10 items-center justify-center rounded-lg bg-muted text-foreground"
+						><IconRobot class="size-5" /></span
+					><IconArrowRight
+						class="size-4 text-muted-foreground transition-transform group-hover:translate-x-1"
+					/>
 				</div>
-			</Card.Content>
-		</Card.Root>
+				<h2 class="mt-5 font-semibold">Robot builder</h2>
+				<p class="mt-1 text-sm leading-6 text-muted-foreground">
+					Tune your drivetrain and save a build for your next match.
+				</p></a
+			>
+			<a
+				href="/scene"
+				class="group rounded-xl border border-border bg-card/50 p-5 transition-colors hover:border-primary/50 hover:bg-card"
+				><div class="flex items-center justify-between">
+					<span class="flex size-10 items-center justify-center rounded-lg bg-muted text-foreground"
+						><IconWorld class="size-5" /></span
+					><IconArrowRight
+						class="size-4 text-muted-foreground transition-transform group-hover:translate-x-1"
+					/>
+				</div>
+				<h2 class="mt-5 font-semibold">Offline sandbox</h2>
+				<p class="mt-1 text-sm leading-6 text-muted-foreground">
+					Explore the field and test movement without joining a match.
+				</p></a
+			>
+			<div class="rounded-xl border border-dashed border-border bg-transparent p-5">
+				<div
+					class="flex size-10 items-center justify-center rounded-lg bg-muted text-muted-foreground"
+				>
+					<IconPlayerPlay class="size-5" />
+				</div>
+				<h2 class="mt-5 font-semibold">What’s next</h2>
+				<p class="mt-1 text-sm leading-6 text-muted-foreground">
+					Private match joining and more game packs are coming soon.
+				</p>
+			</div>
+		</section>
 	</main>
 </div>
 
-<!-- Create Match Dialog -->
 <Dialog.Root bind:open={showCreateMatch}>
 	<Dialog.Content class="sm:max-w-[425px]">
-		<Dialog.Header>
-			<Dialog.Title>Create Match</Dialog.Title>
-			<Dialog.Description>Select a game pack to initialize your match lobby.</Dialog.Description>
-		</Dialog.Header>
+		<Dialog.Header
+			><Dialog.Title>Create match</Dialog.Title><Dialog.Description
+				>Initialize a new FGC 2026 lobby.</Dialog.Description
+			></Dialog.Header
+		>
 		<div class="flex flex-col gap-4 py-4">
 			<div class="flex flex-col gap-2">
-				<Label for="game-pack">Game Pack</Label>
-				<Input id="game-pack" value="Igniting Innovation (FGC 2026)" disabled />
+				<Label for="game-pack">Game pack</Label><Input
+					id="game-pack"
+					value="Igniting Innovation (FGC 2026)"
+					disabled
+				/>
 			</div>
 			<div class="flex flex-col gap-2">
-				<Label for="max-players">Max Players</Label>
-				<Input id="max-players" type="number" value="6" disabled />
+				<Label for="max-players">Max players</Label><Input
+					id="max-players"
+					type="number"
+					value="6"
+					disabled
+				/>
 			</div>
 		</div>
-		<Dialog.Footer>
-			<Button variant="outline" onclick={() => (showCreateMatch = false)}>Cancel</Button>
-			<Button onclick={submitCreateMatch}>Initialize Lobby</Button>
-		</Dialog.Footer>
+		<Dialog.Footer
+			><Button variant="outline" onclick={() => (showCreateMatch = false)} disabled={isCreating}
+				>Cancel</Button
+			><Button onclick={submitCreateMatch} disabled={isCreating}
+				>{isCreating ? 'Creating…' : 'Initialize lobby'}</Button
+			></Dialog.Footer
+		>
 	</Dialog.Content>
 </Dialog.Root>

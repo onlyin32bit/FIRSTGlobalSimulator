@@ -9,5 +9,11 @@
 		"directory": ".svelte-kit/cloudflare"
 	},
 	"workers_dev": true,
-	"preview_urls": true
+	"preview_urls": true,
+	"services": [
+		{
+			"binding": "API",
+			"service": "api"
+		}
+	]
 }

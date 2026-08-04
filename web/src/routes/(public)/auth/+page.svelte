@@ -1,132 +1,229 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { Button } from '$lib/components/ui/button';
-	import * as Card from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import * as Tabs from '$lib/components/ui/tabs';
-	import { signIn, signUp } from '$lib/auth-client';
+	import { signIn, signUp, useSession } from '$lib/auth-client';
+	import { fly, fade } from 'svelte/transition';
 
 	let email = $state('');
 	let password = $state('');
 	let name = $state('');
 	let team = $state('');
 	let invitationCode = $state('');
-	let errorMsg = $state('');
+	let loginError = $state('');
+	let registrationError = $state('');
+	let activeTab = $state<'login' | 'register'>('login');
 	let isSubmitting = $state(false);
+	const session = useSession();
 
-	async function handleLogin(e: Event) {
-		e.preventDefault();
+	function safeNext() {
+		const next = page.url.searchParams.get('next');
+		return next?.startsWith('/') && !next.startsWith('//') ? next : '/dashboard';
+	}
+
+	$effect(() => {
+		if (!$session.isPending && $session.data) goto(safeNext());
+	});
+
+	function messageFor(error: unknown) {
+		if (
+			error &&
+			typeof error === 'object' &&
+			'message' in error &&
+			typeof error.message === 'string'
+		) {
+			return error.message;
+		}
+		return 'Something went wrong. Please try again.';
+	}
+
+	async function handleLogin(event: SubmitEvent) {
+		event.preventDefault();
 		isSubmitting = true;
-		errorMsg = '';
+		loginError = '';
 		try {
-			const res = await signIn.email({
-				email,
-				password
-			});
-			if (res.error) {
-				errorMsg = res.error.message || 'Login failed';
-			} else {
-				window.location.href = '/dashboard';
+			const result = await signIn.email({ email: email.trim(), password });
+			if (result.error) {
+				loginError = result.error.message || 'Unable to sign in with those credentials.';
+				return;
 			}
-		} catch (err: any) {
-			errorMsg = err.message || 'An error occurred';
+			await goto(safeNext());
+		} catch (error) {
+			loginError = messageFor(error);
 		} finally {
 			isSubmitting = false;
 		}
 	}
 
-	async function handleRegister(e: Event) {
-		e.preventDefault();
+	async function handleRegistration(event: SubmitEvent) {
+		event.preventDefault();
 		isSubmitting = true;
-		errorMsg = '';
+		registrationError = '';
 		try {
-			const res = await signUp.email({
-				email,
+			const result = await signUp.email({
+				email: email.trim(),
 				password,
-				name,
-				team,
-				invitationCode // Sent in body
+				name: name.trim(),
+				team: team.trim(),
+				invitationCode: invitationCode.trim().toUpperCase()
 			});
-			if (res.error) {
-				errorMsg = res.error.message || 'Registration failed';
-			} else {
-				window.location.href = '/dashboard';
+			if (result.error) {
+				registrationError = result.error.message || 'Unable to create your account.';
+				return;
 			}
-		} catch (err: any) {
-			errorMsg = err.message || 'An error occurred';
+			await goto(safeNext());
+		} catch (error) {
+			registrationError = messageFor(error);
 		} finally {
 			isSubmitting = false;
 		}
 	}
 </script>
 
-<div class="h-screen w-full flex items-center justify-center bg-background p-4 relative">
-	<div class="absolute inset-0 bg-[radial-gradient(circle_at_top,var(--color-primary)_0,transparent_50%)] opacity-10 pointer-events-none"></div>
+<div class="relative grid min-h-screen lg:grid-cols-2">
+	<div
+		class="relative hidden overflow-hidden bg-zinc-900 p-10 text-white lg:flex lg:flex-col lg:justify-between"
+	>
+		<div
+			class="absolute inset-0 bg-[radial-gradient(circle_at_top,var(--color-primary)_0,transparent_50%)] opacity-25"
+		></div>
+		<div class="relative">
+			<p class="text-lg font-semibold">FIRST Global Simulator</p>
+			<p class="mt-2 max-w-md text-sm text-zinc-300">
+				Design, test, and compete with your 2026 Igniting Innovation robot.
+			</p>
+		</div>
+		<p class="relative max-w-sm text-sm text-zinc-300">
+			Access is managed through an invitation code issued by the simulator administrators.
+		</p>
+	</div>
 
-	<Card.Root class="w-full max-w-md bg-card/60 backdrop-blur-xl border-border shadow-2xl relative z-10">
-		<Card.Header class="text-center">
-			<Card.Title class="text-2xl font-black tracking-tight text-primary">FGC 2026</Card.Title>
-			<Card.Description>Sign in to enter the simulator.</Card.Description>
-		</Card.Header>
+	<div class="flex items-center justify-center p-4 lg:p-8">
+		<div class="mx-auto flex w-full max-w-sm flex-col gap-6">
+			<div class="text-center">
+				<h1 class="text-2xl font-semibold tracking-tight">Welcome to FGC 2026</h1>
+				<p class="mt-2 text-sm text-muted-foreground">Sign in or redeem an invitation code.</p>
+			</div>
 
-		<Tabs.Root value="login" class="w-full">
-			<Tabs.List class="grid w-full grid-cols-2 rounded-none border-b border-border bg-transparent">
-				<Tabs.Trigger value="login" class="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:shadow-none rounded-none">Login</Tabs.Trigger>
-				<Tabs.Trigger value="register" class="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:shadow-none rounded-none">Register</Tabs.Trigger>
-			</Tabs.List>
-			
-			<Tabs.Content value="login">
-				<form onsubmit={handleLogin} class="flex flex-col gap-4 p-6">
-					{#if errorMsg}
-						<div class="p-3 bg-red-950/50 border border-red-900 text-red-200 text-sm rounded-md">{errorMsg}</div>
-					{/if}
-					<div class="flex flex-col gap-2">
-						<Label for="login-email">Email</Label>
-						<Input id="login-email" type="email" bind:value={email} required />
+			<Tabs.Root bind:value={activeTab} class="w-full">
+				<Tabs.List class="mb-6 grid w-full grid-cols-2">
+					<Tabs.Trigger value="login" onclick={() => (loginError = '')}>Sign in</Tabs.Trigger>
+					<Tabs.Trigger value="register" onclick={() => (registrationError = '')}
+						>Register</Tabs.Trigger
+					>
+				</Tabs.List>
+
+				<Tabs.Content value="login" class="mt-0">
+					<div in:fly={{ y: 10, duration: 250 }} out:fade={{ duration: 150 }}>
+						<form class="flex flex-col gap-4" onsubmit={handleLogin}>
+							{#if loginError}
+								<div
+									class="rounded-md border border-destructive/30 bg-destructive/15 p-3 text-sm text-destructive"
+									role="alert"
+								>
+									{loginError}
+								</div>
+							{/if}
+							<div class="flex flex-col gap-2">
+								<Label for="login-email">Email</Label>
+								<Input
+									id="login-email"
+									type="email"
+									autocomplete="email"
+									placeholder="you@example.com"
+									bind:value={email}
+									required
+								/>
+							</div>
+							<div class="flex flex-col gap-2">
+								<Label for="login-password">Password</Label>
+								<Input
+									id="login-password"
+									type="password"
+									autocomplete="current-password"
+									bind:value={password}
+									required
+								/>
+							</div>
+							<Button type="submit" class="mt-2 w-full" disabled={isSubmitting}
+								>{isSubmitting ? 'Signing in…' : 'Sign in'}</Button
+							>
+						</form>
 					</div>
-					<div class="flex flex-col gap-2">
-						<Label for="login-password">Password</Label>
-						<Input id="login-password" type="password" bind:value={password} required />
+				</Tabs.Content>
+
+				<Tabs.Content value="register" class="mt-0">
+					<div in:fly={{ y: 10, duration: 250 }} out:fade={{ duration: 150 }}>
+						<form class="flex flex-col gap-4" onsubmit={handleRegistration}>
+							{#if registrationError}
+								<div
+									class="rounded-md border border-destructive/30 bg-destructive/15 p-3 text-sm text-destructive"
+									role="alert"
+								>
+									{registrationError}
+								</div>
+							{/if}
+							<div class="grid grid-cols-2 gap-4">
+								<div class="flex flex-col gap-2">
+									<Label for="name">Name</Label><Input
+										id="name"
+										autocomplete="name"
+										bind:value={name}
+										required
+									/>
+								</div>
+								<div class="flex flex-col gap-2">
+									<Label for="team">Team</Label><Input
+										id="team"
+										autocomplete="organization"
+										bind:value={team}
+										required
+									/>
+								</div>
+							</div>
+							<div class="flex flex-col gap-2">
+								<Label for="email">Email</Label><Input
+									id="email"
+									type="email"
+									autocomplete="email"
+									placeholder="you@example.com"
+									bind:value={email}
+									required
+								/>
+							</div>
+							<div class="flex flex-col gap-2">
+								<Label for="password">Password</Label><Input
+									id="password"
+									type="password"
+									autocomplete="new-password"
+									minlength={8}
+									bind:value={password}
+									required
+								/>
+							</div>
+							<div class="flex flex-col gap-2">
+								<Label for="invitation-code">Invitation code</Label>
+								<Input
+									id="invitation-code"
+									class="font-mono uppercase"
+									placeholder="ABC123"
+									bind:value={invitationCode}
+									required
+								/>
+								<p class="text-xs text-muted-foreground">
+									Contact the simulator administrators if you need access.
+								</p>
+							</div>
+							<Button type="submit" class="mt-2 w-full" disabled={isSubmitting}
+								>{isSubmitting ? 'Creating account…' : 'Create account'}</Button
+							>
+						</form>
 					</div>
-					<Button type="submit" class="w-full mt-4" disabled={isSubmitting}>
-						{isSubmitting ? 'Signing in...' : 'Sign In'}
-					</Button>
-				</form>
-			</Tabs.Content>
-			
-			<Tabs.Content value="register">
-				<form onsubmit={handleRegister} class="flex flex-col gap-4 p-6">
-					{#if errorMsg}
-						<div class="p-3 bg-red-950/50 border border-red-900 text-red-200 text-sm rounded-md">{errorMsg}</div>
-					{/if}
-					<div class="grid grid-cols-2 gap-4">
-						<div class="flex flex-col gap-2">
-							<Label for="reg-name">Full Name</Label>
-							<Input id="reg-name" bind:value={name} required />
-						</div>
-						<div class="flex flex-col gap-2">
-							<Label for="reg-team">Team Name</Label>
-							<Input id="reg-team" bind:value={team} required placeholder="e.g. Team Vietnam" />
-						</div>
-					</div>
-					<div class="flex flex-col gap-2">
-						<Label for="reg-email">Email</Label>
-						<Input id="reg-email" type="email" bind:value={email} required />
-					</div>
-					<div class="flex flex-col gap-2">
-						<Label for="reg-password">Password</Label>
-						<Input id="reg-password" type="password" bind:value={password} required />
-					</div>
-					<div class="flex flex-col gap-2">
-						<Label for="reg-invite">Invitation Code</Label>
-						<Input id="reg-invite" bind:value={invitationCode} required class="font-mono" />
-						<p class="text-xs text-muted-foreground">Access requires a valid beta code.</p>
-					</div>
-					<Button type="submit" class="w-full mt-4" disabled={isSubmitting}>
-						{isSubmitting ? 'Creating Account...' : 'Create Account'}
-					</Button>
-				</form>
-			</Tabs.Content>
-		</Tabs.Root>
-	</Card.Root>
+				</Tabs.Content>
+			</Tabs.Root>
+		</div>
+	</div>
 </div>

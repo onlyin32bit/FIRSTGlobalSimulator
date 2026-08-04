@@ -3,7 +3,7 @@
 declare global {
 	namespace App {
 		interface Platform {
-			env: Env;
+			env: Env & { API: Fetcher };
 			ctx: ExecutionContext;
 			caches: CacheStorage;
 			cf?: IncomingRequestCfProperties;

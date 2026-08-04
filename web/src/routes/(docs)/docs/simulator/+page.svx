@@ -1,0 +1,28 @@
+---
+title: Simulator
+description: Create a lobby, enter the offline sandbox, and understand current simulator status.
+---
+
+# Simulator
+
+The dashboard is the entry point for the available field experiences.
+
+## Create a lobby
+
+Choose **Create New Match** on the [dashboard](/dashboard) to create a FGC 2026 lobby. The dashboard confirms the generated match ID after the API creates the lobby.
+
+Lobby creation establishes the match record used by the game services. It is useful for development and prepares the backend for the multiplayer flow.
+
+## Offline sandbox
+
+Choose **Enter Sandbox (Offline)** to open the local field experience without joining a remote match. This is the best current way to explore the field and simulator controls while the online client flow is still under construction.
+
+## Current limitations
+
+The project is transparent about what remains unfinished:
+
+- entering a match ID in the dashboard does not connect you to a live lobby yet;
+- browser WebSocket connection, reconnect behavior, and live game state rendering are still being built;
+- the game server and ticket endpoints exist for development, but the browser-facing multiplayer workflow is not a released feature.
+
+> Create and save a robot now, then use the offline sandbox to explore. Follow project updates through [Team Vietnam on Facebook](https://www.facebook.com/TeamVietnamFGC) or [Instagram](https://www.instagram.com/teamvietnam.fgc/).

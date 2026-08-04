@@ -9,10 +9,7 @@ pub enum GameError {
     #[error("Failed to parse game pack manifest: {0}")]
     ManifestParseError(String),
     #[error("Engine version {engine} is incompatible with pack requirement {pack}")]
-    IncompatibleEngineVersion {
-        engine: String,
-        pack: String,
-    },
+    IncompatibleEngineVersion { engine: String, pack: String },
     #[error("Script failed to compile: {0}")]
     ScriptCompilationError(String),
     #[error("Script failed to execute: {0}")]

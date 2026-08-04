@@ -16,6 +16,7 @@
   ],
   "vars": {
     "WEB_ORIGIN": "http://localhost:5173",
-    "API_ORIGIN": "http://localhost:8787"
+    "API_ORIGIN": "http://localhost:8787",
+    "GAME_SERVER_ORIGIN": "ws://localhost:3000"
   }
 }

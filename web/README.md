@@ -1,42 +1,33 @@
-# sv
+# FGC Simulator web app
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+The SvelteKit application is the public browser origin. All browser API calls use same-origin `/api/...` URLs:
 
-## Creating a project
+- In local development, Vite proxies `/api` to `http://localhost:8787`.
+- In production, `web/src/routes/api/[...path]/+server.ts` forwards requests to the API Worker through the `API` Cloudflare service binding.
 
-If you're seeing this, you've probably already done this step. Congrats!
+This keeps Better Auth session cookies first-party and avoids a browser CORS dependency.
 
-```sh
-# create a new project
-npx sv create my-app
-```
+## Local development
 
-To recreate this project with the same configuration:
+1. Start the API worker from `api/` on port 8787.
+2. Start the web app:
 
-```sh
-# recreate this project
-pnpm dlx sv@0.16.5 create --template minimal --types ts --add prettier eslint tailwindcss="plugins:typography,forms" sveltekit-adapter="adapter:cloudflare+cfTarget:workers" --install pnpm ./
-```
+   ```sh
+   pnpm dev
+   ```
 
-## Developing
+3. Open the web app on `http://localhost:5173`.
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+Use an invitation code issued by an administrator to create an account. Authenticated game pages redirect guests to `/auth` and preserve the requested path in `next`.
 
-```sh
-npm run dev
+## Production
 
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
-```
-
-## Building
-
-To create a production version of your app:
+Deploy the API Worker, then deploy this worker with its `API` service binding configured in `wrangler.jsonc`. Regenerate configuration types whenever bindings change:
 
 ```sh
-npm run build
+pnpm gen
+pnpm check
+pnpm build
 ```
 
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+Do not configure a public API URL for normal deployments—the browser should continue using its same-origin `/api` route.

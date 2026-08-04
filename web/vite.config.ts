@@ -1,3 +1,4 @@
+import { paraglideVitePlugin } from '@inlang/paraglide-js';
 import { mdsvex } from 'mdsvex';
 import tailwindcss from '@tailwindcss/vite';
 import adapter from '@sveltejs/adapter-cloudflare';
@@ -16,7 +17,17 @@ export default defineConfig({
 			adapter: adapter(),
 			preprocess: [mdsvex({ extensions: ['.svx', '.md'] })],
 			extensions: ['.svelte', '.svx', '.md']
+		}),
+
+		paraglideVitePlugin({
+			project: './project.inlang',
+			outdir: './src/lib/paraglide',
+			emitTsDeclarations: true
 		})
 	],
-	server: { proxy: { '/api': { target: 'http://localhost:8787', changeOrigin: true } } }
+	server: {
+		proxy: {
+			'/api': { target: 'http://localhost:8787', changeOrigin: true }
+		}
+	}
 });

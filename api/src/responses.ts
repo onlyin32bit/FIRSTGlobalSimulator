@@ -11,6 +11,7 @@ export type ErrorCode =
   | 'STORAGE_UPLOAD_FAILED'
   | 'VALIDATION_ERROR'
   | 'INTERNAL_ERROR'
+  | 'GAME_SERVER_UNAVAILABLE'
 
 export function jsonError(
   c: Context, 
