@@ -31,6 +31,8 @@ enum ClientMessage {
         sequence: u64,
         move_x: f32,
         move_z: f32,
+        #[serde(default)]
+        intake_power: f32,
     },
     Ping {
         nonce: u64,
@@ -175,12 +177,14 @@ async fn handle_socket(
         tokio::select! {
             message = receiver.next() => match message {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
-                    Ok(ClientMessage::Input { sequence, move_x, move_z }) => {
-                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, sequence }).await;
+                    Ok(ClientMessage::Input { sequence, move_x, move_z, intake_power }) => {
+                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, intake_power, sequence }).await;
                     }
                     Ok(ClientMessage::Ping { nonce }) => {
-                        if let Ok(message) = serde_json::to_string(&PongMessage { r#type: "pong", nonce }) {
-                            if sender.send(Message::Text(message.into())).await.is_err() { break; }
+                        if let Ok(message) = serde_json::to_string(&PongMessage { r#type: "pong", nonce })
+                            && sender.send(Message::Text(message.into())).await.is_err()
+                        {
+                            break;
                         }
                     }
                     Err(_) => {}
@@ -189,7 +193,7 @@ async fn handle_socket(
                 _ => {}
             },
             Ok(state) = state_rx.recv() => {
-                if let Ok(message) = serde_json::to_string(&state) { if sender.send(Message::Text(message.into())).await.is_err() { break; } }
+                if sender.send(Message::Binary(state)).await.is_err() { break; }
             }
         }
     }
