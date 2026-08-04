@@ -7,7 +7,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
@@ -22,6 +22,7 @@ use game::pack_loader::{GamePackMetadata, PackLoader};
 struct AppState {
     registry: Arc<MatchRegistry>,
     pack: Arc<GamePackMetadata>,
+    pack_root: Arc<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -55,18 +56,29 @@ async fn main() {
     info!("Starting FGC 2026 Game Server (Engine v0.1.0)...");
 
     let loader = PackLoader::new("0.1.0");
+    // Resolve from the crate rather than the process working directory. This
+    // keeps both `cargo run --manifest-path server/Cargo.toml` from the repo
+    // root and `cd server && cargo run` serving the same game-pack assets.
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../pkgs/games/fgc-2026/manifest.json");
     let pack = loader
-        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .load_pack(manifest_path.to_str().expect("game pack path must be UTF-8"))
         .expect("game pack metadata must compile before the server starts");
 
     let pack = Arc::new(pack);
     let registry = Arc::new(MatchRegistry::new(pack.clone()));
     registry.start_test_match().await;
     start_heartbeat(registry.clone());
-    let state = AppState { registry, pack };
+    let pack_root = manifest_path
+        .parent()
+        .expect("game pack manifest must have a parent directory")
+        .to_path_buf();
+    info!(pack_root = %pack_root.display(), "Loaded game-pack assets");
+    let state = AppState { registry, pack, pack_root: Arc::new(pack_root) };
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
         .route("/pack/metadata", get(pack_metadata_handler))
+        .route("/pack/assets/{asset}", get(pack_asset_handler))
         .route("/ws/match/{match_id}", get(ws_handler))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 3000)))
@@ -121,6 +133,22 @@ async fn pack_metadata_handler(
     axum::Json(game::error::ApiResponse::success((*state.pack).clone()))
 }
 
+async fn pack_asset_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(asset): axum::extract::Path<String>,
+) -> Response {
+    let (file, content_type) = match asset.as_str() {
+        "field.glb" => ("field.glb", "model/gltf-binary"),
+        "field.physics.json" => ("field.physics.json", "application/json"),
+        "field.semantics.json" => ("field.semantics.json", "application/json"),
+        _ => return Response::builder().status(404).body("Unknown pack asset".into()).unwrap(),
+    };
+    match tokio::fs::read(state.pack_root.join(file)).await {
+        Ok(bytes) => Response::builder().header("content-type", content_type).body(bytes.into()).unwrap(),
+        Err(_) => Response::builder().status(404).body("Pack asset not found".into()).unwrap(),
+    }
+}
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -168,7 +196,10 @@ async fn handle_socket(
         .send(MatchInput::PlayerJoin {
             user_id: claims.sub.clone(),
             name: claims.display_name,
-            team_name: claims.team_name,
+            // Lobby tickets bind a player to an alliance. Older development
+            // tickets retain their team name and remain backward compatible.
+            team_name: claims.alliance.unwrap_or(claims.team_name),
+            slot_id: claims.slot_id,
         })
         .await;
     let mut state_rx = match_handle.state_tx.subscribe();

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { page } from '$app/state';
 	import { Canvas, T } from '@threlte/core';
 	import { OrbitControls } from '@threlte/extras';
 	import { WebGLRenderer } from 'three';
@@ -7,7 +8,7 @@
 	import { ApiError, api } from '$lib/api';
 	import RobotFollowCamera from './RobotFollowCamera.svelte';
 	import RobotModel from './RobotModel.svelte';
-	import RampModel from './RampModel.svelte';
+	import PackField from './PackField.svelte';
 	import ScriptedObjects from './ScriptedObjects.svelte';
 	import TelemetrySparkline from './TelemetrySparkline.svelte';
 	import {
@@ -15,6 +16,7 @@
 		type MatchPhysics as PhysicsModel,
 		type MatchPlayer as Player
 	} from './match-protocol';
+	const activeMatchId = $derived(page.params.matchId || 'test-match');
 
 	type ObjectFrame = {
 		objectId: string;
@@ -94,6 +96,7 @@
 	let pingNonce = 0;
 	let pingMs = $state<number | null>(null);
 	let packVersion = $state('Loading pack…');
+	let fieldAssets = $state<{ visual: string; physics: string; semantics: string } | null>(null);
 	let physicsLoaded = false;
 	let snapshotDecodeFailed = false;
 	let contacts = $state(0);
@@ -560,13 +563,15 @@
 
 		const connect = async () => {
 			try {
-				const [ticket, currentUser] = await Promise.all([
-					api.createTestMatchTicket(),
-					api.getCurrentUser()
-				]);
+			const [ticket, currentUser, assets] = await Promise.all([
+				activeMatchId === 'test-match' ? api.createTestMatchTicket() : api.createMatchTicket(activeMatchId),
+				api.getCurrentUser(),
+				api.getGamePackAssets('fgc-2026')
+			]);
 				if (disposed) return;
 
-				localId = currentUser.user.id;
+			localId = currentUser.user.id;
+			fieldAssets = assets;
 				const nextSocket = new WebSocket(ticket.ws_url);
 				nextSocket.binaryType = 'arraybuffer';
 				socket = nextSocket;
@@ -678,7 +683,7 @@
 	<div
 		class="absolute top-4 left-4 z-10 rounded-lg border border-white/15 bg-black/60 px-4 py-3 text-sm text-white backdrop-blur"
 	>
-		<p class="font-semibold">Live test match</p>
+		<p class="font-semibold">{activeMatchId === 'test-match' ? 'Live test match' : 'Live match'}</p>
 		<p class="mt-1 text-white/70">
 			{status} · {players.length} player{players.length === 1 ? '' : 's'} · Ping: {pingMs === null
 				? '—'
@@ -923,12 +928,7 @@
 		{/if}
 		<T.AmbientLight intensity={1.2} />
 		<T.DirectionalLight position={[8, 12, 6]} intensity={2} />
-		<T.Mesh position={[0, -0.25, 0]}>
-			<T.BoxGeometry args={[16, 0.5, 16]} />
-			<T.MeshStandardMaterial color="#263244" roughness={0.96} metalness={0} />
-		</T.Mesh>
-		<T.GridHelper args={[16, 16, '#64748b', '#334155']} position={[0, 0.01, 0]} />
-		<RampModel {physics} />
+		{#if fieldAssets}<PackField assets={fieldAssets} />{/if}
 		<ScriptedObjects frame={renderedObjectFrame} />
 		<T.Group>
 			{#each renderedPlayers as player (player.id)}

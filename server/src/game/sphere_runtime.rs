@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use super::match_runtime::{MatchContext, MatchPhase, PlayerSnapshot, ScoreState};
 use super::pack_loader::{
-    ArenaConfig, RampPhysicsConfig, RestitutionCurveConfig, RobotPhysicsConfig,
+    ArenaConfig, FieldCollider, FieldDefinition, RampPhysicsConfig, RestitutionCurveConfig, RobotPhysicsConfig,
 };
 
 type Vec3 = [f32; 3];
@@ -60,6 +60,8 @@ pub struct SphereRuntime {
     grid_cells: Vec<[i32; 3]>,
     pairs: Vec<(usize, usize)>,
     metrics: StepMetrics,
+    field_colliders: Vec<FieldCollider>,
+    field_anchors: BTreeMap<String, Vec3>,
 }
 
 impl SphereRuntime {
@@ -86,11 +88,19 @@ impl SphereRuntime {
             grid_cells: Vec::new(),
             pairs: Vec::new(),
             metrics: StepMetrics::default(),
+            field_colliders: Vec::new(),
+            field_anchors: BTreeMap::new(),
         }
     }
 
     pub fn create_test_arena(&mut self, arena: &ArenaConfig) {
+        self.create_field_arena(arena, &FieldDefinition::default());
+    }
+
+    pub fn create_field_arena(&mut self, arena: &ArenaConfig, field: &FieldDefinition) {
         self.arena = Some(arena.clone());
+        self.field_colliders = field.colliders.clone();
+        self.field_anchors = field.anchors.clone();
         self.balls.clear();
         self.balls.reserve(arena.object_count);
         self.grid_next.resize(arena.object_count, -1);
@@ -100,13 +110,14 @@ impl SphereRuntime {
         let radius = arena.ball.radius_m();
         let count = arena.object_count.max(1) as f32;
         let golden_angle = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
+        let spawn = self.field_anchors.get("EXTballspawn").copied().unwrap_or([0.0, arena.spawn_height, 0.0]);
         for index in 0..arena.object_count {
             let angle = index as f32 * golden_angle;
             let distance = arena.spawn_radius * ((index as f32 + 0.5) / count).sqrt();
             let position = [
-                angle.cos() * distance,
-                arena.spawn_height + (index % 3) as f32 * radius * 2.25,
-                angle.sin() * distance,
+                spawn[0] + angle.cos() * distance,
+                spawn[1].max(arena.spawn_height) + (index % 3) as f32 * radius * 2.25,
+                spawn[2] + angle.sin() * distance,
             ];
             self.balls.push(Ball {
                 position,
@@ -126,6 +137,7 @@ impl SphereRuntime {
         user_id: String,
         name: String,
         team_name: String,
+        slot_id: Option<&str>,
         arena: &ArenaConfig,
     ) {
         if self.players.contains_key(&user_id) {
@@ -136,16 +148,23 @@ impl SphereRuntime {
         let colors = [
             "#f97316", "#2563eb", "#16a34a", "#9333ea", "#dc2626", "#0891b2", "#ca8a04", "#db2777",
         ];
+        let color = if team_name == "red" { "#ef4444" } else if team_name == "blue" { "#3b82f6" } else { colors[slot % colors.len()] };
+        let anchor_key = slot_id.and_then(|id| {
+            let (alliance, role) = id.split_once('-')?;
+            let index = role.strip_prefix("driver-")?;
+            Some(format!("{alliance}Spawn{index}"))
+        });
+        let spawn = anchor_key.as_deref().and_then(|key| self.field_anchors.get(key)).copied();
         self.players.insert(
             user_id,
             PlayerBody {
                 name,
                 team_name,
-                position: [
+                position: spawn.map(|point| [point[0], arena.robot.height_m * 0.5, point[2]]).unwrap_or([
                     angle.cos() * 4.0,
                     arena.robot.height_m * 0.5,
                     angle.sin() * 4.0,
-                ],
+                ]),
                 velocity: [0.0; 3],
                 yaw: angle,
                 angular_velocity_y: 0.0,
@@ -153,7 +172,7 @@ impl SphereRuntime {
                 move_z: 0.0,
                 intake_power: 0.0,
                 sequence: 0,
-                color: colors[slot % colors.len()],
+                color,
             },
         );
     }
@@ -374,7 +393,7 @@ impl SphereRuntime {
         let mut contacts = 0;
 
         for ball in &mut self.balls {
-            contacts += project_static_position(ball, arena, radius);
+            contacts += project_static_position(ball, arena, radius, &self.field_colliders);
         }
 
         for &(left, right) in &self.pairs {
@@ -499,8 +518,9 @@ impl SphereRuntime {
         // Dynamic contacts can push a ball through a static boundary. End
         // every iteration by projecting onto the field/ramp so the last
         // solver iteration cannot leave an object outside the arena.
+        let field_colliders = &self.field_colliders;
         for ball in &mut self.balls {
-            contacts += project_static_position(ball, arena, radius);
+            contacts += project_static_position(ball, arena, radius, field_colliders);
         }
         contacts
     }
@@ -970,7 +990,7 @@ fn length_sq(value: Vec3) -> f32 {
     dot(value, value)
 }
 
-fn project_static_position(ball: &mut Ball, arena: &ArenaConfig, radius: f32) -> usize {
+fn project_static_position(ball: &mut Ball, arena: &ArenaConfig, radius: f32, field_colliders: &[FieldCollider]) -> usize {
     let mut contacts = 0;
     if ball.position[1] < radius {
         ball.position[1] = radius;
@@ -988,6 +1008,9 @@ fn project_static_position(ball: &mut Ball, arena: &ArenaConfig, radius: f32) ->
             contacts += 1;
         }
     }
+    for collider in field_colliders {
+        contacts += project_sphere_aabb(ball, collider, radius);
+    }
     if let Some((normal, penetration)) = ramp_contact(ball.position, radius, &arena.ramp) {
         ball.position = add(ball.position, mul(normal, penetration));
         ball.grounded = false;
@@ -995,6 +1018,39 @@ fn project_static_position(ball: &mut Ball, arena: &ArenaConfig, radius: f32) ->
         contacts += 1;
     }
     contacts
+}
+
+/// Resolve a ball against an authored field collision volume. The pack loader
+/// converts every Assimp mesh into its world-space AABB once at startup, so the
+/// 60 Hz solver does not parse JSON or traverse CAD triangles.
+fn project_sphere_aabb(ball: &mut Ball, collider: &FieldCollider, radius: f32) -> usize {
+    let closest = [
+        ball.position[0].clamp(collider.min[0], collider.max[0]),
+        ball.position[1].clamp(collider.min[1], collider.max[1]),
+        ball.position[2].clamp(collider.min[2], collider.max[2]),
+    ];
+    let delta = sub(ball.position, closest);
+    let distance_sq = length_sq(delta);
+    if distance_sq >= radius * radius { return 0; }
+    if distance_sq > 1.0e-10 {
+        let distance = distance_sq.sqrt();
+        ball.position = add(ball.position, mul(delta, (radius - distance) / distance));
+        return 1;
+    }
+    // Center is inside a volume: select the nearest face deterministically.
+    let candidates = [
+        (ball.position[0] - collider.min[0], [-1.0, 0.0, 0.0]),
+        (collider.max[0] - ball.position[0], [1.0, 0.0, 0.0]),
+        (ball.position[1] - collider.min[1], [0.0, -1.0, 0.0]),
+        (collider.max[1] - ball.position[1], [0.0, 1.0, 0.0]),
+        (ball.position[2] - collider.min[2], [0.0, 0.0, -1.0]),
+        (collider.max[2] - ball.position[2], [0.0, 0.0, 1.0]),
+    ];
+    if let Some((distance, normal)) = candidates.into_iter().min_by(|left, right| left.0.total_cmp(&right.0)) {
+        ball.position = add(ball.position, mul(normal, radius + distance.max(0.0)));
+        return 1;
+    }
+    0
 }
 
 fn boundary_blocks_motion(
@@ -1287,7 +1343,7 @@ mod tests {
         arena.object_count = 32;
         let mut runtime = SphereRuntime::new("test".into(), "fgc-2026".into(), 0);
         runtime.create_test_arena(&arena);
-        runtime.add_player("p".into(), "Player".into(), "Team".into(), &arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
         runtime.set_player_input("p", 0.25, 1.0, 0.0, 1);
         for _ in 0..120 {
             runtime.apply_player_drive(&arena, 1.0 / 60.0);
@@ -1307,7 +1363,7 @@ mod tests {
         arena.object_count = 8;
         let mut runtime = SphereRuntime::new("grounded-robot".into(), "fgc-2026".into(), 0);
         runtime.create_test_arena(&arena);
-        runtime.add_player("p".into(), "Player".into(), "Team".into(), &arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
         let robot_position = runtime.players["p"].position;
         for (index, ball) in runtime.balls.iter_mut().enumerate() {
             ball.position = [
@@ -1356,7 +1412,7 @@ mod tests {
         arena.ramp.enabled = false;
         let mut runtime = SphereRuntime::new("wall-stall".into(), "fgc-2026".into(), 0);
         runtime.create_test_arena(&arena);
-        runtime.add_player("p".into(), "Player".into(), "Team".into(), &arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
         let wall_limit = -SphereRuntime::FIELD_HALF_EXTENT + arena.robot.length_m * 0.5;
         let player = runtime.players.get_mut("p").unwrap();
         player.position = [0.0, arena.robot.height_m * 0.5, wall_limit];
@@ -1381,7 +1437,7 @@ mod tests {
         arena.robot.intake_enabled = false;
         let mut runtime = SphereRuntime::new("trapped-ball".into(), "fgc-2026".into(), 0);
         runtime.create_test_arena(&arena);
-        runtime.add_player("p".into(), "Player".into(), "Team".into(), &arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
         let ball_limit = -SphereRuntime::FIELD_HALF_EXTENT + arena.ball.radius_m();
         let robot_start = ball_limit + arena.ball.radius_m() + arena.robot.length_m * 0.5;
         let player = runtime.players.get_mut("p").unwrap();
@@ -1525,7 +1581,7 @@ mod tests {
             arena.ramp.enabled = false;
             let mut runtime = SphereRuntime::new("intake".into(), "fgc-2026".into(), 0);
             runtime.create_test_arena(&arena);
-            runtime.add_player("p".into(), "Player".into(), "Team".into(), &arena);
+            runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
             let player = runtime.players.get_mut("p").unwrap();
             player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
             player.yaw = 0.0;
@@ -1598,7 +1654,7 @@ mod tests {
         arena.object_count = 1000;
         let mut runtime = SphereRuntime::new("benchmark".into(), "fgc-2026".into(), 0);
         runtime.create_test_arena(&arena);
-        runtime.add_player("p".into(), "Player".into(), "Team".into(), &arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
         runtime.set_player_input("p", 0.28, 1.0, 1.0, 1);
         for _ in 0..120 {
             runtime.apply_player_drive(&arena, 1.0 / 60.0);

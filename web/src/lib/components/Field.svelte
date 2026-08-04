@@ -51,6 +51,12 @@
     maxZ: number
   }
 
+  type FieldAssetUrls = {
+    visual: string
+    physics: string
+    semantics: string
+  }
+
   let {
     anchors = $bindable({}),
     zones = $bindable<ZoneAABB[]>([]),
@@ -61,11 +67,17 @@
       maxX: -3.636641,
       minZ: 2.320723,
       maxZ: 3.665437
-    })
+    }),
+    assetUrls = {
+      visual: '/api/game-packs/fgc-2026/assets/field.glb',
+      physics: '/api/game-packs/fgc-2026/assets/field.physics.json',
+      semantics: '/api/game-packs/fgc-2026/assets/field.semantics.json'
+    } as FieldAssetUrls,
+    clientPhysics = true
   } = $props()
 
-  const GAME_ASSET_ROOT = '/games/fgc-2026'
   const SUPPRESSOR_OPACITY = 0.35
+  const SUPPRESSION_PANEL_COLOR = [0.796078, 0.905882, 0.745098] as const
 
   let parsedHpZones = $state<Record<string, { pos: [number, number, number]; bounds: HumanPlayerBounds }>>({
     red: {
@@ -85,7 +97,7 @@
   })
   const BRACE_COLLIDER_IDS = new Set(['Cylinder', 'Cylinder.001', 'Cylinder.002', 'Cylinder.003'])
   const meshoptDecoder = useMeshopt()
-  const visualGltf = useGltf(`${GAME_ASSET_ROOT}/field.glb`, { meshoptDecoder })
+  const visualGltf = useGltf(assetUrls.visual, { meshoptDecoder })
   const configuredScenes = new WeakSet<Object3D>()
 
   let colliders = $state<ParsedCollider[]>([])
@@ -300,20 +312,20 @@
   onMount(() => {
     let cancelled = false
 
-    async function loadJson(fileName: string) {
-      const response = await fetch(`${GAME_ASSET_ROOT}/${fileName}`)
+    async function loadJson(url: string) {
+      const response = await fetch(url)
       if (!response.ok) {
-        throw new Error(`Unable to load ${fileName}: ${response.status} ${response.statusText}`)
+        throw new Error(`Unable to load ${url}: ${response.status} ${response.statusText}`)
       }
       return response.json()
     }
 
     Promise.all([
-      loadJson('field.physics.json'),
-      loadJson('field.semantics.json')
+      loadJson(assetUrls.physics),
+      loadJson(assetUrls.semantics)
     ]).then(([physData, semData]) => {
       if (cancelled) return
-      colliders = parseAssimpPhysics(physData)
+      if (clientPhysics) colliders = parseAssimpPhysics(physData)
       semantics = parseAssimpSemantics(semData)
       anchors = semantics.anchors
       const computeZoneData = (zoneId: string) => {
@@ -594,76 +606,35 @@
           return sourceMaterial
         }
 
+        // Part 1 and Part 4 are the only source meshes using this material.
+        // Do not turn an arbitrary shared material transparent: the GLB may be
+        // optimized, and transparent sorting of goal backing panels would then
+        // become camera-angle dependent.
+        const panelColor = sourceMaterial.color
+        const panelColorDistanceSquared =
+          (panelColor.r - SUPPRESSION_PANEL_COLOR[0]) ** 2 +
+          (panelColor.g - SUPPRESSION_PANEL_COLOR[1]) ** 2 +
+          (panelColor.b - SUPPRESSION_PANEL_COLOR[2]) ** 2
+        const isSuppressionPanel =
+          sourceMaterial.name === '0.796078_0.905882_0.745098_0.000000_0.380392' ||
+          panelColorDistanceSquared < 0.00001
+        if (!isSuppressionPanel) return sourceMaterial
+
         const existingMaterial = transparentMaterials.get(sourceMaterial)
         if (existingMaterial) return existingMaterial
 
         const transparentMaterial = sourceMaterial.clone()
         transparentMaterial.name = 'SuppressionUnitPolycarbonateTransparentMaterial'
         transparentMaterial.transparent = true
-        transparentMaterial.depthWrite = true
-        transparentMaterial.onBeforeCompile = (shader) => {
-          shader.vertexShader = shader.vertexShader
-            .replace(
-              '#include <common>',
-              `#include <common>
-varying vec3 vSuppressionUnitWorldPosition;`
-            )
-            .replace(
-              '#include <project_vertex>',
-              `vec4 suppressionUnitWorldPosition = vec4(transformed, 1.0);
-#ifdef USE_BATCHING
-  suppressionUnitWorldPosition = batchingMatrix * suppressionUnitWorldPosition;
-#endif
-#ifdef USE_INSTANCING
-  suppressionUnitWorldPosition = instanceMatrix * suppressionUnitWorldPosition;
-#endif
-vSuppressionUnitWorldPosition = (modelMatrix * suppressionUnitWorldPosition).xyz;
-#include <project_vertex>`
-            )
-
-          shader.fragmentShader = shader.fragmentShader
-            .replace(
-              '#include <common>',
-              `#include <common>
-varying vec3 vSuppressionUnitWorldPosition;
-
-float insideSuppressionUnit(vec3 point, vec3 minimum, vec3 maximum) {
-  vec3 aboveMinimum = step(minimum, point);
-  vec3 belowMaximum = step(point, maximum);
-  return aboveMinimum.x * aboveMinimum.y * aboveMinimum.z
-    * belowMaximum.x * belowMaximum.y * belowMaximum.z;
-}`
-            )
-            .replace(
-              '#include <opaque_fragment>',
-              `float insideRedSuppressionUnit = insideSuppressionUnit(
-  vSuppressionUnitWorldPosition,
-  vec3(-2.442313, 0.598408, -4.132003),
-  vec3(-0.625139, 2.607840, -3.026414)
-);
-float insideBlueSuppressionUnit = insideSuppressionUnit(
-  vSuppressionUnitWorldPosition,
-  vec3(0.369907, 0.598408, -4.132003),
-  vec3(2.187081, 2.607840, -3.026414)
-);
-float suppressionUnitRegion = max(
-  insideRedSuppressionUnit,
-  insideBlueSuppressionUnit
-);
-
-// The source CAD assigns this light-green material only to the clear
-// polycarbonate panels (Part 1 and Part 4). Color is linearized by map_fragment.
-vec3 suppressionUnitPanelColor = vec3(0.796078, 0.905882, 0.745098);
-float panelColorDistance = distance(diffuseColor.rgb, suppressionUnitPanelColor);
-float polycarbonatePanelMask = 1.0 - smoothstep(0.015, 0.05, panelColorDistance);
-float transparentPanelMask = suppressionUnitRegion * polycarbonatePanelMask;
-
-diffuseColor.a *= mix(1.0, ${SUPPRESSOR_OPACITY.toFixed(2)}, transparentPanelMask);
-#include <opaque_fragment>`
-            )
-        }
-        transparentMaterial.customProgramCacheKey = () =>
-          'fgc26-suppression-unit-polycarbonate-transparent-v2'
+        // A blended polycarbonate fragment must never become an occluder in
+        // the depth buffer. With depth writes enabled, a near clear panel
+        // could hide the red/blue backing geometry behind it depending on the
+        // camera's transparent-object sort order. Keep depth testing so walls
+        // in front still hide it, but let opaque field geometry establish the
+        // depth buffer first.
+        transparentMaterial.depthWrite = false
+        transparentMaterial.depthTest = true
+        transparentMaterial.opacity = SUPPRESSOR_OPACITY
         transparentMaterial.needsUpdate = true
         transparentMaterials.set(sourceMaterial, transparentMaterial)
         return transparentMaterial
@@ -692,8 +663,8 @@ diffuseColor.a *= mix(1.0, ${SUPPRESSOR_OPACITY.toFixed(2)}, transparentPanelMas
     <T is={configureFieldVisual(gltf.scene)} />
   {/await}
 
-  <!-- Physics Colliders (field.physics.json) -->
-  {#each colliders as collider (collider.id)}
+  <!-- Browser collisions are only used by the isolated prototype scene. -->
+  {#if clientPhysics}{#each colliders as collider (collider.id)}
     <T.Group position={collider.position} rotation={collider.rotation}>
       <RigidBody type="fixed" userData={{ fieldColliderId: collider.id }}>
         {#if collider.primitive === 'capsule'}
@@ -720,7 +691,7 @@ diffuseColor.a *= mix(1.0, ${SUPPRESSOR_OPACITY.toFixed(2)}, transparentPanelMas
         {/if}
       </RigidBody>
     </T.Group>
-  {/each}
+  {/each}{/if}
 
   {#if crosshairTextPos}
     <HTML position={crosshairTextPos} center pointerEvents="none">

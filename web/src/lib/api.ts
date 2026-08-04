@@ -78,6 +78,25 @@ export type GameServer = {
 	health: 'online' | 'offline' | 'disabled';
 };
 
+export type LobbySlotId =
+	| 'red-driver-1' | 'red-driver-2' | 'red-driver-3' | 'red-human'
+	| 'blue-driver-1' | 'blue-driver-2' | 'blue-driver-3' | 'blue-human';
+
+export type MatchLobby = {
+	matchId: string;
+	hostId: string;
+	status: 'LOBBY' | 'STARTING' | 'IN_PROGRESS' | 'FINISHED' | 'CANCELLED';
+	error: string | null;
+	updatedAt: number;
+	slots: Array<{
+		id: LobbySlotId;
+		alliance: 'red' | 'blue';
+		role: 'driver' | 'human-player';
+		label: string;
+		occupant: { userId: string; name: string; teamName: string | null; robotId: string | null; ready: boolean } | null;
+	}>;
+};
+
 type Paginated<T> = {
 	items: T[];
 	page: number;
@@ -187,6 +206,35 @@ export class APIClient {
 		);
 	}
 
+	getMatchLobby(matchId: string) {
+		return this.request<{ lobby: MatchLobby }>(`/api/matches/${encodeURIComponent(matchId)}/lobby`);
+	}
+
+	claimLobbySlot(matchId: string, input: { slotId: LobbySlotId; robotId?: string | null }) {
+		return this.request<{ lobby: MatchLobby }>(`/api/matches/${encodeURIComponent(matchId)}/lobby/slot`, {
+			method: 'POST', body: JSON.stringify(input)
+		});
+	}
+
+	leaveLobby(matchId: string) {
+		return this.request<{ lobby: MatchLobby }>(`/api/matches/${encodeURIComponent(matchId)}/lobby/leave`, { method: 'POST' });
+	}
+
+	setLobbyReady(matchId: string, ready: boolean) {
+		return this.request<{ lobby: MatchLobby }>(`/api/matches/${encodeURIComponent(matchId)}/lobby/ready`, {
+			method: 'POST', body: JSON.stringify({ ready })
+		});
+	}
+
+	startLobbyMatch(matchId: string) {
+		return this.request<{ lobby: MatchLobby; game_server_id: string }>(`/api/matches/${encodeURIComponent(matchId)}/lobby/start`, { method: 'POST' });
+	}
+
+	lobbyWebSocketUrl(matchId: string) {
+		const apiOrigin = this.baseUrl || window.location.origin;
+		return `${apiOrigin.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')}/api/matches/${encodeURIComponent(matchId)}/lobby/ws`;
+	}
+
 	createTestMatchTicket() {
 		return this.request<{ match_id: 'test-match'; ticket: string; ws_url: string }>(
 			'/api/matches/test-match/ticket',
@@ -218,6 +266,12 @@ export class APIClient {
 				engineCalls: string[];
 			}>;
 		}>(`/api/game-packs/${encodeURIComponent(id)}/metadata`);
+	}
+
+	getGamePackAssets(id: 'fgc-2026') {
+		return this.request<{ visual: string; physics: string; semantics: string }>(
+			`/api/game-packs/${encodeURIComponent(id)}/assets`
+		);
 	}
 
 	getAdminOverview() {

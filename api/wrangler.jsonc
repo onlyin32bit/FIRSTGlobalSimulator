@@ -14,9 +14,20 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "MATCH_LOBBY", "class_name": "MatchLobby" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1-match-lobby", "new_sqlite_classes": ["MatchLobby"] }
+  ],
   "vars": {
     "WEB_ORIGIN": "http://localhost:5173",
     "API_ORIGIN": "http://localhost:8787",
-    "GAME_SERVER_ORIGIN": "ws://localhost:3000"
+    // workerd may resolve localhost to IPv6 while the local Rust server binds
+    // its HTTP listener on IPv4. Use the explicit loopback address for the
+    // development proxy; deployed environments override this binding.
+    "GAME_SERVER_ORIGIN": "ws://127.0.0.1:3000"
   }
 }

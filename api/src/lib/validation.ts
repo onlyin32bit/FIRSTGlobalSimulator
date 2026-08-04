@@ -34,6 +34,16 @@ export const matchSchema = z.object({
   gamePackId: z.literal('fgc-2026')
 }).strict()
 
+export const lobbySlotSchema = z.object({
+  slotId: z.enum([
+    'red-driver-1', 'red-driver-2', 'red-driver-3', 'red-human',
+    'blue-driver-1', 'blue-driver-2', 'blue-driver-3', 'blue-human'
+  ]),
+  robotId: z.string().trim().min(1).max(255).nullable().optional()
+}).strict()
+
+export const lobbyReadySchema = z.object({ ready: z.boolean() }).strict()
+
 export const createInvitationSchema = z.object({
   expiresAt: z.coerce.date().optional()
 }).strict()
@@ -63,7 +73,7 @@ export const matchStatusSchema = z.enum(['LOBBY', 'IN_PROGRESS', 'FINISHED', 'CA
 export const createAdminMatchSchema = z.object({
   hostId: z.string().trim().min(1).max(255),
   gamePackId: z.literal('fgc-2026'),
-  maxPlayers: z.coerce.number().int().min(1).max(6),
+  maxPlayers: z.coerce.number().int().min(1).max(8),
   status: matchStatusSchema.default('LOBBY')
 }).strict()
 

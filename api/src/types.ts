@@ -1,6 +1,8 @@
 import type { AuthEnvironment } from './auth'
+import type { MatchLobby } from './match-lobby'
 
 export type Bindings = AuthEnvironment & {
+  MATCH_LOBBY: DurableObjectNamespace<MatchLobby>
   JWT_SECRET?: string
   N8N_WEBHOOK_URL?: string
   GAME_SERVER_ORIGIN?: string

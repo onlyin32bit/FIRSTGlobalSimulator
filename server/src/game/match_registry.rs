@@ -29,6 +29,7 @@ pub enum MatchInput {
         user_id: String,
         name: String,
         team_name: String,
+        slot_id: Option<String>,
     },
     PlayerLeave {
         user_id: String,
@@ -74,7 +75,7 @@ impl RuntimeBackend {
         if pack.arena.physics_backend == "sphere_xpbd" {
             let mut runtime = SphereRuntime::new(match_id, pack.manifest.id.clone(), 0);
             runtime.context.game_pack_version = pack.manifest.version.clone();
-            runtime.create_test_arena(&pack.arena);
+            runtime.create_field_arena(&pack.arena, &pack.field_definition);
             Self::Sphere(Box::new(runtime))
         } else {
             let mut runtime = MatchRuntime::new(match_id, pack.manifest.id.clone(), 0);
@@ -84,10 +85,10 @@ impl RuntimeBackend {
         }
     }
 
-    fn add_player(&mut self, id: String, name: String, team: String, arena: &ArenaConfig) {
+    fn add_player(&mut self, id: String, name: String, team: String, slot_id: Option<String>, arena: &ArenaConfig) {
         match self {
             Self::Rapier(runtime) => runtime.add_player(id, name, team, arena),
-            Self::Sphere(runtime) => runtime.add_player(id, name, team, arena),
+            Self::Sphere(runtime) => runtime.add_player(id, name, team, slot_id.as_deref(), arena),
         }
     }
 
@@ -358,7 +359,8 @@ impl MatchRegistry {
                                 user_id,
                                 name,
                                 team_name,
-                            } => runtime.add_player(user_id, name, team_name, &pack.arena),
+                                slot_id,
+                            } => runtime.add_player(user_id, name, team_name, slot_id, &pack.arena),
                             MatchInput::PlayerLeave { user_id } => runtime.remove_player(&user_id),
                             MatchInput::PlayerInput {
                                 user_id,

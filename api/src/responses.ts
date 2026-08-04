@@ -12,6 +12,8 @@ export type ErrorCode =
   | 'VALIDATION_ERROR'
   | 'INTERNAL_ERROR'
   | 'GAME_SERVER_UNAVAILABLE'
+  | 'LOBBY_INVALID_STATE'
+  | 'LOBBY_SLOT_UNAVAILABLE'
 
 export function jsonError(
   c: Context, 

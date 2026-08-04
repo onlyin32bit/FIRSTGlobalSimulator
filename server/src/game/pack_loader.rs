@@ -3,6 +3,7 @@ use super::rhai_engine::{RhaiEngine, RuleScriptMetadata};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::collections::BTreeMap;
 use tracing::{error, info, warn};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -28,6 +29,34 @@ pub struct GamePackMetadata {
     pub manifest: GamePackManifest,
     pub scripts: Vec<RuleScriptMetadata>,
     pub arena: ArenaConfig,
+    pub field_definition: FieldDefinition,
+}
+
+/// Server-ready subset of the authored Assimp field files. The GLB is only a
+/// renderer asset; these bounds and anchors are the authoritative simulation
+/// inputs shared by every match using this pack.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldDefinition {
+    pub colliders: Vec<FieldCollider>,
+    pub anchors: BTreeMap<String, [f32; 3]>,
+    pub triggers: Vec<FieldTrigger>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldCollider {
+    pub id: String,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldTrigger {
+    pub id: String,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -246,12 +275,93 @@ impl PackLoader {
         let arena = arena.ok_or_else(|| {
             GameError::ScriptCompilationError("The pack must define an arena.rhai script".into())
         })?;
+        let field_definition = load_field_definition(root, &manifest.field)?;
         Ok(GamePackMetadata {
             manifest,
             scripts,
             arena,
+            field_definition,
         })
     }
+}
+
+fn load_field_definition(root: &std::path::Path, field: &serde_json::Value) -> Result<FieldDefinition, GameError> {
+    let physics_name = field.get("physics").and_then(serde_json::Value::as_str)
+        .ok_or_else(|| GameError::ManifestParseError("Pack field.physics is missing".into()))?;
+    let semantics_name = field.get("semantics").and_then(serde_json::Value::as_str)
+        .ok_or_else(|| GameError::ManifestParseError("Pack field.semantics is missing".into()))?;
+    let physics: serde_json::Value = serde_json::from_str(&fs::read_to_string(root.join(physics_name))
+        .map_err(|error| GameError::ManifestParseError(error.to_string()))?)
+        .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
+    let semantics: serde_json::Value = serde_json::from_str(&fs::read_to_string(root.join(semantics_name))
+        .map_err(|error| GameError::ManifestParseError(error.to_string()))?)
+        .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
+
+    let mut definition = FieldDefinition::default();
+    definition.colliders = assimp_bounds(&physics, true)
+        .into_iter()
+        .map(|(id, min, max)| FieldCollider { id, min, max })
+        .collect();
+    for child in assimp_children(&semantics) {
+        let Some(id) = child.get("name").and_then(serde_json::Value::as_str) else { continue; };
+        if child.get("meshes").is_some() {
+            if let Some((_, min, max)) = assimp_bound(child, &semantics, false) {
+                definition.triggers.push(FieldTrigger { id: id.into(), min, max });
+            }
+        } else if let Some(position) = assimp_translation(child) {
+            definition.anchors.insert(id.into(), position);
+        }
+    }
+    info!(colliders = definition.colliders.len(), anchors = definition.anchors.len(), triggers = definition.triggers.len(), "Loaded field physics and semantics");
+    Ok(definition)
+}
+
+fn assimp_children(scene: &serde_json::Value) -> Vec<&serde_json::Value> {
+    scene.get("rootnode").and_then(|node| node.get("children"))
+        .and_then(serde_json::Value::as_array).map(|children| children.iter().collect()).unwrap_or_default()
+}
+
+fn assimp_bounds(scene: &serde_json::Value, solid_only: bool) -> Vec<(String, [f32; 3], [f32; 3])> {
+    assimp_children(scene).into_iter().filter_map(|child| assimp_bound(child, scene, solid_only)).collect()
+}
+
+fn assimp_bound(child: &serde_json::Value, scene: &serde_json::Value, solid_only: bool) -> Option<(String, [f32; 3], [f32; 3])> {
+    let id = child.get("name")?.as_str()?.to_string();
+    let mesh_index = child.get("meshes")?.as_array()?.first()?.as_u64()? as usize;
+    let vertices = scene.get("meshes")?.as_array()?.get(mesh_index)?.get("vertices")?.as_array()?;
+    let matrix = assimp_matrix(child)?;
+    let mut local_min = [f32::INFINITY; 3];
+    let mut local_max = [f32::NEG_INFINITY; 3];
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for xyz in vertices.chunks_exact(3) {
+        let local = [xyz[0].as_f64()? as f32, xyz[1].as_f64()? as f32, xyz[2].as_f64()? as f32];
+        for axis in 0..3 { local_min[axis] = local_min[axis].min(local[axis]); local_max[axis] = local_max[axis].max(local[axis]); }
+        let point = transform_point(&matrix, local);
+        for axis in 0..3 { min[axis] = min[axis].min(point[axis]); max[axis] = max[axis].max(point[axis]); }
+    }
+    if solid_only && (0..3).any(|axis| local_max[axis] - local_min[axis] < 0.01) { return None; }
+    min[0].is_finite().then_some((id, min, max))
+}
+
+fn assimp_translation(child: &serde_json::Value) -> Option<[f32; 3]> {
+    let matrix = assimp_matrix(child)?;
+    Some([matrix[3], matrix[7], matrix[11]])
+}
+
+fn assimp_matrix(child: &serde_json::Value) -> Option<[f32; 16]> {
+    let values = child.get("transformation")?.as_array()?;
+    let mut matrix = [0.0; 16];
+    for (index, value) in values.iter().take(16).enumerate() { matrix[index] = value.as_f64()? as f32; }
+    Some(matrix)
+}
+
+fn transform_point(matrix: &[f32; 16], point: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0] * point[0] + matrix[1] * point[1] + matrix[2] * point[2] + matrix[3],
+        matrix[4] * point[0] + matrix[5] * point[1] + matrix[6] * point[2] + matrix[7],
+        matrix[8] * point[0] + matrix[9] * point[1] + matrix[10] * point[2] + matrix[11],
+    ]
 }
 
 #[cfg(test)]
@@ -275,6 +385,11 @@ mod tests {
         assert!(metadata.arena.floor.rolling_resistance_mps2 > 0.0);
         assert!(metadata.arena.robot.intake_enabled);
         assert!(metadata.arena.ramp.enabled);
+        assert!(!metadata.field_definition.colliders.is_empty());
+        assert!(metadata.field_definition.anchors.contains_key("redSpawn1"));
+        assert!(metadata.field_definition.anchors.contains_key("blueSpawn3"));
+        assert!(metadata.field_definition.anchors.contains_key("EXTballspawn"));
+        assert!(metadata.field_definition.triggers.iter().any(|trigger| trigger.id == "EXTscore"));
         assert!(
             metadata
                 .scripts

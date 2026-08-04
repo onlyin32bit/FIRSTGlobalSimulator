@@ -8,6 +8,12 @@ pub struct TicketClaims {
     pub team_name: String,    // Team Name
     pub display_name: String, // Player-facing name
     pub robot_data: String,   // JSON string of their robot build
+    #[serde(default)]
+    pub slot_id: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub alliance: Option<String>,
     pub exp: usize,
 }
 
