@@ -15,13 +15,24 @@ fn on_phase_start(phase) {
 
 // Triggered when a game piece enters a sensor zone defined in semantics.json
 fn on_trigger_enter(trigger_id, entity_id) {
-    if trigger_id == "blueSU" {
+    if trigger_id == "blueSU" || trigger_id == "blueSUscore" {
         add_score("blue", "SU", 1);
-    } else if trigger_id == "redSU" {
+    } else if trigger_id == "redSU" || trigger_id == "redSUscore" {
         add_score("red", "SU", 1);
-    } else if trigger_id == "extinguisher" {
+    } else if trigger_id == "extinguisher" || trigger_id == "EXTscore" {
         // Global Alliance Element (Coopertition)
-        add_score("global", "EXT", 1);
+        // Per rules: when shooting balls into the extinguisher, points won't be accumulated.
+        let is_shot = false;
+        if type_of(entity_id) == "map" && entity_id.contains("is_shot") {
+            is_shot = entity_id.is_shot;
+        } else if type_of(entity_id) == "map" && entity_id.contains("shot_by_robot") {
+            is_shot = entity_id.shot_by_robot;
+        } else if type_of(entity_id) == "bool" {
+            is_shot = entity_id;
+        }
+        if !is_shot {
+            add_score("global", "EXT", 1);
+        }
     }
 }
 

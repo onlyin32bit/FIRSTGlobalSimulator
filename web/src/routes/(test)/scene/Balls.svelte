@@ -38,6 +38,7 @@
   let rapierBodies: any[] = [];
   let ballStates: string[] = [];
   let ballOwnerSlot: string[] = [];
+  let ballShotByRobot: boolean[] = [];
 
   let auraPos = $state<[number, number, number] | null>(null);
   let pulseTimer = 0;
@@ -107,6 +108,7 @@
     rapierBodies = [];
     ballStates = [];
     ballOwnerSlot = [];
+    ballShotByRobot = [];
     ballZoneState = [];
     previousBallPositions = [];
     visualSwallows.clear();
@@ -145,6 +147,7 @@
       rapierBodies.push(body);
       ballStates.push('active');
       ballOwnerSlot.push('');
+      ballShotByRobot.push(false);
       ballZoneState.push(''); // not inside any scoring zone yet
       previousBallPositions.push({ x: ball.x, y: ball.y, z: ball.z });
     });
@@ -303,6 +306,7 @@
         const body = rapierBodies[throwIndex];
 
         ballStates[throwIndex] = 'active';
+        ballShotByRobot[throwIndex] = false;
         humanPlayerStorage.update((count) => Math.max(0, count - 1));
         visualSwallows.delete(throwIndex);
         body.setTranslation(new rapier.Vector3(origin.x, origin.y, origin.z), true);
@@ -396,6 +400,7 @@
 
         ballStates[nearestBallIndex] = 'swallowing';
         ballOwnerSlot[nearestBallIndex] = activeSlotId;
+        ballShotByRobot[nearestBallIndex] = false;
         visualSwallows.set(nearestBallIndex, {
           x: bPos.x,
           y: bPos.y,
@@ -467,6 +472,7 @@
           const i = ballsToShoot[j];
           ballStates[i] = 'active';
           ballOwnerSlot[i] = '';
+          ballShotByRobot[i] = true;
           
           const rightX = rState.forward.z;
           const rightZ = -rState.forward.x;
@@ -563,6 +569,7 @@
           const i = ballsToTransfer[j];
           ballStates[i] = 'active';
           ballOwnerSlot[i] = '';
+          ballShotByRobot[i] = false;
           
           const rightX = rState.forward.z;
           const rightZ = -rState.forward.x;
@@ -679,7 +686,12 @@
 
           if (insideNow) hitZone = zone.id;
           if ((insideNow || crossedZone) && ballZoneState[i] !== zone.id) {
-            addScore(zone.id);
+            // According to the rules, when shooting balls into the extinguisher, points won't be accumulated.
+            if ((zone.id === 'EXTscore' || zone.id === 'extinguisher') && ballShotByRobot[i]) {
+              // Points skipped for shot balls entering extinguisher zone
+            } else {
+              addScore(zone.id);
+            }
           }
         }
 
