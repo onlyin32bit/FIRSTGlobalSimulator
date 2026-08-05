@@ -77,9 +77,12 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
   }
 
   private read(): LobbyState | null {
+    // `.one()` throws when a newly created Durable Object has no row yet.
+    // Initialization intentionally reads before writing, so use a safe
+    // zero-or-one row query here.
     const row = this.ctx.storage.sql
       .exec<{ state: string }>('SELECT state FROM lobby_state WHERE id = 1')
-      .one()
+      .toArray()[0]
     return row ? JSON.parse(row.state) as LobbyState : null
   }
 
@@ -177,6 +180,17 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
     const state = this.requireLobby()
     if (state.status !== 'STARTING') throw new Error('Lobby is not starting.')
     state.status = 'IN_PROGRESS'
+    this.write(state)
+    return state
+  }
+
+  /** Development/admin escape hatch; normal players must use the ready check. */
+  async forceStart(): Promise<LobbyState> {
+    const state = this.requireLobby()
+    if (state.status === 'IN_PROGRESS') return state
+    if (state.status !== 'LOBBY') throw new Error('Lobby cannot be entered immediately in its current state.')
+    state.status = 'IN_PROGRESS'
+    state.error = null
     this.write(state)
     return state
   }

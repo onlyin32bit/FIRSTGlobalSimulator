@@ -15,7 +15,7 @@ pub mod auth;
 pub mod game;
 
 use auth::TicketClaims;
-use game::match_registry::{MatchInput, MatchRegistry, TEST_MATCH_ID};
+use game::match_registry::{MatchInput, MatchRegistry};
 use game::pack_loader::{GamePackRuntimeSnapshot, PackLoader};
 
 #[derive(Clone)]
@@ -45,9 +45,14 @@ impl ControlPlane {
         let game_server_key = std::env::var("GAME_SERVER_KEY")
             .ok()
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| "GAME_SERVER_KEY must be the key generated in the admin dashboard".to_string())?;
+            .ok_or_else(|| {
+                "GAME_SERVER_KEY must be the key generated in the admin dashboard".to_string()
+            })?;
         let capacity = |name: &str, default: u64| {
-            std::env::var(name).ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(default)
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(default)
         };
         Ok(Self {
             api_url,
@@ -106,10 +111,12 @@ async fn main() {
 
     let pack = Arc::new(pack);
     let registry = Arc::new(MatchRegistry::new(pack.clone()));
-    registry.start_test_match().await;
     start_heartbeat(registry.clone(), control_plane.clone());
     info!(pack = %pack.manifest.id, version = %pack.manifest.version, "Loaded game-pack runtime snapshot from API");
-    let state = AppState { registry, control_plane };
+    let state = AppState {
+        registry,
+        control_plane,
+    };
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
         .route("/ws/match/{match_id}", get(ws_handler))
@@ -117,7 +124,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 3000)))
         .await
         .unwrap();
-    info!("Listening on 0.0.0.0:3000; always-on match: {TEST_MATCH_ID}");
+    info!("Listening on 0.0.0.0:3000; matches are created on demand");
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -135,10 +142,14 @@ struct ControlPlaneError {
 
 /// All game-pack authority is in the control-plane API. A host fetches and
 /// compiles one immutable in-memory snapshot; it never reads or serves pkgs.
-async fn fetch_api_pack(loader: &PackLoader, control_plane: &ControlPlane) -> Result<game::pack_loader::GamePackMetadata, String> {
+async fn fetch_api_pack(
+    loader: &PackLoader,
+    control_plane: &ControlPlane,
+) -> Result<game::pack_loader::GamePackMetadata, String> {
     let endpoint = control_plane.endpoint("game-packs/fgc-2026/runtime");
     info!(%endpoint, "Fetching game-pack runtime snapshot from API");
-    let response = control_plane.client
+    let response = control_plane
+        .client
         .get(&endpoint)
         .header("X-Game-Server-Key", &control_plane.game_server_key)
         .send()
@@ -150,11 +161,18 @@ async fn fetch_api_pack(loader: &PackLoader, control_plane: &ControlPlane) -> Re
         .await
         .map_err(|error| format!("API runtime response was invalid JSON: {error}"))?;
     if !status.is_success() || !payload.success {
-        let detail = payload.error.and_then(|error| error.message).unwrap_or_else(|| status.to_string());
+        let detail = payload
+            .error
+            .and_then(|error| error.message)
+            .unwrap_or_else(|| status.to_string());
         return Err(format!("API rejected game-pack runtime request: {detail}"));
     }
-    let snapshot = payload.data.ok_or_else(|| "API runtime response did not include a pack snapshot".to_string())?;
-    loader.load_runtime_snapshot(snapshot).map_err(|error| error.to_string())
+    let snapshot = payload
+        .data
+        .ok_or_else(|| "API runtime response did not include a pack snapshot".to_string())?;
+    loader
+        .load_runtime_snapshot(snapshot)
+        .map_err(|error| error.to_string())
 }
 
 fn start_heartbeat(registry: Arc<MatchRegistry>, control_plane: ControlPlane) {
@@ -181,7 +199,8 @@ struct TicketVerification {
 
 async fn verify_ticket(control_plane: &ControlPlane, ticket: &str) -> Result<TicketClaims, String> {
     let endpoint = control_plane.endpoint("game-servers/tickets/verify");
-    let response = control_plane.client
+    let response = control_plane
+        .client
         .post(&endpoint)
         .header("X-Game-Server-Key", &control_plane.game_server_key)
         .json(&serde_json::json!({ "ticket": ticket }))
@@ -189,12 +208,20 @@ async fn verify_ticket(control_plane: &ControlPlane, ticket: &str) -> Result<Tic
         .await
         .map_err(|error| format!("ticket verification request failed: {error}"))?;
     let status = response.status();
-    let payload: ControlPlaneResponse<TicketVerification> = response.json().await
+    let payload: ControlPlaneResponse<TicketVerification> = response
+        .json()
+        .await
         .map_err(|error| format!("ticket verification response was invalid JSON: {error}"))?;
     if !status.is_success() || !payload.success {
-        return Err(payload.error.and_then(|error| error.message).unwrap_or_else(|| status.to_string()));
+        return Err(payload
+            .error
+            .and_then(|error| error.message)
+            .unwrap_or_else(|| status.to_string()));
     }
-    payload.data.map(|data| data.claims).ok_or_else(|| "ticket verification did not return claims".to_string())
+    payload
+        .data
+        .map(|data| data.claims)
+        .ok_or_else(|| "ticket verification did not return claims".to_string())
 }
 
 async fn ws_handler(

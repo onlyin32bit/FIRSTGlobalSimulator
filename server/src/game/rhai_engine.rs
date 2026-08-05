@@ -46,20 +46,23 @@ impl RhaiEngine {
         let outcomes = Arc::new(Mutex::new(Vec::<RuleOutcome>::new()));
         let scoring_outcomes = outcomes.clone();
 
-        engine.register_fn("add_score", move |team: &str, category: &str, points: i64| {
-            info!(
-                "Rhai added score! Team: {}, Category: {}, Points: {}",
-                team, category, points
-            );
-            if let Ok(mut events) = scoring_outcomes.lock() {
-                events.push(RuleOutcome {
-                    kind: "score",
-                    team: team.to_string(),
-                    category: category.to_string(),
-                    points,
-                });
-            }
-        });
+        engine.register_fn(
+            "add_score",
+            move |team: &str, category: &str, points: i64| {
+                info!(
+                    "Rhai added score! Team: {}, Category: {}, Points: {}",
+                    team, category, points
+                );
+                if let Ok(mut events) = scoring_outcomes.lock() {
+                    events.push(RuleOutcome {
+                        kind: "score",
+                        team: team.to_string(),
+                        category: category.to_string(),
+                        points,
+                    });
+                }
+            },
+        );
 
         Self {
             engine,
@@ -97,16 +100,19 @@ impl RhaiEngine {
         let Some(ast) = &self.scoring_ast else {
             return Vec::new();
         };
-        if !ast.iter_functions().any(|function| {
-            function.name == "on_trigger_enter" && function.params.len() == 2
-        }) {
+        if !ast
+            .iter_functions()
+            .any(|function| function.name == "on_trigger_enter" && function.params.len() == 2)
+        {
             return Vec::new();
         }
         let mut scope = Scope::new();
-        if let Err(error) = self.engine.call_fn::<()>(&mut scope, ast, "on_trigger_enter", (
-            trigger_id.to_string(),
-            entity_id.to_string(),
-        )) {
+        if let Err(error) = self.engine.call_fn::<()>(
+            &mut scope,
+            ast,
+            "on_trigger_enter",
+            (trigger_id.to_string(), entity_id.to_string()),
+        ) {
             error!(%error, %trigger_id, %entity_id, "Rhai trigger hook failed");
         }
         self.outcomes

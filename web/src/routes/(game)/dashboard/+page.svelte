@@ -24,7 +24,7 @@
 	function joinMatch() {
 		const normalizedMatchId = matchId.trim();
 		if (!normalizedMatchId) return;
-		void goto(normalizedMatchId === 'test-match' ? '/match/test-match' : `/match/${encodeURIComponent(normalizedMatchId)}/lobby`);
+		void goto(`/match/${encodeURIComponent(normalizedMatchId)}/lobby`);
 	}
 
 	async function submitCreateMatch() {
@@ -91,9 +91,9 @@
 				<Card.Header class="flex flex-row items-start justify-between gap-4 space-y-0">
 					<div>
 						<Card.Title class="flex items-center gap-2 text-xl"
-							><IconActivity class="size-5 text-primary" /> Live test arena</Card.Title
+							><IconActivity class="size-5 text-primary" /> Live arena</Card.Title
 						><Card.Description class="mt-2 max-w-lg"
-							>Jump into the always-on arena to validate your robot and controls in real time.</Card.Description
+							>Create a persisted match and validate your robot and controls in the live arena.</Card.Description
 						>
 					</div>
 					<span
@@ -102,11 +102,11 @@
 					>
 				</Card.Header>
 				<Card.Footer class="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
-					<Button href="/match/test-match" class="sm:w-auto"
-						>Join live match <IconArrowRight data-icon="inline-end" /></Button
+					<Button onclick={submitCreateMatch} disabled={isCreating} class="sm:w-auto"
+						>Create live match <IconArrowRight data-icon="inline-end" /></Button
 					>
 					<span class="text-xs text-muted-foreground"
-						>Match ID: <code class="font-medium">test-match</code></span
+						>A lobby record will be created in the database.</span
 					>
 				</Card.Footer>
 			</Card.Root>
@@ -143,7 +143,7 @@
 						<Label for="match-id">Match ID</Label><Input
 							id="match-id"
 							class="mt-2 bg-background/70"
-							placeholder="e.g. test-match"
+							placeholder="e.g. match ID from a teammate"
 							bind:value={matchId}
 							onkeydown={(event) => event.key === 'Enter' && joinMatch()}
 						/>

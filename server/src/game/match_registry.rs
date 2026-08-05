@@ -10,8 +10,6 @@ use super::pack_loader::{ArenaConfig, GamePackMetadata};
 use super::rhai_engine::RhaiEngine;
 use super::sphere_runtime::{SphereRuntime, StepMetrics};
 
-pub const TEST_MATCH_ID: &str = "test-match";
-
 pub struct MatchRegistry {
     matches: RwLock<HashMap<String, MatchHandle>>,
     pack: Arc<GamePackMetadata>,
@@ -86,7 +84,14 @@ impl RuntimeBackend {
         }
     }
 
-    fn add_player(&mut self, id: String, name: String, team: String, slot_id: Option<String>, arena: &ArenaConfig) {
+    fn add_player(
+        &mut self,
+        id: String,
+        name: String,
+        team: String,
+        slot_id: Option<String>,
+        arena: &ArenaConfig,
+    ) {
         match self {
             Self::Rapier(runtime) => runtime.add_player(id, name, team, arena),
             Self::Sphere(runtime) => runtime.add_player(id, name, team, slot_id.as_deref(), arena),
@@ -263,10 +268,6 @@ impl MatchRegistry {
             matches: RwLock::new(HashMap::new()),
             pack,
         }
-    }
-
-    pub async fn start_test_match(&self) {
-        self.get_or_create_match(TEST_MATCH_ID).await;
     }
 
     pub async fn match_count(&self) -> usize {

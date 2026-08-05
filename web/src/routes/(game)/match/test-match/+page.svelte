@@ -17,7 +17,7 @@
 		type MatchPhysics as PhysicsModel,
 		type MatchPlayer as Player
 	} from './match-protocol';
-	const activeMatchId = $derived(page.params.matchId || 'test-match');
+	const activeMatchId = $derived(page.params.matchId ?? '');
 
 	type ObjectFrame = {
 		objectId: string;
@@ -99,7 +99,14 @@
 	let packVersion = $state('Loading pack…');
 	let fieldAssets = $state<{ visual: string; physics: string; semantics: string } | null>(null);
 	type FieldDefinition = {
-		colliders: Array<{ id: string; min: [number, number, number]; max: [number, number, number] }>;
+		colliders: Array<{
+			id: string;
+			min: [number, number, number];
+			max: [number, number, number];
+			center?: [number, number, number];
+			halfExtents?: [number, number, number];
+			axes?: [[number, number, number], [number, number, number], [number, number, number]];
+		}>;
 		triggers: Array<{ id: string; min: [number, number, number]; max: [number, number, number] }>;
 		boundary: { min: [number, number, number]; max: [number, number, number] };
 	};
@@ -588,18 +595,23 @@
 		const pingTimer = window.setInterval(sendPing, 2000);
 
 		const connect = async () => {
+			if (!activeMatchId) {
+				error = 'A persisted match ID is required. Create or join a match from the dashboard.';
+				status = 'Unavailable';
+				return;
+			}
 			try {
-			const [ticket, currentUser, assets, metadata] = await Promise.all([
-				activeMatchId === 'test-match' ? api.createTestMatchTicket() : api.createMatchTicket(activeMatchId),
-				api.getCurrentUser(),
-				api.getGamePackAssets('fgc-2026'),
-				api.getGamePackMetadata('fgc-2026')
-			]);
+				const [ticket, currentUser, assets, metadata] = await Promise.all([
+					api.createMatchTicket(activeMatchId),
+					api.getCurrentUser(),
+					api.getGamePackAssets('fgc-2026'),
+					api.getGamePackMetadata('fgc-2026')
+				]);
 				if (disposed) return;
 
-			localId = currentUser.user.id;
-			fieldAssets = assets;
-			fieldDefinition = metadata.fieldDefinition;
+				localId = currentUser.user.id;
+				fieldAssets = assets;
+				fieldDefinition = metadata.fieldDefinition;
 				const nextSocket = new WebSocket(ticket.ws_url);
 				nextSocket.binaryType = 'arraybuffer';
 				socket = nextSocket;
@@ -712,7 +724,7 @@
 	<div
 		class="absolute top-4 left-4 z-10 rounded-lg border border-white/15 bg-black/60 px-4 py-3 text-sm text-white backdrop-blur"
 	>
-		<p class="font-semibold">{activeMatchId === 'test-match' ? 'Live test match' : 'Live match'}</p>
+		<p class="font-semibold">Live match</p>
 		<p class="mt-1 text-white/70">
 			{status} · {players.length} player{players.length === 1 ? '' : 's'} · Ping: {pingMs === null
 				? '—'
@@ -727,7 +739,9 @@
 			{gamepadConnected ? gamepadName : 'Connect a gamepad and press a button'}
 		</p>
 		<p class="mt-1 text-xs text-white/40">Left trigger: precision · A: brake</p>
-		<p class="mt-1 text-xs text-white/40">C: camera · F: flip north/south · B: field bounds · Ctrl+F3: diagnostics</p>
+		<p class="mt-1 text-xs text-white/40">
+			C: camera · F: flip north/south · B: field bounds · Ctrl+F3: diagnostics
+		</p>
 		{#if error}<p class="mt-2 text-fuchsia-300">✖ {error}</p>{/if}
 	</div>
 	<div class="absolute top-4 right-4 z-10 flex items-center gap-2">
@@ -934,7 +948,8 @@
 				</dd>
 				<dt class="text-white/40">field</dt>
 				<dd>
-					{fieldDefinition?.colliders.length ?? 0} collision · {fieldDefinition?.triggers.length ?? 0} trigger
+					{fieldDefinition?.colliders.length ?? 0} collision · {fieldDefinition?.triggers.length ??
+						0} trigger
 				</dd>
 				<dt class="text-white/40">sim</dt>
 				<dd>
@@ -981,9 +996,15 @@
 			{/if}
 		</aside>
 	{/if}
-	<Canvas {createRenderer} dpr={[0.75, 1.25]} renderMode="on-demand" shadows>
+	<!-- Cap pixel density for the heavy imported field; this is the largest
+	     client-side GPU cost on high-DPI displays. -->
+	<Canvas {createRenderer} dpr={[0.65, 1]} renderMode="on-demand" shadows>
 		{#if cameraMode === 'robot'}
-			<RobotFollowCamera player={trackedPlayer} direction={cameraDirection} distance={robotCameraDistance} />
+			<RobotFollowCamera
+				player={trackedPlayer}
+				direction={cameraDirection}
+				distance={robotCameraDistance}
+			/>
 		{:else}
 			<T.PerspectiveCamera makeDefault position={[11, 12, 14]} fov={50}>
 				<OrbitControls target={[0, 0, 0]} enablePan={false} minDistance={8} maxDistance={28} />
@@ -994,7 +1015,7 @@
 			position={[8, 12, 6]}
 			intensity={2.1}
 			castShadow
-			shadow.mapSize={[1024, 1024]}
+			shadow.mapSize={[512, 512]}
 			shadow.bias={-0.0005}
 		/>
 		<Grid
@@ -1011,6 +1032,8 @@
 				colliders={fieldDefinition.colliders}
 				triggers={fieldDefinition.triggers}
 				boundary={fieldDefinition.boundary}
+				physicsUrl={fieldAssets?.physics}
+				showColliderAabbs
 				{activeTriggerIds}
 			/>
 		{/if}

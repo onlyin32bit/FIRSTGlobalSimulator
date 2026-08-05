@@ -18,6 +18,11 @@ type Manifest = {
 }
 
 type Bounds = { id: string; min: [number, number, number]; max: [number, number, number] }
+type OrientedBounds = Bounds & {
+  center: [number, number, number]
+  halfExtents: [number, number, number]
+  axes: [[number, number, number], [number, number, number], [number, number, number]]
+}
 
 const app = new Hono<{ Bindings: Bindings }>()
 type PackContext = Context<{ Bindings: Bindings }>
@@ -54,32 +59,63 @@ function transformPoint(matrix: number[] | undefined, point: [number, number, nu
   ]
 }
 
-function boundsForNode(node: any, scene: any): Bounds | null {
+function orientedBoundsForNode(node: any, scene: any): OrientedBounds | null {
   const meshIndex = node?.meshes?.[0]
   const vertices = Number.isInteger(meshIndex) ? scene?.meshes?.[meshIndex]?.vertices : null
   if (!node?.name || !Array.isArray(vertices)) return null
+  const matrix = Array.isArray(node.transformation) && node.transformation.length >= 16 ? node.transformation : null
+  if (!matrix) return null
+  const localMin: [number, number, number] = [Infinity, Infinity, Infinity]
+  const localMax: [number, number, number] = [-Infinity, -Infinity, -Infinity]
   const min: [number, number, number] = [Infinity, Infinity, Infinity]
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity]
   for (let index = 0; index + 2 < vertices.length; index += 3) {
-    const point = transformPoint(node.transformation, [vertices[index], vertices[index + 1], vertices[index + 2]])
+    const local: [number, number, number] = [vertices[index], vertices[index + 1], vertices[index + 2]]
+    for (let axis = 0; axis < 3; axis += 1) {
+      localMin[axis] = Math.min(localMin[axis], local[axis])
+      localMax[axis] = Math.max(localMax[axis], local[axis])
+    }
+    const point = transformPoint(matrix, local)
     for (let axis = 0; axis < 3; axis += 1) {
       min[axis] = Math.min(min[axis], point[axis])
       max[axis] = Math.max(max[axis], point[axis])
     }
   }
-  return Number.isFinite(min[0]) ? { id: node.name, min, max } : null
+  if (!Number.isFinite(min[0])) return null
+  const center = transformPoint(matrix, [
+    (localMin[0] + localMax[0]) * 0.5,
+    (localMin[1] + localMax[1]) * 0.5,
+    (localMin[2] + localMax[2]) * 0.5
+  ])
+  const rawAxes = [
+    [matrix[0], matrix[4], matrix[8]],
+    [matrix[1], matrix[5], matrix[9]],
+    [matrix[2], matrix[6], matrix[10]]
+  ] as [[number, number, number], [number, number, number], [number, number, number]]
+  const axes = rawAxes.map((axis) => {
+    const length = Math.hypot(axis[0], axis[1], axis[2]) || 1
+    return [axis[0] / length, axis[1] / length, axis[2] / length] as [number, number, number]
+  }) as OrientedBounds['axes']
+  const halfExtents = rawAxes.map((axis, index) => {
+    const length = Math.hypot(axis[0], axis[1], axis[2]) || 1
+    return ((localMax[index] - localMin[index]) * 0.5) * length
+  }) as [number, number, number]
+  return { id: node.name, min, max, center, halfExtents, axes }
 }
 
-function extrudeThinBounds(bounds: Bounds): Bounds {
-  const min = [...bounds.min] as Bounds['min']
-  const max = [...bounds.max] as Bounds['max']
+function extrudeThinBounds(bounds: OrientedBounds): OrientedBounds {
+  const halfExtents = [...bounds.halfExtents] as OrientedBounds['halfExtents']
   for (let axis = 0; axis < 3; axis += 1) {
-    if (max[axis] - min[axis] >= 0.05) continue
-    const center = (min[axis] + max[axis]) / 2
-    min[axis] = center - 0.025
-    max[axis] = center + 0.025
+    halfExtents[axis] = Math.max(halfExtents[axis], 0.025)
   }
-  return { id: bounds.id, min, max }
+  const min = [...bounds.center] as Bounds['min']
+  const max = [...bounds.center] as Bounds['max']
+  for (let worldAxis = 0; worldAxis < 3; worldAxis += 1) {
+    const radius = bounds.axes.reduce((sum, axis, localAxis) => sum + Math.abs(axis[worldAxis]) * halfExtents[localAxis], 0)
+    min[worldAxis] -= radius
+    max[worldAxis] += radius
+  }
+  return { ...bounds, min, max, halfExtents }
 }
 
 /**
@@ -89,7 +125,7 @@ function extrudeThinBounds(bounds: Bounds): Bounds {
  */
 function buildPublicFieldDefinition(physics: any, semantics: any) {
   const physicsNodes = Array.isArray(physics?.rootnode?.children) ? physics.rootnode.children : []
-  const authored = physicsNodes.map((node: any) => boundsForNode(node, physics)).filter(Boolean) as Bounds[]
+  const authored = physicsNodes.map((node: any) => orientedBoundsForNode(node, physics)).filter(Boolean) as OrientedBounds[]
   const riser = authored.find((bounds) => bounds.id === 'RISER.001')
   const colliders = authored
     .filter(({ id, min, max }) => id !== 'GUARD_RAIL.001' && id !== 'RISER.001' && max[0] - min[0] <= 2.5 && max[2] - min[2] <= 2.5)
@@ -99,7 +135,7 @@ function buildPublicFieldDefinition(physics: any, semantics: any) {
   const semanticNodes = Array.isArray(semantics?.rootnode?.children) ? semantics.rootnode.children : []
   for (const node of semanticNodes) {
     if (Array.isArray(node?.meshes)) {
-      const bounds = boundsForNode(node, semantics)
+      const bounds = orientedBoundsForNode(node, semantics)
       if (bounds) triggers.push(bounds)
       continue
     }

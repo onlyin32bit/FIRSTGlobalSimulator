@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { T, useThrelte } from '@threlte/core';
-	import { DynamicDrawUsage, type InstancedMesh } from 'three';
+	import { DynamicDrawUsage, Sphere, Vector3, type InstancedMesh } from 'three';
 
 	type ObjectFrame = {
 		positions: Float32Array;
@@ -22,6 +22,10 @@
 		if (!mesh) return;
 
 		mesh.instanceMatrix.setUsage(DynamicDrawUsage);
+		// The default InstancedMesh bounds only cover the source sphere. Give the
+		// renderer one conservative field-sized bound so frustum culling can skip
+		// the entire ball draw when the camera is turned away from the field.
+		mesh.geometry.boundingSphere = new Sphere(new Vector3(0, 0, 0), 12);
 		const matrices = mesh.instanceMatrix.array as Float32Array;
 		const count = Math.min(snapshot.positions.length / 3, MAX_INSTANCES);
 		const scale = snapshot.radius / BASE_RADIUS;
@@ -56,9 +60,15 @@
 	});
 </script>
 
-<T.InstancedMesh bind:ref={meshRef} args={MESH_ARGS} frustumCulled={false} castShadow receiveShadow>
+<T.InstancedMesh
+	bind:ref={meshRef}
+	args={MESH_ARGS}
+	frustumCulled
+	castShadow={false}
+	receiveShadow={false}
+>
 	<T.SphereGeometry args={SPHERE_ARGS} />
-	<!-- A low-poly instanced Lambert material keeps 1,000 balls inexpensive
-	     while allowing the single directional shadow map to light them. -->
+	<!-- A low-poly instanced Lambert material keeps 1,000 balls inexpensive;
+	     robot and field shadows provide the useful depth cues. -->
 	<T.MeshLambertMaterial color={frame.color} />
 </T.InstancedMesh>

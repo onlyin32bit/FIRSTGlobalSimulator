@@ -79,8 +79,14 @@ export type GameServer = {
 };
 
 export type LobbySlotId =
-	| 'red-driver-1' | 'red-driver-2' | 'red-driver-3' | 'red-human'
-	| 'blue-driver-1' | 'blue-driver-2' | 'blue-driver-3' | 'blue-human';
+	| 'red-driver-1'
+	| 'red-driver-2'
+	| 'red-driver-3'
+	| 'red-human'
+	| 'blue-driver-1'
+	| 'blue-driver-2'
+	| 'blue-driver-3'
+	| 'blue-human';
 
 export type MatchLobby = {
 	matchId: string;
@@ -93,7 +99,13 @@ export type MatchLobby = {
 		alliance: 'red' | 'blue';
 		role: 'driver' | 'human-player';
 		label: string;
-		occupant: { userId: string; name: string; teamName: string | null; robotId: string | null; ready: boolean } | null;
+		occupant: {
+			userId: string;
+			name: string;
+			teamName: string | null;
+			robotId: string | null;
+			ready: boolean;
+		} | null;
 	}>;
 };
 
@@ -211,35 +223,49 @@ export class APIClient {
 	}
 
 	claimLobbySlot(matchId: string, input: { slotId: LobbySlotId; robotId?: string | null }) {
-		return this.request<{ lobby: MatchLobby }>(`/api/matches/${encodeURIComponent(matchId)}/lobby/slot`, {
-			method: 'POST', body: JSON.stringify(input)
-		});
+		return this.request<{ lobby: MatchLobby }>(
+			`/api/matches/${encodeURIComponent(matchId)}/lobby/slot`,
+			{
+				method: 'POST',
+				body: JSON.stringify(input)
+			}
+		);
 	}
 
 	leaveLobby(matchId: string) {
-		return this.request<{ lobby: MatchLobby }>(`/api/matches/${encodeURIComponent(matchId)}/lobby/leave`, { method: 'POST' });
+		return this.request<{ lobby: MatchLobby }>(
+			`/api/matches/${encodeURIComponent(matchId)}/lobby/leave`,
+			{ method: 'POST' }
+		);
 	}
 
 	setLobbyReady(matchId: string, ready: boolean) {
-		return this.request<{ lobby: MatchLobby }>(`/api/matches/${encodeURIComponent(matchId)}/lobby/ready`, {
-			method: 'POST', body: JSON.stringify({ ready })
-		});
+		return this.request<{ lobby: MatchLobby }>(
+			`/api/matches/${encodeURIComponent(matchId)}/lobby/ready`,
+			{
+				method: 'POST',
+				body: JSON.stringify({ ready })
+			}
+		);
 	}
 
 	startLobbyMatch(matchId: string) {
-		return this.request<{ lobby: MatchLobby; game_server_id: string }>(`/api/matches/${encodeURIComponent(matchId)}/lobby/start`, { method: 'POST' });
+		return this.request<{ lobby: MatchLobby; game_server_id: string }>(
+			`/api/matches/${encodeURIComponent(matchId)}/lobby/start`,
+			{ method: 'POST' }
+		);
+	}
+
+	adminStartLobbyMatch(matchId: string) {
+		return this.request<{ lobby: MatchLobby; game_server_id: string }>(
+			`/api/matches/${encodeURIComponent(matchId)}/lobby/admin-start`,
+			{ method: 'POST' }
+		);
 	}
 
 	lobbyWebSocketUrl(matchId: string) {
 		const apiOrigin = this.baseUrl || window.location.origin;
 		return `${apiOrigin.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')}/api/matches/${encodeURIComponent(matchId)}/lobby/ws`;
-	}
-
-	createTestMatchTicket() {
-		return this.request<{ match_id: 'test-match'; ticket: string; ws_url: string }>(
-			'/api/matches/test-match/ticket',
-			{ method: 'POST' }
-		);
 	}
 
 	listGamePacks() {
@@ -266,9 +292,20 @@ export class APIClient {
 				engineCalls: string[];
 			}>;
 			fieldDefinition: {
-				colliders: Array<{ id: string; min: [number, number, number]; max: [number, number, number] }>;
+				colliders: Array<{
+					id: string;
+					min: [number, number, number];
+					max: [number, number, number];
+					center: [number, number, number];
+					halfExtents: [number, number, number];
+					axes: [[number, number, number], [number, number, number], [number, number, number]];
+				}>;
 				anchors: Record<string, [number, number, number]>;
-				triggers: Array<{ id: string; min: [number, number, number]; max: [number, number, number] }>;
+				triggers: Array<{
+					id: string;
+					min: [number, number, number];
+					max: [number, number, number];
+				}>;
 				boundary: { min: [number, number, number]; max: [number, number, number] };
 			};
 		}>(`/api/game-packs/${encodeURIComponent(id)}/metadata`);
@@ -428,9 +465,7 @@ export class APIClient {
 		return this.request<{ servers: GameServer[] }>('/api/admin/game-servers');
 	}
 
-	createGameServer(input: {
-		origin: string;
-	}) {
+	createGameServer(input: { origin: string }) {
 		return this.request<{ server: GameServer; key: string }>('/api/admin/game-servers', {
 			method: 'POST',
 			body: JSON.stringify(input)
@@ -439,9 +474,7 @@ export class APIClient {
 
 	updateGameServer(
 		id: string,
-		input: Partial<
-			Pick<GameServer, 'origin' | 'maxUsers' | 'maxMatches' | 'slots' | 'status'>
-		>
+		input: Partial<Pick<GameServer, 'origin' | 'maxUsers' | 'maxMatches' | 'slots' | 'status'>>
 	) {
 		return this.request<{ server: GameServer }>(
 			`/api/admin/game-servers/${encodeURIComponent(id)}`,

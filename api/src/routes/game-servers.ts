@@ -63,14 +63,10 @@ app.post('/tickets/verify', async (c) => {
     if (!sub || !matchId || !teamName || !displayName || !robotData || !exp) {
       return jsonError(c, 401, 'AUTH_FAILED', 'The ticket claims are incomplete.')
     }
-    // test-match has no persisted match row; its WebSocket URL is still issued
-    // from a selected healthy host. Persisted matches are bound strictly.
-    if (matchId !== 'test-match') {
-      const db = drizzle(c.env.DB, { schema })
-      const match = await db.query.matches.findFirst({ where: eq(schema.matches.id, matchId) })
-      if (!match || match.status !== 'IN_PROGRESS' || match.gameServerId !== server.id) {
-        return jsonError(c, 403, 'AUTH_FAILED', 'This ticket is not assigned to this game server.')
-      }
+    const db = drizzle(c.env.DB, { schema })
+    const match = await db.query.matches.findFirst({ where: eq(schema.matches.id, matchId) })
+    if (!match || match.status !== 'IN_PROGRESS' || match.gameServerId !== server.id) {
+      return jsonError(c, 403, 'AUTH_FAILED', 'This ticket is not assigned to this game server.')
     }
     return jsonSuccess(c, {
       claims: {

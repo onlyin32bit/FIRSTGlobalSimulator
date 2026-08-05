@@ -5,11 +5,9 @@ import { sign } from 'hono/jwt'
 import * as schema from '../db/schema'
 import { isResponse, lobbyReadySchema, lobbySlotSchema, matchSchema, parseJson } from '../lib/validation'
 import type { LobbySlotId, LobbyUser } from '../match-lobby'
-import { requireUser } from '../middleware'
+import { requireAdmin, requireUser } from '../middleware'
 import { jsonError, jsonSuccess } from '../responses'
 import type { Bindings } from '../types'
-
-export const TEST_MATCH_ID = 'test-match'
 
 const app = new Hono<{ Bindings: Bindings }>()
 
@@ -76,29 +74,6 @@ function lobbyError(c: Parameters<typeof requireUser>[0], error: unknown) {
   const code = /slot|robot/i.test(message) ? 'LOBBY_SLOT_UNAVAILABLE' : 'LOBBY_INVALID_STATE'
   return jsonError(c, 409, code, message)
 }
-
-app.post(`/${TEST_MATCH_ID}/ticket`, async (c) => {
-  const session = await requireUser(c)
-  if (!session) return jsonError(c, 401, 'AUTH_FAILED', 'Sign in is required.')
-
-  const server = await chooseGameServer(c, TEST_MATCH_ID)
-  if (!server) return jsonError(c, 503, 'GAME_SERVER_UNAVAILABLE', 'No healthy game server is available right now.')
-
-  const ticket = await issueTicket(c, {
-    userId: session.user.id,
-    teamName: session.user.team || 'Simulator player',
-    displayName: session.user.name || 'Simulator player',
-    matchId: TEST_MATCH_ID,
-    robotData: JSON.stringify({ kind: 'test-cube' })
-  })
-  if (!ticket) return jsonError(c, 503, 'INTERNAL_ERROR', 'Match tickets are not configured.')
-
-  return jsonSuccess(c, {
-    match_id: TEST_MATCH_ID,
-    ticket,
-    ws_url: gameServerUrl(server.origin, TEST_MATCH_ID, ticket)
-  })
-})
 
 app.post('/', async (c) => {
   const session = await requireUser(c)
@@ -224,6 +199,33 @@ app.post('/:id/lobby/start', async (c) => {
   }
 })
 
+app.post('/:id/lobby/admin-start', async (c) => {
+  const session = await requireAdmin(c)
+  if (!session) return jsonError(c, 403, 'AUTH_FAILED', 'Administrator access is required.')
+  const matchId = c.req.param('id')
+  const db = drizzle(c.env.DB, { schema })
+  const match = await db.query.matches.findFirst({ where: eq(schema.matches.id, matchId) })
+  if (!match) return jsonError(c, 404, 'MATCH_NOT_FOUND', 'Match not found.')
+  if (match.status === 'CANCELLED' || match.status === 'FINISHED') {
+    return jsonError(c, 409, 'LOBBY_INVALID_STATE', 'This match cannot be entered immediately.')
+  }
+
+  const server = match.gameServerId
+    ? await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, match.gameServerId) })
+    : await chooseGameServer(c, matchId)
+  if (!server || server.disabledAt || !server.lastHeartbeatAt || Date.now() - server.lastHeartbeatAt.getTime() >= 30_000) {
+    return jsonError(c, 503, 'GAME_SERVER_UNAVAILABLE', 'No healthy game server is available right now.')
+  }
+
+  await db.update(schema.matches).set({ status: 'IN_PROGRESS', updatedAt: new Date() }).where(eq(schema.matches.id, matchId))
+  try {
+    const lobby = await lobbyFor(c, matchId).forceStart()
+    return jsonSuccess(c, { lobby, game_server_id: server.id })
+  } catch (error) {
+    return lobbyError(c, error)
+  }
+})
+
 app.post('/:id/ticket', async (c) => {
   const session = await requireUser(c)
   if (!session) return jsonError(c, 401, 'AUTH_FAILED', 'Sign in is required.')
@@ -243,12 +245,13 @@ app.post('/:id/ticket', async (c) => {
   } catch (error) {
     return lobbyError(c, error)
   }
-  if (!station?.occupant) return jsonError(c, 403, 'LOBBY_INVALID_STATE', 'Claim a lobby station before joining the match.')
+  const adminBypass = !station?.occupant && Boolean(await requireAdmin(c))
+  if (!station?.occupant && !adminBypass) return jsonError(c, 403, 'LOBBY_INVALID_STATE', 'Claim a lobby station before joining the match.')
 
-  const userRobot = station.role === 'driver' && station.occupant.robotId
-    ? await db.query.robots.findFirst({ where: eq(schema.robots.id, station.occupant.robotId) })
+  const userRobot = station?.role === 'driver' && station.occupant?.robotId
+    ? await db.query.robots.findFirst({ where: eq(schema.robots.id, station.occupant?.robotId ?? '') })
     : null
-  if (station.role === 'driver' && (!userRobot || userRobot.userId !== session.user.id)) return jsonError(c, 400, 'ROBOT_NOT_FOUND', 'The selected robot is unavailable.')
+  if (station?.role === 'driver' && (!userRobot || userRobot.userId !== session.user.id)) return jsonError(c, 400, 'ROBOT_NOT_FOUND', 'The selected robot is unavailable.')
 
   const server = match.gameServerId
     ? await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, match.gameServerId) })
@@ -259,13 +262,13 @@ app.post('/:id/ticket', async (c) => {
 
   const ticket = await issueTicket(c, {
     userId: session.user.id,
-    teamName: session.user.team || 'Unknown',
+    teamName: session.user.team || 'Administrator',
     displayName: session.user.name || 'Simulator player',
     matchId,
-    robotData: userRobot?.buildData || JSON.stringify({ kind: 'human-player' }),
-    slotId: station.id,
-    role: station.role,
-    alliance: station.alliance
+    robotData: userRobot?.buildData || JSON.stringify({ kind: adminBypass ? 'admin-test-cube' : 'human-player' }),
+    slotId: station?.id || 'red-driver-1',
+    role: station?.role || 'driver',
+    alliance: station?.alliance || 'red'
   })
   if (!ticket) return jsonError(c, 503, 'INTERNAL_ERROR', 'Match tickets are not configured.')
 

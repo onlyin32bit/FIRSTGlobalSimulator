@@ -9,6 +9,7 @@
 	let lobby = $state<MatchLobby | null>(null);
 	let robots = $state<Robot[]>([]);
 	let userId = $state('');
+	let isAdmin = $state(false);
 	let selectedRobotId = $state('');
 	let error = $state('');
 	let working = $state<null | string>(null);
@@ -61,6 +62,13 @@
 		finally { working = null; }
 	}
 
+	async function adminStart() {
+		working = 'admin-start';
+		try { accept((await api.adminStartLobbyMatch(matchId)).lobby); }
+		catch (cause) { error = cause instanceof ApiError ? cause.message : 'Unable to enter the match immediately.'; }
+		finally { working = null; }
+	}
+
 	onMount(() => {
 		let disposed = false;
 		const refresh = async () => {
@@ -74,6 +82,7 @@
 				const [state, currentUser, robotList] = await Promise.all([api.getMatchLobby(matchId), api.getCurrentUser(), api.listRobots()]);
 				if (disposed) return;
 				userId = currentUser.user.id;
+				isAdmin = currentUser.user.role === 'admin';
 				robots = robotList.robots;
 				selectedRobotId = robots[0]?.id || '';
 				accept(state.lobby);
@@ -148,6 +157,12 @@
 			{:else}<p class="text-sm text-muted-foreground">Select an open station to join this match.</p>{/if}
 			{#if lobby.hostId === userId}
 				<Button class="ml-auto" disabled={!canStart || working !== null} onclick={start}>{working === 'start' ? 'Starting…' : 'Start match'}</Button>
+			{/if}
+			{#if isAdmin && lobby.status === 'LOBBY'}
+				<div class="ml-auto flex items-center gap-2">
+					<span class="text-xs text-amber-700">Admin bypass: skips the 8-player ready check.</span>
+					<Button variant="outline" disabled={working !== null} onclick={adminStart}>{working === 'admin-start' ? 'Entering…' : 'Enter now (admin)'}</Button>
+				</div>
 			{/if}
 		</div>
 	{/if}
