@@ -6,7 +6,8 @@
     "build": "wrangler deploy --config wrangler.jsonc --dry-run --outdir dist",
     "preview": "$npm_execpath run build && wrangler dev --config wrangler.jsonc --port 8787",
     "deploy": "wrangler deploy --config wrangler.jsonc",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "seed": "tsx seed.ts"
   },
   "dependencies": {
     "better-auth": "^1.6.25",
@@ -16,8 +17,11 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.44.0",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/uuid": "^11.0.0",
+    "better-sqlite3": "^12.0.0",
     "drizzle-kit": "^0.31.10",
+    "tsx": "^4.19.4",
     "vite": "^8.1.4",
     "vite-ssr-components": "^0.6.1",
     "wrangler": "^4.118.0",

@@ -6,8 +6,7 @@ edition = "2024"
 [dependencies]
 axum = { version = "0.8.9", features = ["ws"] }
 futures-util = "0.3.31"
-jsonwebtoken = { version = "11.0.0", features = ["rust_crypto"] }
-rapier3d = "0.34.0"
+rapier3d = { version = "0.34.0", features = ["parallel"] }
 rhai = "1.25.1"
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -18,3 +17,13 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.24.0", features = ["v4"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -7,44 +7,79 @@
   import { onMount } from 'svelte'
   import Robot from './Robot.svelte'
   import Balls from './Balls.svelte'
+  import Field from '$lib/components/Field.svelte'
+  import HumanPlayer from './HumanPlayer.svelte'
 
   import { resetScores } from '$lib/scoreStore'
+  import type { ZoneAABB } from '$lib/scoreStore'
+  import { matchSlotsStore, activeRobotSlotId, humanPlayerAlliance } from './stores'
 
-  let { resetTrigger = 0, fov = 75, speed = 10, potatoMode = false } = $props();
+  type HumanPlayerBounds = {
+    minX: number
+    maxX: number
+    minZ: number
+    maxZ: number
+  }
+
+  type MatchRole = 'robot-controller' | 'human-player'
+  let {
+    resetTrigger = 0,
+    fov = 75,
+    speed = 10,
+    potatoMode = false,
+    role = 'robot-controller' as MatchRole
+  } = $props();
   let fieldAnchors = $state<Record<string, [number, number, number]>>({});
+  let fieldZones = $state<ZoneAABB[]>([]);
+  let humanPlayerPosition = $state<[number, number, number]>([-4.41658, 1.8, 2.99308]);
+  let humanPlayerBounds = $state<HumanPlayerBounds>({
+    minX: -5.196519,
+    maxX: -3.636641,
+    minZ: 2.320723,
+    maxZ: 3.665437
+  });
   let readyToSpawn = $state(false);
 
   $effect(() => {
     if (resetTrigger > 0) resetScores();
   });
 
+  // Delay robot and ball spawning by 3 seconds so the field physics colliders
+  // have time to load and settle before anything falls onto them.
+  const SPAWN_DELAY_MS = 3000;
 
-  const SPAWN_HEIGHT_EXTRA = 3;
+  onMount(() => {
+    const timer = setTimeout(() => {
+      readyToSpawn = true;
+    }, SPAWN_DELAY_MS);
+    return () => clearTimeout(timer);
+  });
 
-  const ROBOT_SPAWN_Y = 0.65;
+  // How high above the field surface to spawn. The field sits at roughly y≈0.
+  // An extra 1.5 m of clearance ensures objects drop onto the field cleanly.
+  const ROBOT_SPAWN_Y = 1.5;
 
-  const PLAYER_SPAWN_OFFSET: [number, number] = [
-    -4,
-    1,
-  ];
-
+  // Use the redSpawn1 anchor from the field semantics for the robot's XZ position.
+  // Fall back to a safe default until the field data is loaded.
   let robotSpawnPos = $derived<[number, number, number]>([
-    (fieldAnchors['blueSpawn1'] || [0, 0, 3.15])[0] + PLAYER_SPAWN_OFFSET[0],
+    (fieldAnchors['redSpawn1'] ?? [0, 0, 3.15])[0],
     ROBOT_SPAWN_Y,
-    (fieldAnchors['blueSpawn1'] || [0, 0, 3.15])[2] + PLAYER_SPAWN_OFFSET[1],
+    (fieldAnchors['redSpawn1'] ?? [0, 0, 3.15])[2],
   ]);
 
   let centerGoalPos = $derived(
     fieldAnchors['blueZone2'] || [0, 0, 0]
   );
 
+  // Balls spawn at y=1.5 (base) + up to 1.5 m of stagger so they don't all
+  // land simultaneously, giving the field colliders time to receive them.
   const balls = $derived(Array.from({ length: 500 }).map((_, i) => {
     const angle = Math.random() * Math.PI * 2;
     const r = Math.sqrt(Math.random()) * 2.5;
     return {
       id: i,
       x: Math.cos(angle) * r,
-      y: 0.1 + Math.random() * 1.5,
+      y: 1.5 + Math.random() * 1.5,
       z: Math.sin(angle) * r,
       color: '#f97316'
     };
@@ -57,6 +92,7 @@
   onMount(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
+      if (role === 'human-player') return;
       if (key === 'w') keys.w = true;
       if (key === 'a') keys.a = true;
       if (key === 's') keys.s = true;
@@ -66,6 +102,7 @@
     };
     const handleKeyUp = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
+      if (role === 'human-player') return;
       if (key === 'w') keys.w = false;
       if (key === 'a') keys.a = false;
       if (key === 's') keys.s = false;
@@ -121,9 +158,13 @@
   });
 </script>
 
-<T.PerspectiveCamera makeDefault {fov} position={[0, 5, 10]}>
-  <OrbitControls target={cameraTarget} enableDamping={false} />
-</T.PerspectiveCamera>
+{#if role === 'human-player'}
+  <HumanPlayer position={humanPlayerPosition} bounds={humanPlayerBounds} {fov} />
+{:else}
+  <T.PerspectiveCamera makeDefault {fov} position={[0, 5, 10]}>
+    <OrbitControls target={cameraTarget} enableDamping={false} />
+  </T.PerspectiveCamera>
+{/if}
 
 <!-- Environment -->
 <Sky elevation={2} />
@@ -145,7 +186,36 @@
 />
 
 <World framerate={potatoMode ? 30 : 60}>
-  <Robot {resetTrigger} />
+  {#if readyToSpawn}
+    {#each $matchSlotsStore.filter((s) => s.controller !== 'disabled') as slot (slot.id)}
+      {@const anchor = fieldAnchors[slot.spawnAnchor] ?? (slot.alliance === 'blue' ? [3.25, 0, 0.7] : [-3.25, 0, 0.7])}
+      {@const spawnPos: [number, number, number] = [anchor[0], 1.5, anchor[2]]}
+      <Robot
+        {resetTrigger}
+        {spawnPos}
+        slotId={slot.id}
+        slotName={slot.name}
+        alliance={slot.alliance}
+        isAi={slot.controller === 'ai-bot'}
+        controllerEnabled={role === 'robot-controller' && slot.id === $activeRobotSlotId}
+      />
+    {/each}
+
+    <!-- PU Foam Balls -->
+    <Balls
+      ballsData={balls}
+      {potatoMode}
+      {resetTrigger}
+      scoringZones={fieldZones}
+    />
+  {/if}
+  <Field
+    bind:anchors={fieldAnchors}
+    bind:zones={fieldZones}
+    humanPlayerAlliance={$humanPlayerAlliance}
+    bind:humanPlayerPosition
+    bind:humanPlayerBounds
+  />
 
   <!-- EVA Foam Ground (FTC Tiles) -->
   <CollisionGroups groups={[0]}>
@@ -218,6 +288,4 @@
     </RigidBody>
   </CollisionGroups>
 
-  <!-- PU Foam Balls -->
-  <Balls ballsData={balls} {potatoMode} {resetTrigger} />
 </World>

@@ -34,6 +34,16 @@ export const matchSchema = z.object({
   gamePackId: z.literal('fgc-2026')
 }).strict()
 
+export const lobbySlotSchema = z.object({
+  slotId: z.enum([
+    'red-driver-1', 'red-driver-2', 'red-driver-3', 'red-human',
+    'blue-driver-1', 'blue-driver-2', 'blue-driver-3', 'blue-human'
+  ]),
+  robotId: z.string().trim().min(1).max(255).nullable().optional()
+}).strict()
+
+export const lobbyReadySchema = z.object({ ready: z.boolean() }).strict()
+
 export const createInvitationSchema = z.object({
   expiresAt: z.coerce.date().optional()
 }).strict()
@@ -63,7 +73,7 @@ export const matchStatusSchema = z.enum(['LOBBY', 'IN_PROGRESS', 'FINISHED', 'CA
 export const createAdminMatchSchema = z.object({
   hostId: z.string().trim().min(1).max(255),
   gamePackId: z.literal('fgc-2026'),
-  maxPlayers: z.coerce.number().int().min(1).max(6),
+  maxPlayers: z.coerce.number().int().min(1).max(8),
   status: matchStatusSchema.default('LOBBY')
 }).strict()
 
@@ -76,22 +86,29 @@ export const cancelMatchSchema = z.object({
 }).strict()
 
 export const createGameServerSchema = z.object({
-  name: trimmedText(2, 100),
   origin: z.string().trim().url().max(500),
-  maxUsers: z.coerce.number().int().min(1).max(100_000).default(50),
-  maxMatches: z.coerce.number().int().min(1).max(10_000).default(10),
-  slots: z.coerce.number().int().min(1).max(10_000).default(10)
 }).strict()
 
-export const updateGameServerSchema = createGameServerSchema.partial().extend({
+/** Capacities are supplied by the authenticated host on heartbeat. */
+export const updateGameServerSchema = z.object({
+  origin: z.string().trim().url().max(500).optional(),
+  maxUsers: z.coerce.number().int().min(1).max(100_000).optional(),
+  maxMatches: z.coerce.number().int().min(1).max(10_000).optional(),
+  slots: z.coerce.number().int().min(1).max(10_000).optional(),
   status: z.enum(['provisioning', 'online', 'offline', 'disabled']).optional()
 }).strict()
 
 export const gameServerHeartbeatSchema = z.object({
   activeUsers: z.coerce.number().int().min(0).max(100_000),
   activeMatches: z.coerce.number().int().min(0).max(10_000),
+  maxUsers: z.coerce.number().int().min(1).max(100_000),
+  maxMatches: z.coerce.number().int().min(1).max(10_000),
   slots: z.coerce.number().int().min(1).max(10_000).optional(),
   version: z.string().trim().max(100).optional()
+}).strict()
+
+export const gameServerTicketVerifySchema = z.object({
+  ticket: z.string().trim().min(1).max(16_384)
 }).strict()
 
 export const updateInvitationSchema = z.object({

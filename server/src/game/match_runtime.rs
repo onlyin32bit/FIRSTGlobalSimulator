@@ -42,18 +42,16 @@ pub struct PlayerSnapshot {
     pub y: f32,
     pub z: f32,
     pub yaw: f32,
-    pub color: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FieldObjectSnapshot {
-    pub id: String,
-    pub object_id: String,
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub radius: f32,
+    #[serde(rename = "headingDeg")]
+    pub heading_deg: f32,
+    #[serde(rename = "velocityX")]
+    pub velocity_x: f32,
+    #[serde(rename = "velocityY")]
+    pub velocity_y: f32,
+    #[serde(rename = "velocityZ")]
+    pub velocity_z: f32,
+    #[serde(rename = "angularVelocityY")]
+    pub angular_velocity_y: f32,
     pub color: String,
 }
 
@@ -69,11 +67,7 @@ struct PlayerBody {
 }
 
 struct FieldObject {
-    id: String,
-    object_id: String,
     body: RigidBodyHandle,
-    radius: f32,
-    color: String,
 }
 
 pub struct MatchRuntime {
@@ -92,10 +86,21 @@ pub struct MatchRuntime {
     pub ccd_solver: CCDSolver,
     players: HashMap<String, PlayerBody>,
     objects: Vec<FieldObject>,
+    ball_radius: f32,
+    ball_rolling_resistance_mps2: f32,
 }
 
 impl MatchRuntime {
     pub fn new(match_id: String, game_pack_id: String, match_seed: u64) -> Self {
+        // Four solver passes are Rapier's accuracy-oriented default. The
+        // optimized broad phase and instanced client keep 500 balls affordable
+        // without sacrificing dense-contact stability here.
+        let integration_parameters = IntegrationParameters {
+            num_solver_iterations: 4,
+            min_island_size: 64,
+            ..IntegrationParameters::default()
+        };
+
         Self {
             context: MatchContext {
                 match_id,
@@ -110,7 +115,7 @@ impl MatchRuntime {
             rigid_body_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
             gravity: vector![0.0, -9.81, 0.0].into(),
-            integration_parameters: IntegrationParameters::default(),
+            integration_parameters,
             physics_pipeline: PhysicsPipeline::new(),
             island_manager: IslandManager::new(),
             broad_phase: BroadPhaseBvh::new(),
@@ -120,17 +125,38 @@ impl MatchRuntime {
             ccd_solver: CCDSolver::new(),
             players: HashMap::new(),
             objects: Vec::new(),
+            ball_radius: 0.05,
+            ball_rolling_resistance_mps2: 0.0,
         }
     }
 
     pub fn create_test_arena(&mut self, arena: &ArenaConfig) {
+        let floor_groups = InteractionGroups::new(
+            Group::GROUP_1,
+            Group::GROUP_2 | Group::GROUP_3,
+            InteractionTestMode::And,
+        );
+        let wall_groups = InteractionGroups::new(
+            Group::GROUP_4,
+            Group::GROUP_2 | Group::GROUP_3,
+            InteractionTestMode::And,
+        );
+        let ball_filter = if arena.ball_to_ball_collisions {
+            Group::GROUP_1 | Group::GROUP_2 | Group::GROUP_3 | Group::GROUP_4
+        } else {
+            Group::GROUP_1 | Group::GROUP_3 | Group::GROUP_4
+        };
+        let ball_groups =
+            InteractionGroups::new(Group::GROUP_2, ball_filter, InteractionTestMode::And);
         let floor = RigidBodyBuilder::fixed()
             .translation(vector![0.0, -0.25, 0.0].into())
             .build();
         let floor_handle = self.rigid_body_set.insert(floor);
         self.collider_set.insert_with_parent(
             ColliderBuilder::cuboid(8.0, 0.25, 8.0)
-                .friction(0.9)
+                .friction(arena.floor.friction.max(0.0))
+                .restitution(arena.floor.restitution.clamp(0.0, 1.0))
+                .collision_groups(floor_groups)
                 .build(),
             floor_handle,
             &mut self.rigid_body_set,
@@ -149,68 +175,127 @@ impl MatchRuntime {
             self.collider_set.insert_with_parent(
                 ColliderBuilder::cuboid(hx, 0.75, hz)
                     .restitution(0.2)
+                    .collision_groups(wall_groups)
                     .build(),
                 body,
                 &mut self.rigid_body_set,
             );
         }
 
+        let object_radius = arena.ball.radius_m();
+        self.ball_radius = object_radius;
+        self.ball_rolling_resistance_mps2 = arena.ball.rolling_resistance_mps2.max(0.0);
+        let object_count = arena.object_count.max(1) as f32;
+        let golden_angle = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
         for index in 0..arena.object_count {
-            let angle = index as f32 * std::f32::consts::TAU / arena.object_count.max(1) as f32;
-            let distance = arena.spawn_radius * (0.72 + (index % 5) as f32 * 0.06);
+            // A Vogel disk gives every ball useful separation while preserving
+            // a deterministic, pack-sized spawn area. The old five-ring layout
+            // concentrated the robot and hundreds of contacts in the same band.
+            let angle = index as f32 * golden_angle;
+            let distance = arena.spawn_radius * ((index as f32 + 0.5) / object_count).sqrt();
             let body = self.rigid_body_set.insert(
                 RigidBodyBuilder::dynamic()
                     .translation(
                         vector![
                             angle.cos() * distance,
-                            arena.spawn_height + (index % 3) as f32 * 0.16,
+                            arena.spawn_height + (index % 3) as f32 * object_radius * 2.25,
                             angle.sin() * distance
                         ]
                         .into(),
                     )
                     .gravity_scale(arena.gravity_scale)
-                    .linear_damping(0.12)
-                    .ccd_enabled(true)
+                    .linear_damping(arena.ball.linear_damping.max(0.0))
+                    .angular_damping(arena.ball.angular_damping.max(0.0))
+                    // Soft CCD predicts contacts without expensive shape casts
+                    // and prevents 100 mm balls crossing each other at speed.
+                    .soft_ccd_prediction(arena.ball.soft_ccd_prediction_m.max(0.0))
+                    .ccd_enabled(false)
                     .build(),
             );
             self.collider_set.insert_with_parent(
-                ColliderBuilder::ball(arena.object_radius)
-                    .restitution(arena.restitution.clamp(0.0, 1.0))
-                    .friction(0.35)
+                ColliderBuilder::ball(object_radius)
+                    .mass(arena.ball.mass_kg.max(0.001))
+                    .restitution(arena.ball.restitution.clamp(0.0, 1.0))
+                    .restitution_combine_rule(CoefficientCombineRule::Max)
+                    .friction(arena.ball.friction.max(0.0))
+                    .collision_groups(ball_groups)
                     .build(),
                 body,
                 &mut self.rigid_body_set,
             );
-            self.objects.push(FieldObject {
-                id: format!("{}-{index}", arena.object_id),
-                object_id: arena.object_id.clone(),
-                body,
-                radius: arena.object_radius,
-                color: arena.color.clone(),
-            });
+            self.objects.push(FieldObject { body });
         }
     }
 
-    pub fn add_player(&mut self, user_id: String, name: String, team_name: String) {
+    pub fn add_player(
+        &mut self,
+        user_id: String,
+        name: String,
+        team_name: String,
+        arena: &ArenaConfig,
+    ) {
         if self.players.contains_key(&user_id) {
             return;
         }
         let slot = self.players.len();
         let angle = slot as f32 * std::f32::consts::TAU / 8.0;
         let body = RigidBodyBuilder::dynamic()
-            .translation(vector![angle.cos() * 4.0, 0.4, angle.sin() * 4.0].into())
-            .linear_damping(4.0)
-            .angular_damping(5.0)
+            .translation(
+                vector![
+                    angle.cos() * 4.0,
+                    arena.robot.height_m * 0.5,
+                    angle.sin() * 4.0
+                ]
+                .into(),
+            )
+            .linear_damping(arena.robot.rolling_resistance.max(0.0))
+            .angular_damping(0.15)
             .enabled_rotations(false, true, false)
-            .ccd_enabled(true)
+            // At 60 Hz the robot moves less than its own half-extent per tick,
+            // so discrete contacts are sufficient and avoid hundreds of swept
+            // collision tests while pushing through balls.
+            .ccd_enabled(false)
             .build();
         let body_handle = self.rigid_body_set.insert(body);
         let collider_handle = self.collider_set.insert_with_parent(
-            ColliderBuilder::cuboid(0.38, 0.38, 0.38)
-                .density(20.0)
-                .friction(0.8)
-                .restitution(0.1)
-                .build(),
+            ColliderBuilder::cuboid(
+                arena.robot.width_m * 0.5,
+                arena.robot.height_m * 0.5,
+                arena.robot.length_m * 0.5,
+            )
+            .mass(arena.robot.mass_kg.max(1.0))
+            // The chassis contacts balls and walls, but not the floor. This
+            // restores tangential foam/chassis interaction without carpet
+            // friction cancelling the explicit drivetrain forces.
+            .friction(arena.robot.surface_friction.max(0.0))
+            .restitution(arena.robot.restitution.clamp(0.0, 1.0))
+            .collision_groups(InteractionGroups::new(
+                Group::GROUP_3,
+                Group::GROUP_2 | Group::GROUP_4,
+                InteractionTestMode::And,
+            ))
+            .build(),
+            body_handle,
+            &mut self.rigid_body_set,
+        );
+        // A massless support shape handles only floor contact. Its zero
+        // friction leaves forward traction and lateral wheel scrub to the
+        // drivetrain model instead of an isotropic box contact.
+        self.collider_set.insert_with_parent(
+            ColliderBuilder::cuboid(
+                arena.robot.width_m * 0.5,
+                arena.robot.height_m * 0.5,
+                arena.robot.length_m * 0.5,
+            )
+            .mass(0.0)
+            .friction(0.0)
+            .friction_combine_rule(CoefficientCombineRule::Min)
+            .collision_groups(InteractionGroups::new(
+                Group::GROUP_3,
+                Group::GROUP_1,
+                InteractionTestMode::And,
+            ))
+            .build(),
             body_handle,
             &mut self.rigid_body_set,
         );
@@ -252,33 +337,77 @@ impl MatchRuntime {
     }
 
     pub fn set_player_input(&mut self, user_id: &str, move_x: f32, move_z: f32, sequence: u64) {
-        if let Some(player) = self.players.get_mut(user_id) {
-            if sequence >= player.sequence {
-                player.sequence = sequence;
-                player.move_x = move_x.clamp(-1.0, 1.0);
-                player.move_z = move_z.clamp(-1.0, 1.0);
-            }
+        if let Some(player) = self.players.get_mut(user_id)
+            && sequence >= player.sequence
+        {
+            player.sequence = sequence;
+            player.move_x = move_x.clamp(-1.0, 1.0);
+            player.move_z = move_z.clamp(-1.0, 1.0);
         }
     }
 
-    pub fn apply_player_drive(&mut self) {
+    pub fn apply_player_drive(&mut self, arena: &ArenaConfig) {
+        let dt = self.integration_parameters.dt.max(1.0 / 240.0);
+        let robot = &arena.robot;
         for player in self.players.values() {
             if let Some(body) = self.rigid_body_set.get_mut(player.body) {
                 let rotation = body.rotation();
                 let forward_x = -2.0 * (rotation.x * rotation.z + rotation.w * rotation.y);
                 let forward_z = -1.0 + 2.0 * (rotation.x * rotation.x + rotation.y * rotation.y);
-                let desired_speed = player.move_z * 7.5;
-                let desired = vector![forward_x * desired_speed, 0.0, forward_z * desired_speed];
+                let right_x = -forward_z;
+                let right_z = forward_x;
                 let velocity = body.linvel();
-                let impulse = vector![
-                    (desired.x - velocity.x) * 0.6,
-                    0.0,
-                    (desired.z - velocity.z) * 0.6
-                ];
-                body.apply_impulse(impulse.into(), true);
-                // Use an explicit yaw velocity for responsive arcade-style steering.
-                // Rapier still owns all translation, collision, and contact resolution.
-                body.set_angvel(vector![0.0, -player.move_x * 3.5, 0.0].into(), true);
+                let forward_speed = velocity.x * forward_x + velocity.z * forward_z;
+                let lateral_speed = velocity.x * right_x + velocity.z * right_z;
+
+                // Convert arcade input to normalized left/right wheel power.
+                // Combining full throttle and steering therefore reduces the
+                // forward component just as it does on a differential drive.
+                let mut left_power = player.move_z + player.move_x;
+                let mut right_power = player.move_z - player.move_x;
+                let peak_power = left_power.abs().max(right_power.abs()).max(1.0);
+                left_power /= peak_power;
+                right_power /= peak_power;
+
+                let target_speed = (left_power + right_power) * 0.5 * robot.max_speed_mps;
+                let acceleration_limit = if target_speed.abs() < forward_speed.abs()
+                    || target_speed.signum() != forward_speed.signum()
+                {
+                    robot.max_deceleration_mps2
+                } else {
+                    robot.max_acceleration_mps2
+                }
+                .min(robot.traction_friction * 9.81);
+                let forward_delta = (target_speed - forward_speed)
+                    .clamp(-acceleration_limit * dt, acceleration_limit * dt);
+                let lateral_acceleration =
+                    robot.lateral_grip_mps2.min(robot.traction_friction * 9.81);
+                let lateral_delta =
+                    (-lateral_speed).clamp(-lateral_acceleration * dt, lateral_acceleration * dt);
+                let mass = body.mass();
+                body.apply_impulse(
+                    vector![
+                        (forward_x * forward_delta + right_x * lateral_delta) * mass,
+                        0.0,
+                        (forward_z * forward_delta + right_z * lateral_delta) * mass
+                    ]
+                    .into(),
+                    true,
+                );
+
+                let wheel_delta = right_power - left_power;
+                let target_turn_rate = (wheel_delta * robot.max_speed_mps
+                    / robot.track_width_m.max(0.1))
+                .clamp(-robot.max_turn_rate_radps, robot.max_turn_rate_radps);
+                let current_turn_rate = body.angvel().y;
+                let turn_delta = (target_turn_rate - current_turn_rate).clamp(
+                    -robot.max_angular_acceleration_radps2 * dt,
+                    robot.max_angular_acceleration_radps2 * dt,
+                );
+                body.set_angvel(
+                    vector![0.0, current_turn_rate + turn_delta, 0.0].into(),
+                    true,
+                );
             }
         }
     }
@@ -290,8 +419,13 @@ impl MatchRuntime {
                 self.rigid_body_set.get(player.body).map(|body| {
                     let p = body.translation();
                     let r = body.rotation();
+                    // Rapier uses a right-handed Y-up quaternion. The previous
+                    // implementation multiplied atan2's result by two, which
+                    // made the visual turn diverge from the physics heading.
                     let yaw =
-                        2.0 * (r.w * r.y + r.x * r.z).atan2(1.0 - 2.0 * (r.y * r.y + r.z * r.z));
+                        (2.0 * (r.w * r.y + r.x * r.z)).atan2(1.0 - 2.0 * (r.y * r.y + r.z * r.z));
+                    let velocity = body.linvel();
+                    let angular_velocity = body.angvel();
                     PlayerSnapshot {
                         id: id.clone(),
                         name: player.name.clone(),
@@ -300,6 +434,11 @@ impl MatchRuntime {
                         y: p.y,
                         z: p.z,
                         yaw,
+                        heading_deg: yaw.to_degrees(),
+                        velocity_x: velocity.x,
+                        velocity_y: velocity.y,
+                        velocity_z: velocity.z,
+                        angular_velocity_y: angular_velocity.y,
                         color: player.color.to_string(),
                     }
                 })
@@ -307,24 +446,20 @@ impl MatchRuntime {
             .collect()
     }
 
-    pub fn field_object_snapshots(&self) -> Vec<FieldObjectSnapshot> {
+    pub fn field_object_positions(&self) -> Vec<[f32; 3]> {
         self.objects
             .iter()
             .filter_map(|object| {
                 self.rigid_body_set.get(object.body).map(|body| {
                     let position = body.translation();
-                    FieldObjectSnapshot {
-                        id: object.id.clone(),
-                        object_id: object.object_id.clone(),
-                        x: position.x,
-                        y: position.y,
-                        z: position.z,
-                        radius: object.radius,
-                        color: object.color.clone(),
-                    }
+                    [position.x, position.y, position.z]
                 })
             })
             .collect()
+    }
+
+    pub fn contact_count(&self) -> usize {
+        self.narrow_phase.contact_pairs().count()
     }
 
     pub fn tick(&mut self, dt: f64) {
@@ -343,6 +478,119 @@ impl MatchRuntime {
             &mut self.ccd_solver,
             &(),
             &(),
+        );
+        self.apply_ball_rolling_resistance(dt as f32);
+    }
+
+    fn apply_ball_rolling_resistance(&mut self, dt: f32) {
+        let deceleration = self.ball_rolling_resistance_mps2 * dt.max(0.0);
+        if deceleration <= 0.0 {
+            return;
+        }
+
+        for object in &self.objects {
+            let Some(body) = self.rigid_body_set.get_mut(object.body) else {
+                continue;
+            };
+            let velocity = body.linvel();
+            // The floor top is y=0. Restrict this force to settled floor
+            // contacts so airborne balls retain realistic ballistic motion.
+            if body.translation().y > self.ball_radius + 0.003 || velocity.y.abs() > 0.35 {
+                continue;
+            }
+            let horizontal_speed = (velocity.x * velocity.x + velocity.z * velocity.z).sqrt();
+            if horizontal_speed <= f32::EPSILON {
+                continue;
+            }
+            let scale = (horizontal_speed - deceleration).max(0.0) / horizontal_speed;
+            body.set_linvel(
+                vector![velocity.x * scale, velocity.y, velocity.z * scale].into(),
+                true,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn arena() -> ArenaConfig {
+        crate::game::pack_loader::PackLoader::new("0.1.0")
+            .load_pack("../pkgs/games/fgc-2026/manifest.json")
+            .unwrap()
+            .arena
+    }
+
+    #[test]
+    fn applies_pack_mass_and_drivetrain_limits() {
+        let mut arena = arena();
+        arena.object_count = 1;
+        let mut runtime = MatchRuntime::new("physics".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+
+        let ball_body = runtime.rigid_body_set.get(runtime.objects[0].body).unwrap();
+        assert!((ball_body.mass() - 0.062).abs() < 0.0001);
+
+        let ball_handle = runtime.objects[0].body;
+        let ball_body = runtime.rigid_body_set.get_mut(ball_handle).unwrap();
+        ball_body.set_translation(vector![0.0, arena.ball.radius_m(), 0.0].into(), true);
+        ball_body.set_linvel(vector![1.0, 0.0, 0.0].into(), true);
+        runtime.apply_ball_rolling_resistance(1.0 / 60.0);
+        let ball_speed = runtime.rigid_body_set[ball_handle].linvel().x;
+        let expected_speed = 1.0 - arena.ball.rolling_resistance_mps2 / 60.0;
+        assert!((ball_speed - expected_speed).abs() < 0.0001);
+
+        runtime.add_player("player".into(), "Player".into(), "Team".into(), &arena);
+        runtime.set_player_input("player", 0.0, 1.0, 1);
+        // One second is long enough to observe acceleration while remaining
+        // clear of the arena wall from the default spawn point.
+        for _ in 0..60 {
+            runtime.apply_player_drive(&arena);
+            runtime.tick(1.0 / 60.0);
+        }
+
+        let player_body = runtime.players.get("player").unwrap().body;
+        let robot_body = runtime.rigid_body_set.get(player_body).unwrap();
+        let planar_speed = (robot_body.linvel().x.powi(2) + robot_body.linvel().z.powi(2)).sqrt();
+        assert!((robot_body.mass() - arena.robot.mass_kg).abs() < 0.001);
+        assert!(planar_speed > 0.5, "robot only reached {planar_speed} m/s");
+        assert!(planar_speed <= arena.robot.max_speed_mps + 0.15);
+
+        runtime.set_player_input("player", 0.5, 0.0, 2);
+        for _ in 0..30 {
+            runtime.apply_player_drive(&arena);
+            runtime.tick(1.0 / 60.0);
+        }
+        let robot_body = runtime.rigid_body_set.get(player_body).unwrap();
+        assert!(robot_body.angvel().y.abs() > 0.2);
+        assert!(robot_body.angvel().y.abs() <= arena.robot.max_turn_rate_radps + 0.01);
+    }
+
+    #[test]
+    #[ignore = "manual Rapier performance comparison"]
+    fn benchmark_rapier_ball_interaction() {
+        let arena = arena();
+        let mut runtime = MatchRuntime::new("perf".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("player".into(), "Player".into(), "Team".into(), &arena);
+        runtime.set_player_input("player", 0.35, 1.0, 1);
+
+        let started = Instant::now();
+        for _ in 0..300 {
+            runtime.apply_player_drive(&arena);
+            runtime.tick(1.0 / 60.0);
+        }
+        let elapsed = started.elapsed();
+        let milliseconds_per_tick = elapsed.as_secs_f64() * 1_000.0 / 300.0;
+
+        assert_eq!(runtime.field_object_positions().len(), arena.object_count);
+        eprintln!(
+            "Rapier {}-ball interaction: {:.2} ms/tick ({:.1} simulated FPS)",
+            arena.object_count,
+            milliseconds_per_tick,
+            1_000.0 / milliseconds_per_tick
         );
     }
 }

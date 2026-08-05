@@ -381,7 +381,8 @@ app.post('/game-servers', async (c) => {
   if (isResponse(body)) return body
   const key = `fgc_${crypto.randomUUID().replaceAll('-', '')}${crypto.randomUUID().replaceAll('-', '')}`
   const now = new Date()
-  const server = { id: crypto.randomUUID(), name: body.name, origin: body.origin.replace(/\/$/, ''), keyHash: await hashKey(key), maxUsers: body.maxUsers, maxMatches: body.maxMatches, slots: body.slots, activeUsers: 0, activeMatches: 0, status: 'provisioning', lastHeartbeatAt: null, createdAt: now, updatedAt: now, disabledAt: null }
+  const origin = body.origin.replace(/\/$/, '')
+  const server = { id: crypto.randomUUID(), name: new URL(origin).hostname, origin, keyHash: await hashKey(key), maxUsers: 1, maxMatches: 1, slots: 1, activeUsers: 0, activeMatches: 0, status: 'provisioning', lastHeartbeatAt: null, createdAt: now, updatedAt: now, disabledAt: null }
   const db = drizzle(c.env.DB, { schema })
   await db.insert(schema.gameServers).values(server)
   await writeAdminAudit(c.env, { actorUserId: session.user.id, action: 'game_server.created', targetType: 'game_server', targetId: server.id, metadata: { name: server.name, origin: server.origin } })
@@ -399,7 +400,7 @@ app.patch('/game-servers/:id', async (c) => {
   if (!current) return jsonError(c, 404, 'VALIDATION_ERROR', 'Game server not found.')
   const now = new Date()
   const updated = await db.update(schema.gameServers).set({ ...body, origin: body.origin?.replace(/\/$/, ''), disabledAt: body.status === 'disabled' ? (current.disabledAt ?? now) : body.status ? null : current.disabledAt, updatedAt: now }).where(eq(schema.gameServers.id, id)).returning()
-  await writeAdminAudit(c.env, { actorUserId: session.user.id, action: body.status === 'disabled' ? 'game_server.disabled' : 'game_server.updated', targetType: 'game_server', targetId: id, metadata: { name: body.name ?? current.name, status: body.status ?? current.status } })
+  await writeAdminAudit(c.env, { actorUserId: session.user.id, action: body.status === 'disabled' ? 'game_server.disabled' : 'game_server.updated', targetType: 'game_server', targetId: id, metadata: { name: current.name, status: body.status ?? current.status } })
   return jsonSuccess(c, { server: gameServerDto(updated[0]) })
 })
 

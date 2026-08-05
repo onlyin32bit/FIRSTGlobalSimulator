@@ -14,6 +14,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { ApiError, api } from '$lib/api';
+	import { goto } from '$app/navigation';
 
 	let matchId = $state('');
 	let showCreateMatch = $state(false);
@@ -22,11 +23,8 @@
 
 	function joinMatch() {
 		const normalizedMatchId = matchId.trim();
-		if (normalizedMatchId === 'test-match') {
-			window.location.href = '/match/test-match';
-			return;
-		}
-		errorMessage = 'Only the always-on test-match is available to join right now.';
+		if (!normalizedMatchId) return;
+		void goto(normalizedMatchId === 'test-match' ? '/match/test-match' : `/match/${encodeURIComponent(normalizedMatchId)}/lobby`);
 	}
 
 	async function submitCreateMatch() {
@@ -34,9 +32,8 @@
 		errorMessage = '';
 		try {
 			const { match_id } = await api.createMatch({ gamePackId: 'fgc-2026' });
-			matchId = match_id;
 			showCreateMatch = false;
-			errorMessage = `Match ${match_id} was created. Match joining will be available in a follow-up release.`;
+			await goto(`/match/${match_id}/lobby`);
 		} catch (error) {
 			errorMessage =
 				error instanceof ApiError ? error.message : 'Unable to create a match. Please try again.';
@@ -212,7 +209,7 @@
 				</div>
 				<h2 class="mt-5 font-semibold">What’s next</h2>
 				<p class="mt-1 text-sm leading-6 text-muted-foreground">
-					Private match joining and more game packs are coming soon.
+					Fill the eight alliance stations, ready up, then let the host start the field.
 				</p>
 			</div>
 		</section>
@@ -238,7 +235,7 @@
 				<Label for="max-players">Max players</Label><Input
 					id="max-players"
 					type="number"
-					value="6"
+					value="8"
 					disabled
 				/>
 			</div>

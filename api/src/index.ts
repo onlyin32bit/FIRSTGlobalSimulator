@@ -12,6 +12,8 @@ import gamePacksRoutes from './routes/game-packs'
 import adminRoutes from './routes/admin'
 import gameServerRoutes from './routes/game-servers'
 
+export { MatchLobby } from './match-lobby'
+
 const app = new Hono<{ Bindings: Bindings }>()
 
 app.use('*', logger())
