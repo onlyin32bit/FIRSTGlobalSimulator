@@ -3,9 +3,12 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --config wrangler.jsonc --port 8787",
-    "build": "wrangler deploy --config wrangler.jsonc --dry-run --outdir dist",
-    "preview": "$npm_execpath run build && wrangler dev --config wrangler.jsonc --port 8787",
-    "deploy": "wrangler deploy --config wrangler.jsonc",
+	"build": "wrangler deploy --config wrangler.jsonc --env=\"\" --dry-run --outdir dist",
+	"build:production": "wrangler deploy --config wrangler.jsonc --env production --dry-run --outdir dist",
+	"preview": "$npm_execpath run build && wrangler dev --config wrangler.jsonc --port 8787",
+	"deploy": "wrangler deploy --config wrangler.jsonc --env production",
+	"migrations:local": "wrangler d1 migrations apply fgsim --local --config wrangler.jsonc",
+	"migrations:production": "wrangler d1 migrations apply fgsim --remote --env production --config wrangler.jsonc",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings",
     "seed": "tsx seed.ts"
   },
