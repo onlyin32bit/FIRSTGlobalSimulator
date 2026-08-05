@@ -1,4 +1,3 @@
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -15,15 +14,4 @@ pub struct TicketClaims {
     #[serde(default)]
     pub alliance: Option<String>,
     pub exp: usize,
-}
-
-pub fn verify_ticket(
-    token: &str,
-    secret: &str,
-) -> Result<TicketClaims, jsonwebtoken::errors::Error> {
-    let decoding_key = DecodingKey::from_secret(secret.as_bytes());
-    let validation = Validation::new(Algorithm::HS256);
-
-    let token_data = decode::<TicketClaims>(token, &decoding_key, &validation)?;
-    Ok(token_data.claims)
 }

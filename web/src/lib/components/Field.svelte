@@ -598,6 +598,13 @@
 
       if (!(object instanceof Mesh)) return
 
+      // The imported field is a shadow receiver only. Letting the 5 MB CAD
+      // model cast would redraw its thousands of geometries into the shadow
+      // map every snapshot; robots and balls provide the useful moving
+      // shadows at a fraction of that cost.
+      object.castShadow = false
+      object.receiveShadow = true
+
       const sourceMaterials = Array.isArray(object.material)
         ? object.material
         : [object.material]

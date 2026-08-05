@@ -265,6 +265,12 @@ export class APIClient {
 				functions: Array<{ name: string; parameters: string[] }>;
 				engineCalls: string[];
 			}>;
+			fieldDefinition: {
+				colliders: Array<{ id: string; min: [number, number, number]; max: [number, number, number] }>;
+				anchors: Record<string, [number, number, number]>;
+				triggers: Array<{ id: string; min: [number, number, number]; max: [number, number, number] }>;
+				boundary: { min: [number, number, number]; max: [number, number, number] };
+			};
 		}>(`/api/game-packs/${encodeURIComponent(id)}/metadata`);
 	}
 
@@ -423,11 +429,7 @@ export class APIClient {
 	}
 
 	createGameServer(input: {
-		name: string;
 		origin: string;
-		maxUsers: number;
-		maxMatches: number;
-		slots: number;
 	}) {
 		return this.request<{ server: GameServer; key: string }>('/api/admin/game-servers', {
 			method: 'POST',
@@ -438,7 +440,7 @@ export class APIClient {
 	updateGameServer(
 		id: string,
 		input: Partial<
-			Pick<GameServer, 'name' | 'origin' | 'maxUsers' | 'maxMatches' | 'slots' | 'status'>
+			Pick<GameServer, 'origin' | 'maxUsers' | 'maxMatches' | 'slots' | 'status'>
 		>
 	) {
 		return this.request<{ server: GameServer }>(

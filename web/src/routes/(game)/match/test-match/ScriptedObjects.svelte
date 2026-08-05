@@ -56,7 +56,9 @@
 	});
 </script>
 
-<T.InstancedMesh bind:ref={meshRef} args={MESH_ARGS} frustumCulled={false}>
+<T.InstancedMesh bind:ref={meshRef} args={MESH_ARGS} frustumCulled={false} castShadow receiveShadow>
 	<T.SphereGeometry args={SPHERE_ARGS} />
-	<T.MeshBasicMaterial color={frame.color} />
+	<!-- A low-poly instanced Lambert material keeps 1,000 balls inexpensive
+	     while allowing the single directional shadow map to light them. -->
+	<T.MeshLambertMaterial color={frame.color} />
 </T.InstancedMesh>

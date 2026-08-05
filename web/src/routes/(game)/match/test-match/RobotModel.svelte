@@ -25,7 +25,7 @@
 </script>
 
 <T.Group position={[player.x, player.y, player.z]} rotation={[0, player.yaw, 0]}>
-	<T.Mesh>
+	<T.Mesh castShadow receiveShadow>
 		<T.BoxGeometry args={chassisArgs} />
 		<T.MeshStandardMaterial
 			color={player.color}
@@ -33,20 +33,22 @@
 			emissiveIntensity={local ? 0.2 : 0}
 		/>
 	</T.Mesh>
-	<T.Mesh position={[physics.robotWidthM * 0.5 + 0.035, -physics.robotHeightM * 0.18, 0]}>
+	<T.Mesh castShadow receiveShadow position={[physics.robotWidthM * 0.5 + 0.035, -physics.robotHeightM * 0.18, 0]}>
 		<T.BoxGeometry args={wheelArgs} />
 		<T.MeshStandardMaterial color="#111827" />
 	</T.Mesh>
-	<T.Mesh position={[-physics.robotWidthM * 0.5 - 0.035, -physics.robotHeightM * 0.18, 0]}>
+	<T.Mesh castShadow receiveShadow position={[-physics.robotWidthM * 0.5 - 0.035, -physics.robotHeightM * 0.18, 0]}>
 		<T.BoxGeometry args={wheelArgs} />
 		<T.MeshStandardMaterial color="#111827" />
 	</T.Mesh>
-	<T.Mesh position={[0, 0, -physics.robotLengthM * 0.5 - 0.06]}>
+	<T.Mesh castShadow receiveShadow position={[0, 0, -physics.robotLengthM * 0.5 - 0.06]}>
 		<T.BoxGeometry args={headingArgs} />
 		<T.MeshStandardMaterial color="#f8fafc" />
 	</T.Mesh>
 	{#if physics.intakeEnabled}
 		<T.Mesh
+			castShadow
+			receiveShadow
 			position={[
 				0,
 				physics.intakeCenterHeightM - physics.robotHeightM * 0.5,

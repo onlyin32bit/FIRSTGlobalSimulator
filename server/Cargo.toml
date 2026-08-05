@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 axum = { version = "0.8.9", features = ["ws"] }
 futures-util = "0.3.31"
-jsonwebtoken = { version = "11.0.0", features = ["rust_crypto"] }
 rapier3d = { version = "0.34.0", features = ["parallel"] }
 rhai = "1.25.1"
 semver = "1.0.28"

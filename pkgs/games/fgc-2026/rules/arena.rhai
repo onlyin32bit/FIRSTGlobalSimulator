@@ -19,9 +19,20 @@ fn arena_config() {
             restitution_velocity_threshold_mps: 0.20
         },
         object_id: "wildfire",
-        object_count: 2000,
-        spawn_radius: 6.5,
+        // The real match release is 500 Wildfire balls. Stress tests may
+        // override this at runtime without changing the competition pack.
+        object_count: 500,
+        // Balls originate at the semantic EXTballspawn dispenser; they are
+        // released in a deterministic three-second pour, not scattered.
+        spawn_radius: 0.045,
         spawn_height: 1.8,
+        // TEMP: EXTballspawn was authored too high in Blender. Remove this
+        // offset after correcting the semantic node in the field asset.
+        spawn_offset_y_m: -1.55,
+        spawn_release_seconds: 3.0,
+        spawn_fountain_vertical_speed_mps: 0.14,
+        spawn_fountain_forward_speed_mps: 2.55,
+        spawn_fountain_spread_mps: 0.72,
         gravity_scale: 1.0,
         ball_to_ball_collisions: true,
         color: "#f97316",
@@ -45,10 +56,13 @@ fn arena_config() {
             inertia_factor: 0.40,
             drag_coefficient: 0.47,
             air_density_kg_m3: 1.225,
-            ball_friction: 0.35,
+            // Dense dispenser flow is governed primarily by ball↔ball loss.
+            // Keep enough slip damping to avoid billiard-like motion, but do
+            // not let each foam contact absorb the whole forward stream.
+            ball_friction: 0.18,
             restitution_curve: #{
-                low_speed: 0.42,
-                high_speed: 0.20,
+                low_speed: 0.48,
+                high_speed: 0.32,
                 transition_speed_mps: 1.50,
                 exponent: 0.65
             }
@@ -69,14 +83,14 @@ fn arena_config() {
             }
         },
 
-        // Differential-drive baseline for the test robot. These values model
+        // Authoritative 50 cm cubic, 18 kg robot envelope. These values model
         // finite motor force, wheel scrub, braking and steering acceleration.
         robot: #{
-            mass_kg: 40.0,
-            width_m: 0.65,
-            height_m: 0.45,
-            length_m: 0.65,
-            track_width_m: 0.55,
+            mass_kg: 18.0,
+            width_m: 0.50,
+            height_m: 0.50,
+            length_m: 0.50,
+            track_width_m: 0.42,
             traction_friction: 1.05,
             surface_friction: 0.45,
             restitution: 0.05,

@@ -85,6 +85,7 @@ export type MatchSnapshot = {
 	players: MatchPlayer[];
 	positions: Float32Array;
 	physics?: MatchPhysics;
+	semanticEvents: string[];
 };
 
 const decoder = new TextDecoder();
@@ -185,7 +186,8 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 		serverCpuPercent: 0,
 		serverRssMiB: 0,
 		players: [],
-		positions: new Float32Array()
+		positions: new Float32Array(),
+		semanticEvents: []
 	};
 
 	const view = new DataView(buffer);
@@ -257,6 +259,15 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					});
 				}
 				snapshot.players = players;
+				break;
+			}
+			case 7: {
+				const count = section.u16();
+				const events: string[] = [];
+				for (let index = 0; index < count && section.offset < sectionEnd; index += 1) {
+					events.push(section.string());
+				}
+				snapshot.semanticEvents = events;
 				break;
 			}
 			case 5: {

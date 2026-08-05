@@ -19,6 +19,7 @@
 	} = $props();
 
 	let cameraRef: PerspectiveCamera | undefined = $state();
+	const clampedDistance = $derived(Math.min(18, Math.max(2.5, distance)));
 	const target = new Vector3();
 
 	useTask(() => {
@@ -28,8 +29,8 @@
 		// The player transform is already interpolated by the scene. Using that
 		// exact same transform here prevents camera/robot phase lag and jitter.
 		target.set(player.x, Math.max(player.y, 0.2), player.z);
-		const southOffset = direction === 'north' ? distance : -distance;
-		camera.position.set(target.x, target.y + distance, target.z + southOffset);
+		const southOffset = direction === 'north' ? clampedDistance : -clampedDistance;
+		camera.position.set(target.x, target.y + clampedDistance, target.z + southOffset);
 		camera.up.set(0, 1, 0);
 		camera.lookAt(target);
 	});
@@ -38,7 +39,7 @@
 <T.PerspectiveCamera
 	bind:ref={cameraRef}
 	makeDefault
-	position={[0, distance, direction === 'north' ? distance : -distance]}
+	position={[0, clampedDistance, direction === 'north' ? clampedDistance : -clampedDistance]}
 	fov={48}
 	near={0.05}
 	far={100}

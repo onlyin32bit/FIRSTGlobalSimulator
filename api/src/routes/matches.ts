@@ -13,13 +13,18 @@ export const TEST_MATCH_ID = 'test-match'
 
 const app = new Hono<{ Bindings: Bindings }>()
 
-function gameServerUrl(origin: string | undefined, matchId: string, ticket: string) {
-  const gameServerOrigin = (origin || 'ws://localhost:3000').replace(/^http:/, 'ws:').replace(/^https:/, 'wss:').replace(/\/$/, '')
+function gameServerUrl(origin: string, matchId: string, ticket: string) {
+  const gameServerOrigin = origin.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:').replace(/\/$/, '')
   return `${gameServerOrigin}/ws/match/${encodeURIComponent(matchId)}?ticket=${encodeURIComponent(ticket)}`
 }
 
 async function chooseGameServer(c: Parameters<typeof requireUser>[0], matchId: string) {
   const db = drizzle(c.env.DB, { schema })
+  const existingMatch = await db.query.matches.findFirst({ where: eq(schema.matches.id, matchId) })
+  if (existingMatch?.gameServerId) {
+    const existing = await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, existingMatch.gameServerId) })
+    if (existing && !existing.disabledAt) return existing
+  }
   const servers = await db.select().from(schema.gameServers).orderBy(desc(schema.gameServers.activeMatches))
   const now = Date.now()
   const server = servers
@@ -27,8 +32,10 @@ async function chooseGameServer(c: Parameters<typeof requireUser>[0], matchId: s
     .filter((candidate) => candidate.activeMatches < candidate.maxMatches && candidate.activeUsers < candidate.maxUsers)
     .sort((a, b) => (a.activeMatches / a.maxMatches) - (b.activeMatches / b.maxMatches))[0]
   if (!server) return null
-  await db.update(schema.gameServers).set({ activeMatches: server.activeMatches + 1, updatedAt: new Date() }).where(eq(schema.gameServers.id, server.id))
-  await db.update(schema.matches).set({ gameServerId: server.id, updatedAt: new Date() }).where(eq(schema.matches.id, matchId))
+  if (existingMatch) {
+    await db.update(schema.gameServers).set({ activeMatches: server.activeMatches + 1, updatedAt: new Date() }).where(eq(schema.gameServers.id, server.id))
+    await db.update(schema.matches).set({ gameServerId: server.id, updatedAt: new Date() }).where(eq(schema.matches.id, matchId))
+  }
   return server
 }
 
@@ -74,6 +81,9 @@ app.post(`/${TEST_MATCH_ID}/ticket`, async (c) => {
   const session = await requireUser(c)
   if (!session) return jsonError(c, 401, 'AUTH_FAILED', 'Sign in is required.')
 
+  const server = await chooseGameServer(c, TEST_MATCH_ID)
+  if (!server) return jsonError(c, 503, 'GAME_SERVER_UNAVAILABLE', 'No healthy game server is available right now.')
+
   const ticket = await issueTicket(c, {
     userId: session.user.id,
     teamName: session.user.team || 'Simulator player',
@@ -83,12 +93,10 @@ app.post(`/${TEST_MATCH_ID}/ticket`, async (c) => {
   })
   if (!ticket) return jsonError(c, 503, 'INTERNAL_ERROR', 'Match tickets are not configured.')
 
-  const server = await chooseGameServer(c, TEST_MATCH_ID)
-
   return jsonSuccess(c, {
     match_id: TEST_MATCH_ID,
     ticket,
-    ws_url: gameServerUrl(server?.origin || c.env.GAME_SERVER_ORIGIN, TEST_MATCH_ID, ticket)
+    ws_url: gameServerUrl(server.origin, TEST_MATCH_ID, ticket)
   })
 })
 

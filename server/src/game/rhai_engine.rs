@@ -1,7 +1,7 @@
 use rhai::{AST, Engine, Map, Scope};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::fs;
+use std::sync::{Arc, Mutex};
 use tracing::{error, info};
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -19,10 +19,19 @@ pub struct RuleScriptMetadata {
     pub engine_calls: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RuleOutcome {
+    pub kind: &'static str,
+    pub team: String,
+    pub category: String,
+    pub points: i64,
+}
+
 pub struct RhaiEngine {
     engine: Engine,
     scoring_ast: Option<AST>,
     scripts: HashMap<String, AST>,
+    outcomes: Arc<Mutex<Vec<RuleOutcome>>>,
 }
 
 impl Default for RhaiEngine {
@@ -34,39 +43,44 @@ impl Default for RhaiEngine {
 impl RhaiEngine {
     pub fn new() -> Self {
         let mut engine = Engine::new();
+        let outcomes = Arc::new(Mutex::new(Vec::<RuleOutcome>::new()));
+        let scoring_outcomes = outcomes.clone();
 
-        engine.register_fn("add_score", |team: &str, category: &str, points: i64| {
+        engine.register_fn("add_score", move |team: &str, category: &str, points: i64| {
             info!(
                 "Rhai added score! Team: {}, Category: {}, Points: {}",
                 team, category, points
             );
+            if let Ok(mut events) = scoring_outcomes.lock() {
+                events.push(RuleOutcome {
+                    kind: "score",
+                    team: team.to_string(),
+                    category: category.to_string(),
+                    points,
+                });
+            }
         });
 
         Self {
             engine,
             scoring_ast: None,
             scripts: HashMap::new(),
+            outcomes,
         }
     }
 
-    pub fn load_script(&mut self, path: &str) -> bool {
-        match fs::read_to_string(path) {
-            Ok(script) => match self.compile_script(&script) {
-                Ok(ast) => {
-                    if path.ends_with("scoring.rhai") {
-                        self.scoring_ast = Some(ast.clone());
-                    }
-                    self.scripts.insert(path.to_string(), ast);
-                    info!("Successfully loaded and compiled script: {}", path);
-                    true
+    pub fn load_source(&mut self, path: &str, source: &str) -> bool {
+        match self.compile_script(source) {
+            Ok(ast) => {
+                if path.ends_with("scoring.rhai") {
+                    self.scoring_ast = Some(ast.clone());
                 }
-                Err(e) => {
-                    error!("Failed to compile script {}: {}", path, e);
-                    false
-                }
-            },
-            Err(e) => {
-                error!("Failed to read script file {}: {}", path, e);
+                self.scripts.insert(path.to_string(), ast);
+                info!("Successfully loaded and compiled API rule source: {}", path);
+                true
+            }
+            Err(error) => {
+                error!("Failed to compile API rule source {}: {}", path, error);
                 false
             }
         }
@@ -74,6 +88,31 @@ impl RhaiEngine {
 
     pub fn loaded_script_count(&self) -> usize {
         self.scripts.len()
+    }
+
+    /// Execute the authored semantic hook, if the scoring script defines it.
+    /// The simulator intentionally passes a stable entity id here; richer
+    /// entity maps can be added without changing the pack hook signature.
+    pub fn on_trigger_enter(&self, trigger_id: &str, entity_id: &str) -> Vec<RuleOutcome> {
+        let Some(ast) = &self.scoring_ast else {
+            return Vec::new();
+        };
+        if !ast.iter_functions().any(|function| {
+            function.name == "on_trigger_enter" && function.params.len() == 2
+        }) {
+            return Vec::new();
+        }
+        let mut scope = Scope::new();
+        if let Err(error) = self.engine.call_fn::<()>(&mut scope, ast, "on_trigger_enter", (
+            trigger_id.to_string(),
+            entity_id.to_string(),
+        )) {
+            error!(%error, %trigger_id, %entity_id, "Rhai trigger hook failed");
+        }
+        self.outcomes
+            .lock()
+            .map(|mut outcomes| std::mem::take(&mut *outcomes))
+            .unwrap_or_default()
     }
 
     fn compile_script(&self, source: &str) -> Result<AST, rhai::ParseError> {
@@ -122,16 +161,10 @@ impl RhaiEngine {
         })
     }
 
-    pub fn inspect_script(&self, path: &str) -> Result<RuleScriptMetadata, String> {
-        let source = fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
-        self.inspect_source(path, &source)
-    }
-
-    pub fn load_arena_config(
+    pub fn load_arena_config_source(
         &self,
-        path: &str,
+        source: &str,
     ) -> Result<crate::game::pack_loader::ArenaConfig, String> {
-        let source = fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
         let ast = self
             .compile_script(&source)
             .map_err(|error| error.to_string())?;
@@ -266,6 +299,13 @@ impl RhaiEngine {
                 .map_err(|_| "arena_config.object_count must be positive".to_string())?,
             spawn_radius: number_value("spawn_radius")? as f32,
             spawn_height: number_value("spawn_height")? as f32,
+            spawn_offset_y_m: number_value("spawn_offset_y_m")? as f32,
+            spawn_release_seconds: number_value("spawn_release_seconds")? as f32,
+            spawn_fountain_vertical_speed_mps: number_value("spawn_fountain_vertical_speed_mps")?
+                as f32,
+            spawn_fountain_forward_speed_mps: number_value("spawn_fountain_forward_speed_mps")?
+                as f32,
+            spawn_fountain_spread_mps: number_value("spawn_fountain_spread_mps")? as f32,
             gravity_scale: number_value("gravity_scale")? as f32,
             ball_to_ball_collisions: bool_value("ball_to_ball_collisions")?,
             color: string_value("color")?,
@@ -561,5 +601,19 @@ mod tests {
                 .inspect_source("rules/broken.rhai", "fn broken( {")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn executes_authored_trigger_hook_and_captures_score() {
+        let mut engine = RhaiEngine::new();
+        assert!(engine.load_source(
+            "rules/scoring.rhai",
+            r#"fn on_trigger_enter(trigger_id, entity_id) { add_score("blue", "SU", 1); }"#
+        ));
+        let outcomes = engine.on_trigger_enter("blueSUscore", "ball:42");
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].team, "blue");
+        assert_eq!(outcomes[0].category, "SU");
+        assert_eq!(outcomes[0].points, 1);
     }
 }

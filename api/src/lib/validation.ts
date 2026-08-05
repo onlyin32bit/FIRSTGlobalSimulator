@@ -86,22 +86,29 @@ export const cancelMatchSchema = z.object({
 }).strict()
 
 export const createGameServerSchema = z.object({
-  name: trimmedText(2, 100),
   origin: z.string().trim().url().max(500),
-  maxUsers: z.coerce.number().int().min(1).max(100_000).default(50),
-  maxMatches: z.coerce.number().int().min(1).max(10_000).default(10),
-  slots: z.coerce.number().int().min(1).max(10_000).default(10)
 }).strict()
 
-export const updateGameServerSchema = createGameServerSchema.partial().extend({
+/** Capacities are supplied by the authenticated host on heartbeat. */
+export const updateGameServerSchema = z.object({
+  origin: z.string().trim().url().max(500).optional(),
+  maxUsers: z.coerce.number().int().min(1).max(100_000).optional(),
+  maxMatches: z.coerce.number().int().min(1).max(10_000).optional(),
+  slots: z.coerce.number().int().min(1).max(10_000).optional(),
   status: z.enum(['provisioning', 'online', 'offline', 'disabled']).optional()
 }).strict()
 
 export const gameServerHeartbeatSchema = z.object({
   activeUsers: z.coerce.number().int().min(0).max(100_000),
   activeMatches: z.coerce.number().int().min(0).max(10_000),
+  maxUsers: z.coerce.number().int().min(1).max(100_000),
+  maxMatches: z.coerce.number().int().min(1).max(10_000),
   slots: z.coerce.number().int().min(1).max(10_000).optional(),
   version: z.string().trim().max(100).optional()
+}).strict()
+
+export const gameServerTicketVerifySchema = z.object({
+  ticket: z.string().trim().min(1).max(16_384)
 }).strict()
 
 export const updateInvitationSchema = z.object({

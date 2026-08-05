@@ -2,13 +2,14 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { Canvas, T } from '@threlte/core';
-	import { OrbitControls } from '@threlte/extras';
-	import { WebGLRenderer } from 'three';
+	import { Grid, OrbitControls } from '@threlte/extras';
+	import { BasicShadowMap, WebGLRenderer } from 'three';
 	import { Button } from '$lib/components/ui/button';
 	import { ApiError, api } from '$lib/api';
 	import RobotFollowCamera from './RobotFollowCamera.svelte';
 	import RobotModel from './RobotModel.svelte';
 	import PackField from './PackField.svelte';
+	import FieldBoundsDebug from './FieldBoundsDebug.svelte';
 	import ScriptedObjects from './ScriptedObjects.svelte';
 	import TelemetrySparkline from './TelemetrySparkline.svelte';
 	import {
@@ -55,10 +56,10 @@
 		ballRollingResistanceMps2: 0.4,
 		floorMaterial: 'low-pile carpet',
 		floorFriction: 0.85,
-		robotMassKg: 40,
-		robotWidthM: 0.65,
-		robotHeightM: 0.45,
-		robotLengthM: 0.65,
+		robotMassKg: 18,
+		robotWidthM: 0.5,
+		robotHeightM: 0.5,
+		robotLengthM: 0.5,
 		robotMaxSpeedMps: 4,
 		ballInertiaFactor: 0.4,
 		ballDragCoefficient: 0.47,
@@ -97,6 +98,21 @@
 	let pingMs = $state<number | null>(null);
 	let packVersion = $state('Loading pack…');
 	let fieldAssets = $state<{ visual: string; physics: string; semantics: string } | null>(null);
+	type FieldDefinition = {
+		colliders: Array<{ id: string; min: [number, number, number]; max: [number, number, number] }>;
+		triggers: Array<{ id: string; min: [number, number, number]; max: [number, number, number] }>;
+		boundary: { min: [number, number, number]; max: [number, number, number] };
+	};
+	let fieldDefinition = $state<FieldDefinition | null>(null);
+	let fieldDebugOpen = $state(false);
+	let semanticEvents = $state<string[]>([]);
+	let activeTriggerIds = $derived(
+		new Set(
+			semanticEvents
+				.map((event) => event.match(/^trigger_enter ([^ ]+)/)?.[1])
+				.filter((id): id is string => Boolean(id))
+		)
+	);
 	let physicsLoaded = false;
 	let snapshotDecodeFailed = false;
 	let contacts = $state(0);
@@ -110,6 +126,7 @@
 	let inputIntake = $state(0);
 	let cameraMode = $state<'overview' | 'robot'>('overview');
 	let cameraDirection = $state<'north' | 'south'>('north');
+	let robotCameraDistance = $state(8);
 	let clientFps = $state(0);
 	let averageFrameMs = $state(0);
 	let p95FrameMs = $state(0);
@@ -176,6 +193,10 @@
 	let renderer: WebGLRenderer | undefined;
 	const createRenderer = (canvas: HTMLCanvasElement) => {
 		renderer = new WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+		// One low-cost shadow map is enough to anchor the robots and balls to
+		// the field. BasicShadowMap avoids the extra filtering passes of PCF.
+		renderer.shadowMap.enabled = true;
+		renderer.shadowMap.type = BasicShadowMap;
 		return renderer;
 	};
 	let lastSentDrive = Number.NaN;
@@ -259,7 +280,7 @@
 				turn: inputTurn,
 				intake: inputIntake,
 				gamepad: gamepadConnected ? gamepadName : null,
-				camera: `${cameraMode}${cameraMode === 'robot' ? `/${cameraDirection}` : ''}`
+				camera: `${cameraMode}${cameraMode === 'robot' ? `/${cameraDirection}/${robotCameraDistance.toFixed(1)}m` : ''}`
 			},
 			packVersion,
 			physics,
@@ -540,6 +561,11 @@
 				event.preventDefault();
 				return;
 			}
+			if (!event.repeat && event.key.toLowerCase() === 'b') {
+				fieldDebugOpen = !fieldDebugOpen;
+				event.preventDefault();
+				return;
+			}
 			const key = event.key.toLowerCase();
 			if (!inputKeys.has(key)) return;
 			pressed.add(key);
@@ -563,15 +589,17 @@
 
 		const connect = async () => {
 			try {
-			const [ticket, currentUser, assets] = await Promise.all([
+			const [ticket, currentUser, assets, metadata] = await Promise.all([
 				activeMatchId === 'test-match' ? api.createTestMatchTicket() : api.createMatchTicket(activeMatchId),
 				api.getCurrentUser(),
-				api.getGamePackAssets('fgc-2026')
+				api.getGamePackAssets('fgc-2026'),
+				api.getGamePackMetadata('fgc-2026')
 			]);
 				if (disposed) return;
 
 			localId = currentUser.user.id;
 			fieldAssets = assets;
+			fieldDefinition = metadata.fieldDefinition;
 				const nextSocket = new WebSocket(ticket.ws_url);
 				nextSocket.binaryType = 'arraybuffer';
 				socket = nextSocket;
@@ -634,6 +662,7 @@
 								physicsLoaded = true;
 							}
 							packVersion = `${message.gamePackId} · v${message.gamePackVersion}`;
+							semanticEvents = message.semanticEvents;
 							return;
 						}
 						const message = JSON.parse(event.data);
@@ -698,7 +727,7 @@
 			{gamepadConnected ? gamepadName : 'Connect a gamepad and press a button'}
 		</p>
 		<p class="mt-1 text-xs text-white/40">Left trigger: precision · A: brake</p>
-		<p class="mt-1 text-xs text-white/40">C: camera · F: flip north/south · Ctrl+F3: diagnostics</p>
+		<p class="mt-1 text-xs text-white/40">C: camera · F: flip north/south · B: field bounds · Ctrl+F3: diagnostics</p>
 		{#if error}<p class="mt-2 text-fuchsia-300">✖ {error}</p>{/if}
 	</div>
 	<div class="absolute top-4 right-4 z-10 flex items-center gap-2">
@@ -717,6 +746,22 @@
 			>
 				Flip to {cameraDirection === 'north' ? 'south' : 'north'}
 			</Button>
+			<label
+				class="flex h-10 items-center gap-2 rounded-md border border-white/20 bg-black/40 px-3 text-xs text-white/75"
+				for="robot-camera-distance"
+			>
+				<span class="whitespace-nowrap">Zoom {robotCameraDistance.toFixed(1)} m</span>
+				<input
+					id="robot-camera-distance"
+					type="range"
+					min="2.5"
+					max="18"
+					step="0.5"
+					bind:value={robotCameraDistance}
+					class="w-24 accent-cyan-300"
+					aria-label="Robot follow camera distance"
+				/>
+			</label>
 		{/if}
 		<Button
 			variant="outline"
@@ -724,6 +769,15 @@
 			onclick={() => (debugOpen = !debugOpen)}
 		>
 			{debugOpen ? 'Hide diagnostics' : 'Diagnostics'}
+		</Button>
+		<Button
+			variant="outline"
+			class={fieldDebugOpen
+				? 'border-emerald-300/60 bg-emerald-300/15 text-emerald-100 hover:bg-emerald-300/25'
+				: 'border-sky-300/30 bg-black/40 text-sky-100 hover:bg-sky-300/10'}
+			onclick={() => (fieldDebugOpen = !fieldDebugOpen)}
+		>
+			{fieldDebugOpen ? 'Hide field bounds' : 'Field bounds'}
 		</Button>
 		<Button
 			href="/dashboard"
@@ -878,6 +932,10 @@
 				<dd>
 					{players.length} player · {objectFrame.positions.length / 3} obj · {contacts} contact
 				</dd>
+				<dt class="text-white/40">field</dt>
+				<dd>
+					{fieldDefinition?.colliders.length ?? 0} collision · {fieldDefinition?.triggers.length ?? 0} trigger
+				</dd>
 				<dt class="text-white/40">sim</dt>
 				<dd>
 					{simulationClock.toFixed(2)}/{matchClock.toFixed(2)} s · tick {serverTick.toLocaleString()}
@@ -916,19 +974,46 @@
 					{/each}
 				</div>
 			{/if}
+			{#if semanticEvents.length > 0}
+				<div class="mt-1 border-t border-white/15 pt-1 text-emerald-200">
+					{#each semanticEvents.slice(-4) as event}<p class="truncate">{event}</p>{/each}
+				</div>
+			{/if}
 		</aside>
 	{/if}
-	<Canvas {createRenderer} dpr={[0.75, 1.25]} renderMode="on-demand" shadows={false}>
+	<Canvas {createRenderer} dpr={[0.75, 1.25]} renderMode="on-demand" shadows>
 		{#if cameraMode === 'robot'}
-			<RobotFollowCamera player={trackedPlayer} direction={cameraDirection} />
+			<RobotFollowCamera player={trackedPlayer} direction={cameraDirection} distance={robotCameraDistance} />
 		{:else}
 			<T.PerspectiveCamera makeDefault position={[11, 12, 14]} fov={50}>
 				<OrbitControls target={[0, 0, 0]} enablePan={false} minDistance={8} maxDistance={28} />
 			</T.PerspectiveCamera>
 		{/if}
-		<T.AmbientLight intensity={1.2} />
-		<T.DirectionalLight position={[8, 12, 6]} intensity={2} />
+		<T.AmbientLight intensity={0.55} />
+		<T.DirectionalLight
+			position={[8, 12, 6]}
+			intensity={2.1}
+			castShadow
+			shadow.mapSize={[1024, 1024]}
+			shadow.bias={-0.0005}
+		/>
+		<Grid
+			position={[0, 0.002, 0]}
+			cellColor="#64748b"
+			sectionColor="#94a3b8"
+			cellSize={0.5}
+			sectionSize={2}
+			fadeDistance={18}
+		/>
 		{#if fieldAssets}<PackField assets={fieldAssets} />{/if}
+		{#if fieldDebugOpen && fieldDefinition}
+			<FieldBoundsDebug
+				colliders={fieldDefinition.colliders}
+				triggers={fieldDefinition.triggers}
+				boundary={fieldDefinition.boundary}
+				{activeTriggerIds}
+			/>
+		{/if}
 		<ScriptedObjects frame={renderedObjectFrame} />
 		<T.Group>
 			{#each renderedPlayers as player (player.id)}

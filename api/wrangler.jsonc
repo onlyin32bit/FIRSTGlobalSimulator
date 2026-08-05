@@ -3,6 +3,11 @@
   "name": "api",
   "compatibility_date": "2025-08-03",
   "main": "./src/index.ts",
+  "assets": {
+    "directory": "../pkgs/games",
+    "binding": "PACK_ASSETS",
+    "run_worker_first": true
+  },
   "d1_databases": [
     {
       "binding": "DB",
@@ -24,10 +29,6 @@
   ],
   "vars": {
     "WEB_ORIGIN": "http://localhost:5173",
-    "API_ORIGIN": "http://localhost:8787",
-    // workerd may resolve localhost to IPv6 while the local Rust server binds
-    // its HTTP listener on IPv4. Use the explicit loopback address for the
-    // development proxy; deployed environments override this binding.
-    "GAME_SERVER_ORIGIN": "ws://127.0.0.1:3000"
+    "API_ORIGIN": "http://localhost:8787"
   }
 }

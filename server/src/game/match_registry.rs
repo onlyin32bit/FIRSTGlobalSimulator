@@ -1,5 +1,5 @@
 use axum::body::Bytes;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -63,6 +63,7 @@ pub struct MatchStateSync {
     pub clock_drift_ms: f64,
     pub step_metrics: StepMetrics,
     pub physics: PhysicsSync,
+    pub semantic_events: Vec<String>,
 }
 
 enum RuntimeBackend {
@@ -151,6 +152,13 @@ impl RuntimeBackend {
         match self {
             Self::Rapier(_) => StepMetrics::default(),
             Self::Sphere(runtime) => runtime.step_metrics(),
+        }
+    }
+
+    fn drain_semantic_events(&mut self) -> Vec<super::sphere_runtime::SemanticEvent> {
+        match self {
+            Self::Rapier(_) => Vec::new(),
+            Self::Sphere(runtime) => runtime.drain_semantic_events(),
         }
     }
 }
@@ -283,13 +291,19 @@ impl MatchRegistry {
         let latest_state = Arc::new(Mutex::new(None::<Arc<MatchStateSync>>));
 
         let mut rules = RhaiEngine::new();
-        for script in &pack.scripts {
-            if !rules.load_script(&script.path) {
-                tracing::error!(path = %script.path, "Unable to load a validated rule script into match runtime");
+        for script in pack.manifest.scripts.values() {
+            let Some(source) = pack.script_sources.get(script) else {
+                tracing::error!(path = %script, "API runtime snapshot is missing a validated rule script");
+                return handle;
+            };
+            if !rules.load_source(script, source) {
+                tracing::error!(path = %script, "Unable to compile a validated API rule script into match runtime");
                 return handle;
             }
         }
         let loaded_script_count = rules.loaded_script_count();
+        // Rhai is configured without its `sync` feature. Validation happens
+        // here, but each dedicated match thread owns its executable engine.
         drop(rules);
         info!(match_id = %match_id, pack = %pack.manifest.id, version = %pack.manifest.version, scripts = loaded_script_count, "Loaded game pack into match runtime");
 
@@ -332,6 +346,16 @@ impl MatchRegistry {
             .name(format!("match-{match_id}"))
             .spawn(move || {
                 let mut runtime = RuntimeBackend::new(match_id.clone(), &pack);
+                let mut rules = RhaiEngine::new();
+                for script in pack.manifest.scripts.values() {
+                    let Some(source) = pack.script_sources.get(script) else {
+                        tracing::error!(path = %script, "API runtime snapshot is missing a rule script in match thread");
+                        continue;
+                    };
+                    if !rules.load_source(script, source) {
+                        tracing::error!(path = %script, "Unable to compile API rule script into match thread");
+                    }
+                }
                 let physics = PhysicsSync::from(&pack.arena);
                 let tick_duration = Duration::from_secs_f64(1.0 / 60.0);
                 let tick_budget_ms = tick_duration.as_secs_f64() * 1_000.0;
@@ -341,6 +365,7 @@ impl MatchRegistry {
                 let mut ticks_in_tps_window = 0_u64;
                 let mut ticks_per_second = 60.0;
                 let mut tick = 0_u64;
+                let mut recent_semantic_events = VecDeque::<String>::with_capacity(16);
 
                 loop {
                     let now = Instant::now();
@@ -380,6 +405,16 @@ impl MatchRegistry {
 
                     let physics_started = Instant::now();
                     runtime.step(&pack.arena, 1.0 / 60.0);
+                    for event in runtime.drain_semantic_events() {
+                        let mut label = format!("{} {} ← {}", event.kind, event.target_id, event.entity_id);
+                        for outcome in rules.on_trigger_enter(&event.target_id, &event.entity_id) {
+                            label.push_str(&format!(" · {} {}/{} +{}", outcome.kind, outcome.team, outcome.category, outcome.points));
+                        }
+                        recent_semantic_events.push_back(label);
+                        while recent_semantic_events.len() > 16 {
+                            recent_semantic_events.pop_front();
+                        }
+                    }
                     let physics_tick_ms = physics_started.elapsed().as_secs_f64() * 1_000.0;
                     let physics_load_percent = physics_tick_ms / tick_budget_ms * 100.0;
                     tick += 1;
@@ -414,6 +449,7 @@ impl MatchRegistry {
                             clock_drift_ms,
                             step_metrics: runtime.step_metrics(),
                             physics: physics.clone(),
+                            semantic_events: recent_semantic_events.iter().cloned().collect(),
                         };
                         if let Ok(mut slot) = latest_state.lock() {
                             *slot = Some(Arc::new(state));
@@ -437,6 +473,7 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
     const PLAYERS: u16 = 4;
     const OBJECTS: u16 = 5;
     const PHYSICS: u16 = 6;
+    const SEMANTIC_EVENTS: u16 = 7;
     let mut output = Vec::with_capacity(1024 + state.object_positions.len() * 12);
     output.extend_from_slice(b"FGS1");
     put_u16(&mut output, 1);
@@ -552,6 +589,12 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
             state.physics.max_brake_force_n,
         ] {
             put_f32(bytes, value);
+        }
+    });
+    section(&mut output, SEMANTIC_EVENTS, |bytes| {
+        put_u16(bytes, state.semantic_events.len() as u16);
+        for event in &state.semantic_events {
+            put_string(bytes, event);
         }
     });
     let payload_len = (output.len() - 16) as u32;
@@ -686,6 +729,7 @@ mod protocol_tests {
                     .unwrap()
                     .arena,
             ),
+            semantic_events: Vec::new(),
         };
         let encoded = encode_state(&state, ProcessMetrics::default());
         assert_eq!(&encoded[..4], b"FGS1");

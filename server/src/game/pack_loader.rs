@@ -2,9 +2,8 @@ use super::error::GameError;
 use super::rhai_engine::{RhaiEngine, RuleScriptMetadata};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::collections::BTreeMap;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GamePackManifest {
@@ -30,6 +29,22 @@ pub struct GamePackMetadata {
     pub scripts: Vec<RuleScriptMetadata>,
     pub arena: ArenaConfig,
     pub field_definition: FieldDefinition,
+    /// Raw Rhai source belongs to the API pack snapshot, not the filesystem.
+    /// It stays process-local and is never sent to connected clients.
+    #[serde(skip)]
+    pub script_sources: BTreeMap<String, String>,
+}
+
+/// The API-owned source of truth a match host fetches before it accepts users.
+/// Visual GLB data is intentionally excluded: a host only needs physics,
+/// semantic data, and executable rules.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GamePackRuntimeSnapshot {
+    pub manifest: GamePackManifest,
+    pub field_physics: serde_json::Value,
+    pub field_semantics: serde_json::Value,
+    pub scripts: BTreeMap<String, String>,
 }
 
 /// Server-ready subset of the authored Assimp field files. The GLB is only a
@@ -41,6 +56,30 @@ pub struct FieldDefinition {
     pub colliders: Vec<FieldCollider>,
     pub anchors: BTreeMap<String, [f32; 3]>,
     pub triggers: Vec<FieldTrigger>,
+    /// Top surface of the authored playable floor/riser in metres.
+    pub floor_height_m: f32,
+    /// The playable X/Z envelope, derived from the riser's inner footprint.
+    /// The guard rail stays visual geometry rather than a giant solid AABB.
+    pub boundary: FieldBoundary,
+}
+
+/// Axis-aligned playable footprint of a game-pack field. The server uses this
+/// for its cheap perimeter constraint, while authored local obstacles remain
+/// separate collision volumes.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldBoundary {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+impl Default for FieldBoundary {
+    fn default() -> Self {
+        Self {
+            min: [-8.0, 0.0, -8.0],
+            max: [8.0, 0.0, 8.0],
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -66,8 +105,16 @@ pub struct ArenaConfig {
     pub solver: SolverConfig,
     pub object_id: String,
     pub object_count: usize,
+    /// Radius of the EXT dispenser nozzle, not a pre-spawn field scatter.
     pub spawn_radius: f32,
     pub spawn_height: f32,
+    /// Temporary pack-space correction for an authored semantic anchor.
+    /// Delete once the Blender EXTballspawn is placed correctly.
+    pub spawn_offset_y_m: f32,
+    pub spawn_release_seconds: f32,
+    pub spawn_fountain_vertical_speed_mps: f32,
+    pub spawn_fountain_forward_speed_mps: f32,
+    pub spawn_fountain_spread_mps: f32,
     pub gravity_scale: f32,
     pub ball_to_ball_collisions: bool,
     pub color: String,
@@ -214,18 +261,9 @@ impl PackLoader {
         }
     }
 
-    pub fn load_manifest(&self, path: &str) -> Result<GamePackManifest, GameError> {
-        let content = fs::read_to_string(path).map_err(|_| {
-            error!("Could not find manifest at {}", path);
-            GameError::ManifestNotFound
-        })?;
-
-        let manifest: GamePackManifest = serde_json::from_str(&content).map_err(|e| {
-            error!("Failed to parse manifest json: {}", e);
-            GameError::ManifestParseError(e.to_string())
-        })?;
-
-        let req = VersionReq::parse(&manifest.engine_version).unwrap();
+    fn validate_manifest(&self, manifest: &GamePackManifest) -> Result<(), GameError> {
+        let req = VersionReq::parse(&manifest.engine_version)
+            .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
         if !req.matches(&self.engine_version) {
             warn!(
                 "Engine version {} is NOT compatible with Pack requirement {}",
@@ -241,32 +279,35 @@ impl PackLoader {
             "Successfully loaded compatible Game Pack: {} v{}",
             manifest.name, manifest.version
         );
-        Ok(manifest)
+        Ok(())
     }
 
-    pub fn load_pack(&self, manifest_path: &str) -> Result<GamePackMetadata, GameError> {
-        let manifest = self.load_manifest(manifest_path)?;
-        let root = std::path::Path::new(manifest_path)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
+    /// Compile a snapshot fetched from the control-plane API. There is no
+    /// pack path here by design: a game-server node must not own pack files.
+    pub fn load_runtime_snapshot(
+        &self,
+        snapshot: GamePackRuntimeSnapshot,
+    ) -> Result<GamePackMetadata, GameError> {
+        self.validate_manifest(&snapshot.manifest)?;
         let engine = RhaiEngine::new();
-        let mut scripts = Vec::with_capacity(manifest.scripts.len());
+        let mut scripts = Vec::with_capacity(snapshot.manifest.scripts.len());
         let mut arena = None;
-        for script_path in manifest.scripts.values() {
-            let path = root.join(script_path);
-            let path_string = path.to_string_lossy().to_string();
+        for script_path in snapshot.manifest.scripts.values() {
+            let source = snapshot.scripts.get(script_path).ok_or_else(|| {
+                GameError::ManifestParseError(format!("Runtime snapshot is missing rule source {script_path}"))
+            })?;
             let metadata = engine
-                .inspect_script(&path_string)
+                .inspect_source(script_path, source)
                 .map_err(GameError::ScriptCompilationError)?;
             info!(
                 "Loaded Rhai rule script {} ({} functions)",
-                path_string,
+                script_path,
                 metadata.functions.len()
             );
             if script_path.ends_with("arena.rhai") {
                 arena = Some(
                     engine
-                        .load_arena_config(&path_string)
+                        .load_arena_config_source(source)
                         .map_err(GameError::ScriptCompilationError)?,
                 );
             }
@@ -275,32 +316,76 @@ impl PackLoader {
         let arena = arena.ok_or_else(|| {
             GameError::ScriptCompilationError("The pack must define an arena.rhai script".into())
         })?;
-        let field_definition = load_field_definition(root, &manifest.field)?;
+        let field_definition = load_field_definition(&snapshot.field_physics, &snapshot.field_semantics)?;
         Ok(GamePackMetadata {
-            manifest,
+            manifest: snapshot.manifest,
             scripts,
             arena,
             field_definition,
+            script_sources: snapshot.scripts,
         })
+    }
+
+    /// Test-only fixture adapter. Production code must use
+    /// `load_runtime_snapshot` after fetching the API-owned pack.
+    #[cfg(test)]
+    pub fn load_pack(&self, manifest_path: &str) -> Result<GamePackMetadata, GameError> {
+        let root = std::path::Path::new(manifest_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let manifest: GamePackManifest = serde_json::from_str(
+            &std::fs::read_to_string(manifest_path)
+                .map_err(|_| GameError::ManifestNotFound)?,
+        )
+        .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
+        let physics_path = manifest.field.get("physics").and_then(serde_json::Value::as_str)
+            .ok_or_else(|| GameError::ManifestParseError("Pack field.physics is missing".into()))?;
+        let semantics_path = manifest.field.get("semantics").and_then(serde_json::Value::as_str)
+            .ok_or_else(|| GameError::ManifestParseError("Pack field.semantics is missing".into()))?;
+        let field_physics = serde_json::from_str(&std::fs::read_to_string(root.join(physics_path))
+            .map_err(|error| GameError::ManifestParseError(error.to_string()))?)
+            .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
+        let field_semantics = serde_json::from_str(&std::fs::read_to_string(root.join(semantics_path))
+            .map_err(|error| GameError::ManifestParseError(error.to_string()))?)
+            .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
+        let scripts = manifest.scripts.values()
+            .map(|path| {
+                std::fs::read_to_string(root.join(path))
+                    .map(|source| (path.clone(), source))
+                    .map_err(|error| GameError::ManifestParseError(error.to_string()))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        self.load_runtime_snapshot(GamePackRuntimeSnapshot { manifest, field_physics, field_semantics, scripts })
     }
 }
 
-fn load_field_definition(root: &std::path::Path, field: &serde_json::Value) -> Result<FieldDefinition, GameError> {
-    let physics_name = field.get("physics").and_then(serde_json::Value::as_str)
-        .ok_or_else(|| GameError::ManifestParseError("Pack field.physics is missing".into()))?;
-    let semantics_name = field.get("semantics").and_then(serde_json::Value::as_str)
-        .ok_or_else(|| GameError::ManifestParseError("Pack field.semantics is missing".into()))?;
-    let physics: serde_json::Value = serde_json::from_str(&fs::read_to_string(root.join(physics_name))
-        .map_err(|error| GameError::ManifestParseError(error.to_string()))?)
-        .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
-    let semantics: serde_json::Value = serde_json::from_str(&fs::read_to_string(root.join(semantics_name))
-        .map_err(|error| GameError::ManifestParseError(error.to_string()))?)
-        .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
-
+fn load_field_definition(physics: &serde_json::Value, semantics: &serde_json::Value) -> Result<FieldDefinition, GameError> {
     let mut definition = FieldDefinition::default();
-    definition.colliders = assimp_bounds(&physics, true)
+    // Keep planar collision surfaces too. Most authored field collision
+    // meshes are planes; they are extruded into thin server-side volumes
+    // below so a robot cannot drive through the visible field structure.
+    let authored_bounds = assimp_bounds(&physics, false);
+    if let Some((_, min, max)) = authored_bounds
+        .iter()
+        .find(|(id, _, _)| id == "RISER.001")
+    {
+        definition.boundary = FieldBoundary { min: *min, max: *max };
+        definition.floor_height_m = max[1];
+    }
+    definition.colliders = authored_bounds
         .into_iter()
-        .map(|(id, min, max)| FieldCollider { id, min, max })
+        .filter(|(id, min, max)| {
+            // The guard rail and riser provide the boundary/floor. Their
+            // visual bounds must not become solid cuboids. Likewise, broad
+            // cross-field assemblies are render geometry, not local blocks.
+            !matches!(id.as_str(), "GUARD_RAIL.001" | "RISER.001")
+                && max[0] - min[0] <= 2.5
+                && max[2] - min[2] <= 2.5
+        })
+        .map(|(id, min, max)| {
+            let (min, max) = extrude_thin_collision_bounds(min, max);
+            FieldCollider { id, min, max }
+        })
         .collect();
     for child in assimp_children(&semantics) {
         let Some(id) = child.get("name").and_then(serde_json::Value::as_str) else { continue; };
@@ -312,7 +397,15 @@ fn load_field_definition(root: &std::path::Path, field: &serde_json::Value) -> R
             definition.anchors.insert(id.into(), position);
         }
     }
-    info!(colliders = definition.colliders.len(), anchors = definition.anchors.len(), triggers = definition.triggers.len(), "Loaded field physics and semantics");
+    info!(
+        colliders = definition.colliders.len(),
+        anchors = definition.anchors.len(),
+        triggers = definition.triggers.len(),
+        boundary_min = ?definition.boundary.min,
+        boundary_max = ?definition.boundary.max,
+        floor_height_m = definition.floor_height_m,
+        "Loaded field physics and semantics"
+    );
     Ok(definition)
 }
 
@@ -323,6 +416,22 @@ fn assimp_children(scene: &serde_json::Value) -> Vec<&serde_json::Value> {
 
 fn assimp_bounds(scene: &serde_json::Value, solid_only: bool) -> Vec<(String, [f32; 3], [f32; 3])> {
     assimp_children(scene).into_iter().filter_map(|child| assimp_bound(child, scene, solid_only)).collect()
+}
+
+/// Assimp represents many walls and panels as zero-thickness triangle planes.
+/// The high-throughput server uses AABBs rather than CAD triangles, so give
+/// those planes a small physical thickness instead of silently dropping them.
+fn extrude_thin_collision_bounds(mut min: [f32; 3], mut max: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    const MIN_THICKNESS_M: f32 = 0.05;
+    for axis in 0..3 {
+        if max[axis] - min[axis] >= MIN_THICKNESS_M {
+            continue;
+        }
+        let center = (min[axis] + max[axis]) * 0.5;
+        min[axis] = center - MIN_THICKNESS_M * 0.5;
+        max[axis] = center + MIN_THICKNESS_M * 0.5;
+    }
+    (min, max)
 }
 
 fn assimp_bound(child: &serde_json::Value, scene: &serde_json::Value, solid_only: bool) -> Option<(String, [f32; 3], [f32; 3])> {
@@ -366,17 +475,26 @@ fn transform_point(matrix: &[f32; 16], point: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::PackLoader;
+    use super::{GamePackRuntimeSnapshot, PackLoader};
+    use std::collections::BTreeMap;
 
     #[test]
     fn loads_manifest_and_all_rhai_rules() {
         let loader = PackLoader::new("0.1.0");
+        let root = std::path::Path::new("../pkgs/games/fgc-2026");
+        let manifest = serde_json::from_str(&std::fs::read_to_string(root.join("manifest.json")).unwrap()).unwrap();
+        let field_physics = serde_json::from_str(&std::fs::read_to_string(root.join("field.physics.json")).unwrap()).unwrap();
+        let field_semantics = serde_json::from_str(&std::fs::read_to_string(root.join("field.semantics.json")).unwrap()).unwrap();
+        let scripts = ["rules/arena.rhai", "rules/penalties.rhai", "rules/robot.rhai", "rules/scoring.rhai"]
+            .into_iter()
+            .map(|path| (path.to_string(), std::fs::read_to_string(root.join(path)).unwrap()))
+            .collect::<BTreeMap<_, _>>();
         let metadata = loader
-            .load_pack("../pkgs/games/fgc-2026/manifest.json")
+            .load_runtime_snapshot(GamePackRuntimeSnapshot { manifest, field_physics, field_semantics, scripts })
             .unwrap();
         assert_eq!(metadata.manifest.id, "fgc-2026");
         assert_eq!(metadata.scripts.len(), 4);
-        assert!(metadata.arena.object_count >= 1000);
+        assert_eq!(metadata.arena.object_count, 500);
         assert_eq!(metadata.arena.ball.diameter_m, 0.100);
         assert_eq!(metadata.arena.ball.mass_kg, 0.062);
         assert_eq!(metadata.arena.ball.inertia_factor, 0.4);
@@ -384,12 +502,26 @@ mod tests {
         assert_eq!(metadata.arena.floor.material, "low-pile carpet");
         assert!(metadata.arena.floor.rolling_resistance_mps2 > 0.0);
         assert!(metadata.arena.robot.intake_enabled);
+        assert_eq!(metadata.arena.robot.mass_kg, 18.0);
+        assert_eq!(metadata.arena.robot.width_m, 0.50);
+        assert_eq!(metadata.arena.robot.height_m, 0.50);
+        assert_eq!(metadata.arena.robot.length_m, 0.50);
         assert!(metadata.arena.ramp.enabled);
-        assert!(!metadata.field_definition.colliders.is_empty());
+        assert!(metadata.field_definition.colliders.len() >= 70);
+        let front_wall = metadata
+            .field_definition
+            .colliders
+            .iter()
+            .find(|collider| collider.id == "blueSUfront")
+            .expect("authored planar wall must be loaded");
+        assert!(front_wall.max[2] - front_wall.min[2] >= 0.05 - f32::EPSILON);
         assert!(metadata.field_definition.anchors.contains_key("redSpawn1"));
         assert!(metadata.field_definition.anchors.contains_key("blueSpawn3"));
         assert!(metadata.field_definition.anchors.contains_key("EXTballspawn"));
         assert!(metadata.field_definition.triggers.iter().any(|trigger| trigger.id == "EXTscore"));
+        assert!((metadata.field_definition.boundary.min[0] + 3.5).abs() < 0.01);
+        assert!((metadata.field_definition.boundary.max[0] - 3.5).abs() < 0.01);
+        assert!(metadata.field_definition.floor_height_m > 0.65);
         assert!(
             metadata
                 .scripts
