@@ -8,41 +8,31 @@ kill_signal = 'SIGTERM'
 kill_timeout = '10s'
 
 [build]
-  dockerfile = 'Dockerfile'
+dockerfile = 'Dockerfile'
 
 [env]
-  RUST_LOG = 'info'
+RUST_LOG = 'info'
 
 [http_service]
-  internal_port = 3000
-  force_https = true
-  auto_stop_machines = false
-  auto_start_machines = true
-  min_machines_running = 1
-  processes = ['app']
-  checks = [{ grace_period = '10s', interval = '15s', method = 'GET', path = '/health', timeout = '5s' }]
-  concurrency = { hard_limit = 1000, soft_limit = 800, type = 'connections' }
-
-  [http_service.concurrency]
-    type = 'connections'
-    hard_limit = 1000
-    soft_limit = 800
-
-  [[http_service.checks]]
-    interval = '15s'
-    timeout = '5s'
-    grace_period = '10s'
-    method = 'GET'
-    path = '/health'
+internal_port = 3000
+force_https = true
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 1
+processes = ['app']
+checks = [
+  { grace_period = '10s', interval = '15s', method = 'GET', path = '/health', timeout = '5s' },
+]
+concurrency = { hard_limit = 1000, soft_limit = 800, type = 'connections' }
 
 [[vm]]
-  memory = '256mb'
-  cpu_kind = 'shared'
-  cpus = 1
-  memory_mb = 256
-  processes = ['app']
-  size = 'shared-cpu-1x'
+memory = '256mb'
+cpu_kind = 'shared'
+cpus = 1
+memory_mb = 256
+processes = ['app']
+size = 'shared-cpu-1x'
 
 [[restart]]
-  policy = 'always'
-  processes = ['app']
+policy = 'on-failure'
+processes = ['app']

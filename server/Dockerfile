@@ -3,11 +3,8 @@ FROM rust:1.89-bookworm AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src \
-    && printf 'fn main() {}\n' > src/main.rs \
-    && cargo build --release --locked \
-    && rm -rf src
-
+# Build the real application source. Do not cache a dummy main binary here:
+# if Cargo reuses that artifact, the runtime exits cleanly immediately.
 COPY src ./src
 RUN cargo build --release --locked \
     && strip target/release/server
