@@ -6,7 +6,7 @@ export type AdminAuditAction =
   | 'invitation.created' | 'invitation.revoked' | 'invitation.updated'
   | 'user.role_changed' | 'user.updated' | 'user.sessions_revoked' | 'user.disabled' | 'user.enabled'
   | 'match.created' | 'match.updated' | 'match.cancelled'
-  | 'game_server.created' | 'game_server.updated' | 'game_server.disabled'
+  | 'game_server.created' | 'game_server.updated' | 'game_server.disabled' | 'game_server.commanded' | 'game_server.deleted'
 
 export async function writeAdminAudit(
   env: Bindings,

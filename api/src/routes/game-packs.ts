@@ -197,8 +197,11 @@ app.get('/:id/runtime', async (c) => {
 
 app.get('/:id/assets', (c) => {
   if (c.req.param('id') !== PACK_ID) return jsonError(c, 404, 'VALIDATION_ERROR', 'Game pack not found.')
-  const base = new URL(c.req.url).origin
-  const prefix = `${base}/api/game-packs/${PACK_ID}/assets`
+  // This route is also called through the web Worker's service binding. The
+  // API Worker sees that internal request as `api.internal`; returning that
+  // origin would leak an unresolvable hostname to the browser. Keep asset
+  // URLs same-origin so the web Worker proxy can serve them publicly.
+  const prefix = `/api/game-packs/${PACK_ID}/assets`
   return jsonSuccess(c, { visual: `${prefix}/field.glb`, physics: `${prefix}/field.physics.json`, semantics: `${prefix}/field.semantics.json` })
 })
 

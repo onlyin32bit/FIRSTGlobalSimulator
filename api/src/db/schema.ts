@@ -89,6 +89,45 @@ export const gameServers = sqliteTable('game_servers', {
   createdAt: integer('createdAt', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updatedAt', { mode: 'timestamp' }).notNull(),
   disabledAt: integer('disabledAt', { mode: 'timestamp' }),
+  runtimeJson: text('runtimeJson'),
+});
+
+export const gameServerInstances = sqliteTable('game_server_instances', {
+  id: text('id').primaryKey(),
+  serverId: text('serverId').notNull().references(() => gameServers.id),
+  machineId: text('machineId').notNull(),
+  appName: text('appName'),
+  region: text('region'),
+  privateIp: text('privateIp'),
+  discoveredAt: integer('discoveredAt', { mode: 'timestamp' }).notNull(),
+  lastSeenAt: integer('lastSeenAt', { mode: 'timestamp' }).notNull(),
+});
+
+export const gameServerRuntimeMatches = sqliteTable('game_server_runtime_matches', {
+  id: text('id').primaryKey(),
+  serverId: text('serverId').notNull().references(() => gameServers.id),
+  matchId: text('matchId').notNull(),
+  players: integer('players').notNull().default(0),
+  objects: integer('objects').notNull().default(0),
+  contacts: integer('contacts').notNull().default(0),
+  tick: integer('tick').notNull().default(0),
+  tps: real('tps').notNull().default(0),
+  physicsTickMs: real('physicsTickMs').notNull().default(0),
+  physicsLoadPercent: real('physicsLoadPercent').notNull().default(0),
+  clockDriftMs: real('clockDriftMs').notNull().default(0),
+  updatedAt: integer('updatedAt', { mode: 'timestamp' }).notNull(),
+});
+
+export const gameServerCommands = sqliteTable('game_server_commands', {
+  id: text('id').primaryKey(),
+  serverId: text('serverId').notNull().references(() => gameServers.id),
+  type: text('type').notNull(),
+  payload: text('payload').notNull(),
+  status: text('status').notNull().default('pending'),
+  error: text('error'),
+  createdAt: integer('createdAt', { mode: 'timestamp' }).notNull(),
+  deliveredAt: integer('deliveredAt', { mode: 'timestamp' }),
+  completedAt: integer('completedAt', { mode: 'timestamp' }),
 });
 
 export const invitations = sqliteTable('invitations', {

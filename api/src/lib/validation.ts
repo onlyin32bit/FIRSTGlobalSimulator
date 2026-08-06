@@ -104,8 +104,58 @@ export const gameServerHeartbeatSchema = z.object({
   maxUsers: z.coerce.number().int().min(1).max(100_000),
   maxMatches: z.coerce.number().int().min(1).max(10_000),
   slots: z.coerce.number().int().min(1).max(10_000).optional(),
-  version: z.string().trim().max(100).optional()
+  version: z.string().trim().max(100).optional(),
+  runtime: z.object({
+    platform: z.string().trim().max(50).nullable().optional(),
+    hostname: z.string().trim().max(255).nullable().optional(),
+    machineId: z.string().trim().max(100).nullable().optional(),
+    appName: z.string().trim().max(255).nullable().optional(),
+    region: z.string().trim().max(50).nullable().optional(),
+    privateIp: z.string().trim().max(100).nullable().optional(),
+    os: z.string().trim().max(100).nullable().optional(),
+    arch: z.string().trim().max(100).nullable().optional(),
+    cpuCores: z.coerce.number().int().min(1).max(1024).nullable().optional(),
+    memoryTotalBytes: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+    cpuPercent: z.coerce.number().min(0).max(100_000).nullable().optional(),
+    rssBytes: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+    uptimeSeconds: z.coerce.number().min(0).max(1_000_000_000).nullable().optional()
+  }).optional(),
+  instances: z.array(z.object({
+    machineId: z.string().trim().min(1).max(100),
+    appName: z.string().trim().max(255).nullable().optional(),
+    region: z.string().trim().max(50).nullable().optional(),
+    privateIp: z.string().trim().max(100).nullable().optional()
+  })).max(500).optional(),
+  matches: z.array(z.object({
+    id: z.string().trim().min(1).max(255),
+    players: z.coerce.number().int().min(0).max(10_000),
+    objects: z.coerce.number().int().min(0).max(100_000),
+    contacts: z.coerce.number().int().min(0).max(1_000_000),
+    tick: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    tps: z.coerce.number().min(0).max(10_000),
+    physicsTickMs: z.coerce.number().min(0).max(60_000),
+    physicsLoadPercent: z.coerce.number().min(0).max(1_000_000),
+    clockDriftMs: z.coerce.number().min(-1_000_000_000).max(1_000_000_000)
+  })).max(1000).optional(),
+  commandResults: z.array(z.object({
+    id: z.string().trim().min(1).max(255),
+    ok: z.boolean(),
+    error: z.string().trim().max(1_000).nullable().optional()
+  })).max(100).optional()
 }).strict()
+
+export const gameServerCommandSchema = z.object({
+  type: z.enum(['kick_player', 'stop_match', 'clear_match', 'cleanup_idle', 'reset_host']),
+  matchId: z.string().trim().min(1).max(255).optional(),
+  userId: z.string().trim().min(1).max(255).optional()
+}).strict().superRefine((value, ctx) => {
+  if (['kick_player', 'stop_match', 'clear_match'].includes(value.type) && !value.matchId) {
+    ctx.addIssue({ code: 'custom', message: 'matchId is required for this command.' })
+  }
+  if (value.type === 'kick_player' && !value.userId) {
+    ctx.addIssue({ code: 'custom', message: 'userId is required when kicking a player.' })
+  }
+})
 
 export const gameServerTicketVerifySchema = z.object({
   ticket: z.string().trim().min(1).max(16_384)

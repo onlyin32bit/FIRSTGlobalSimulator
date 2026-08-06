@@ -7,7 +7,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, process::Command, sync::Arc, time::Instant};
 use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
@@ -32,6 +32,143 @@ struct ControlPlane {
     max_matches: u64,
     slots: u64,
     client: reqwest::Client,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlyInstance {
+    machine_id: String,
+    app_name: Option<String>,
+    region: Option<String>,
+    private_ip: Option<String>,
+}
+
+#[derive(Clone)]
+struct HostIdentity {
+    platform: &'static str,
+    hostname: String,
+    machine_id: Option<String>,
+    app_name: Option<String>,
+    region: Option<String>,
+    private_ip: Option<String>,
+    instances: Vec<FlyInstance>,
+    started_at: Instant,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostRuntime<'a> {
+    platform: &'a str,
+    hostname: &'a str,
+    machine_id: &'a Option<String>,
+    app_name: &'a Option<String>,
+    region: &'a Option<String>,
+    private_ip: &'a Option<String>,
+    os: &'static str,
+    arch: &'static str,
+    cpu_cores: usize,
+    memory_total_bytes: u64,
+    cpu_percent: f64,
+    rss_bytes: u64,
+    uptime_seconds: f64,
+}
+
+#[derive(Default)]
+struct HostSampler {
+    previous_process_ticks: u64,
+    previous_system_ticks: u64,
+}
+
+impl HostSampler {
+    fn sample<'a>(&mut self, identity: &'a HostIdentity) -> HostRuntime<'a> {
+        let process_ticks = std::fs::read_to_string("/proc/self/stat")
+            .ok()
+            .and_then(|stat| stat.rsplit_once(')').map(|(_, fields)| fields.to_string()))
+            .and_then(|fields| {
+                let fields = fields.split_whitespace().collect::<Vec<_>>();
+                Some(fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?)
+            })
+            .unwrap_or(self.previous_process_ticks);
+        let system_ticks = std::fs::read_to_string("/proc/stat")
+            .ok()
+            .and_then(|stat| stat.lines().next().map(str::to_string))
+            .map(|line| {
+                line.split_whitespace()
+                    .skip(1)
+                    .filter_map(|value| value.parse::<u64>().ok())
+                    .sum()
+            })
+            .unwrap_or(self.previous_system_ticks);
+        let process_delta = process_ticks.saturating_sub(self.previous_process_ticks);
+        let system_delta = system_ticks.saturating_sub(self.previous_system_ticks);
+        self.previous_process_ticks = process_ticks;
+        self.previous_system_ticks = system_ticks;
+        let cpu_cores = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let rss_bytes = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("VmRSS:"))
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+            .unwrap_or(0)
+            * 1024;
+        let memory_total_bytes = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("MemTotal:"))
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+            .unwrap_or(0)
+            * 1024;
+        HostRuntime {
+            platform: identity.platform,
+            hostname: &identity.hostname,
+            machine_id: &identity.machine_id,
+            app_name: &identity.app_name,
+            region: &identity.region,
+            private_ip: &identity.private_ip,
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            cpu_cores,
+            memory_total_bytes,
+            cpu_percent: if system_delta == 0 {
+                0.0
+            } else {
+                process_delta as f64 / system_delta as f64 * cpu_cores as f64 * 100.0
+            },
+            rss_bytes,
+            uptime_seconds: identity.started_at.elapsed().as_secs_f64(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HeartbeatCommand {
+    id: String,
+    r#type: String,
+    match_id: Option<String>,
+    user_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HeartbeatResponse {
+    commands: Vec<HeartbeatCommand>,
+}
+
+#[derive(Serialize)]
+struct CommandResult {
+    id: String,
+    ok: bool,
+    error: Option<String>,
 }
 
 impl ControlPlane {
@@ -111,7 +248,9 @@ async fn main() {
 
     let pack = Arc::new(pack);
     let registry = Arc::new(MatchRegistry::new(pack.clone()));
-    start_heartbeat(registry.clone(), control_plane.clone());
+    let host_identity = discover_host_identity();
+    info!(machine_id = ?host_identity.machine_id, region = ?host_identity.region, instances = host_identity.instances.len(), "Discovered host inventory");
+    start_heartbeat(registry.clone(), control_plane.clone(), host_identity);
     info!(pack = %pack.manifest.id, version = %pack.manifest.version, "Loaded game-pack runtime snapshot from API");
     let state = AppState {
         registry,
@@ -175,17 +314,121 @@ async fn fetch_api_pack(
         .map_err(|error| error.to_string())
 }
 
-fn start_heartbeat(registry: Arc<MatchRegistry>, control_plane: ControlPlane) {
+fn discover_host_identity() -> HostIdentity {
+    let app_name = std::env::var("FLY_APP_NAME")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let instances = if app_name.is_some() {
+        Command::new("dig")
+            .args(["+short", "TXT", "_instances.internal"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|line| {
+                        let parts = line
+                            .trim()
+                            .trim_matches('"')
+                            .split(',')
+                            .map(str::trim)
+                            .collect::<Vec<_>>();
+                        (parts.len() >= 4 && !parts[0].is_empty()).then(|| FlyInstance {
+                            machine_id: parts[0].to_string(),
+                            app_name: (!parts[1].is_empty()).then(|| parts[1].to_string()),
+                            private_ip: (!parts[2].is_empty()).then(|| parts[2].to_string()),
+                            region: (!parts[3].is_empty()).then(|| parts[3].to_string()),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    HostIdentity {
+        platform: if app_name.is_some() { "fly" } else { "unknown" },
+        hostname: std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string()),
+        machine_id: std::env::var("FLY_MACHINE_ID")
+            .ok()
+            .filter(|value| !value.is_empty()),
+        app_name,
+        region: std::env::var("FLY_REGION")
+            .ok()
+            .filter(|value| !value.is_empty()),
+        private_ip: std::env::var("FLY_PRIVATE_IP")
+            .ok()
+            .filter(|value| !value.is_empty()),
+        instances,
+        started_at: Instant::now(),
+    }
+}
+
+async fn execute_command(registry: &MatchRegistry, command: HeartbeatCommand) -> CommandResult {
+    let result = match command.r#type.as_str() {
+        "kick_player" => match (command.match_id.as_deref(), command.user_id.as_deref()) {
+            (Some(match_id), Some(user_id)) => registry.kick_player(match_id, user_id).await,
+            _ => Err("kick_player requires matchId and userId".to_string()),
+        },
+        "stop_match" | "clear_match" => match command.match_id.as_deref() {
+            Some(match_id) => registry.stop_match(match_id).await,
+            None => Err("This command requires matchId".to_string()),
+        },
+        "cleanup_idle" => {
+            registry.cleanup_idle().await;
+            Ok(())
+        }
+        "reset_host" => {
+            registry.reset_host().await;
+            Ok(())
+        }
+        _ => Err("Unknown control command".to_string()),
+    };
+    CommandResult {
+        id: command.id,
+        ok: result.is_ok(),
+        error: result.err(),
+    }
+}
+
+fn start_heartbeat(
+    registry: Arc<MatchRegistry>,
+    control_plane: ControlPlane,
+    host_identity: HostIdentity,
+) {
     let endpoint = control_plane.endpoint("game-servers/heartbeat");
     tokio::spawn(async move {
+        let mut sampler = HostSampler::default();
+        let mut results = Vec::<CommandResult>::new();
         loop {
             let active_matches = registry.match_count().await as u64;
+            let active_users = registry.active_user_count().await as u64;
+            let matches = registry.telemetry().await;
+            let runtime = sampler.sample(&host_identity);
             let result = control_plane.client.post(&endpoint)
                 .header("X-Game-Server-Key", &control_plane.game_server_key)
-                .json(&serde_json::json!({ "activeUsers": 0, "activeMatches": active_matches, "maxUsers": control_plane.max_users, "maxMatches": control_plane.max_matches, "slots": control_plane.slots, "version": env!("CARGO_PKG_VERSION") }))
+                .json(&serde_json::json!({ "activeUsers": active_users, "activeMatches": active_matches, "maxUsers": control_plane.max_users, "maxMatches": control_plane.max_matches, "slots": control_plane.slots, "version": env!("CARGO_PKG_VERSION"), "runtime": runtime, "instances": &host_identity.instances, "matches": &matches, "commandResults": &results }))
                 .send().await;
-            if let Err(error) = result {
-                tracing::warn!(%error, "game server heartbeat failed");
+            match result {
+                Ok(response) => match response
+                    .json::<ControlPlaneResponse<HeartbeatResponse>>()
+                    .await
+                {
+                    Ok(payload) if payload.success => {
+                        results = Vec::new();
+                        for command in payload.data.map(|data| data.commands).unwrap_or_default() {
+                            results.push(execute_command(&registry, command).await);
+                        }
+                    }
+                    Ok(payload) => {
+                        tracing::warn!(error = ?payload.error.and_then(|error| error.message), "game server heartbeat rejected")
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "game server heartbeat response was invalid")
+                    }
+                },
+                Err(error) => tracing::warn!(%error, "game server heartbeat failed"),
             }
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
@@ -256,6 +499,12 @@ async fn handle_socket(
     claims: auth::TicketClaims,
     registry: Arc<MatchRegistry>,
 ) {
+    if registry
+        .is_player_kicked(&claims.match_id, &claims.sub)
+        .await
+    {
+        return;
+    }
     let match_handle = registry.get_or_create_match(&claims.match_id).await;
     let _ = match_handle
         .input_tx
@@ -270,8 +519,12 @@ async fn handle_socket(
         .await;
     let mut state_rx = match_handle.state_tx.subscribe();
     let (mut sender, mut receiver) = socket.split();
+    let mut control_check = tokio::time::interval(std::time::Duration::from_millis(250));
     loop {
         tokio::select! {
+            _ = control_check.tick() => {
+                if registry.is_player_kicked(&claims.match_id, &claims.sub).await || registry.is_match_stopped(&claims.match_id).await { break; }
+            },
             message = receiver.next() => match message {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
                     Ok(ClientMessage::Input { sequence, move_x, move_z, intake_power }) => {

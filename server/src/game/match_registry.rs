@@ -1,5 +1,6 @@
 use axum::body::Bytes;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -19,6 +20,23 @@ pub struct MatchRegistry {
 pub struct MatchHandle {
     pub input_tx: mpsc::Sender<MatchInput>,
     pub state_tx: broadcast::Sender<Bytes>,
+    shutdown: Arc<AtomicBool>,
+    kicked_users: Arc<Mutex<HashSet<String>>>,
+    telemetry: Arc<Mutex<RuntimeMatchTelemetry>>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeMatchTelemetry {
+    pub id: String,
+    pub players: usize,
+    pub objects: usize,
+    pub contacts: usize,
+    pub tick: u64,
+    pub tps: f64,
+    pub physics_tick_ms: f64,
+    pub physics_load_percent: f64,
+    pub clock_drift_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +292,115 @@ impl MatchRegistry {
         self.matches.read().await.len()
     }
 
+    pub async fn telemetry(&self) -> Vec<RuntimeMatchTelemetry> {
+        self.matches
+            .read()
+            .await
+            .values()
+            .filter_map(|handle| handle.telemetry.lock().ok().map(|value| value.clone()))
+            .collect()
+    }
+
+    pub async fn active_user_count(&self) -> usize {
+        self.telemetry()
+            .await
+            .into_iter()
+            .map(|match_info| match_info.players)
+            .sum()
+    }
+
+    pub async fn is_player_kicked(&self, match_id: &str, user_id: &str) -> bool {
+        self.matches
+            .read()
+            .await
+            .get(match_id)
+            .and_then(|handle| {
+                handle
+                    .kicked_users
+                    .lock()
+                    .ok()
+                    .map(|users| users.contains(user_id))
+            })
+            .unwrap_or(false)
+    }
+
+    pub async fn is_match_stopped(&self, match_id: &str) -> bool {
+        self.matches
+            .read()
+            .await
+            .get(match_id)
+            .map(|handle| handle.shutdown.load(Ordering::Relaxed))
+            .unwrap_or(true)
+    }
+
+    pub async fn kick_player(&self, match_id: &str, user_id: &str) -> Result<(), String> {
+        let handle = self
+            .matches
+            .read()
+            .await
+            .get(match_id)
+            .cloned()
+            .ok_or_else(|| "Match is not running on this host.".to_string())?;
+        handle
+            .kicked_users
+            .lock()
+            .map_err(|_| "Match control lock is unavailable.".to_string())?
+            .insert(user_id.to_string());
+        let _ = handle
+            .input_tx
+            .send(MatchInput::PlayerLeave {
+                user_id: user_id.to_string(),
+            })
+            .await;
+        Ok(())
+    }
+
+    pub async fn stop_match(&self, match_id: &str) -> Result<(), String> {
+        let handle = self
+            .matches
+            .write()
+            .await
+            .remove(match_id)
+            .ok_or_else(|| "Match is not running on this host.".to_string())?;
+        handle.shutdown.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub async fn cleanup_idle(&self) -> usize {
+        let ids = self
+            .matches
+            .read()
+            .await
+            .iter()
+            .filter_map(|(id, handle)| {
+                handle
+                    .telemetry
+                    .lock()
+                    .ok()
+                    .filter(|telemetry| telemetry.players == 0)
+                    .map(|_| id.clone())
+            })
+            .collect::<Vec<_>>();
+        for id in &ids {
+            let _ = self.stop_match(id).await;
+        }
+        ids.len()
+    }
+
+    pub async fn reset_host(&self) -> usize {
+        let ids = self
+            .matches
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in &ids {
+            let _ = self.stop_match(id).await;
+        }
+        ids.len()
+    }
+
     pub async fn get_or_create_match(&self, match_id: &str) -> MatchHandle {
         let mut matches = self.matches.write().await;
         if let Some(handle) = matches.get(match_id) {
@@ -285,11 +412,19 @@ impl MatchRegistry {
         let handle = MatchHandle {
             input_tx,
             state_tx: state_tx.clone(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            kicked_users: Arc::new(Mutex::new(HashSet::new())),
+            telemetry: Arc::new(Mutex::new(RuntimeMatchTelemetry {
+                id: match_id.to_string(),
+                ..Default::default()
+            })),
         };
         matches.insert(match_id.to_string(), handle.clone());
         let match_id = match_id.to_string();
         let pack = self.pack.clone();
         let latest_state = Arc::new(Mutex::new(None::<Arc<MatchStateSync>>));
+        let telemetry = handle.telemetry.clone();
+        let publisher_shutdown = handle.shutdown.clone();
 
         let mut rules = RhaiEngine::new();
         for script in pack.manifest.scripts.values() {
@@ -318,7 +453,7 @@ impl MatchRegistry {
                 let mut next_process_sample = next_publish;
                 let mut process_sampler = ProcessSampler::default();
                 let mut process_metrics = ProcessMetrics::default();
-                loop {
+                while !publisher_shutdown.load(Ordering::Relaxed) {
                     let now = Instant::now();
                     if now < next_publish {
                         std::thread::sleep(next_publish - now);
@@ -343,6 +478,7 @@ impl MatchRegistry {
             })
             .expect("failed to start match publisher thread");
 
+        let simulation_shutdown = handle.shutdown.clone();
         std::thread::Builder::new()
             .name(format!("match-{match_id}"))
             .spawn(move || {
@@ -368,7 +504,7 @@ impl MatchRegistry {
                 let mut tick = 0_u64;
                 let mut recent_semantic_events = VecDeque::<String>::with_capacity(16);
 
-                loop {
+                while !simulation_shutdown.load(Ordering::Relaxed) {
                     let now = Instant::now();
                     if now < next_tick {
                         std::thread::sleep(next_tick - now);
@@ -429,6 +565,20 @@ impl MatchRegistry {
                     let match_clock = match_started.elapsed().as_secs_f64();
                     let simulation_clock = runtime.simulation_clock();
                     let clock_drift_ms = (simulation_clock - match_clock) * 1_000.0;
+
+                    if let Ok(mut current) = telemetry.lock() {
+                        *current = RuntimeMatchTelemetry {
+                            id: match_id.clone(),
+                            players: runtime.players().len(),
+                            objects: pack.arena.object_count,
+                            contacts: runtime.contacts(),
+                            tick,
+                            tps: ticks_per_second,
+                            physics_tick_ms,
+                            physics_load_percent,
+                            clock_drift_ms,
+                        };
+                    }
 
                     if state_tx.receiver_count() > 0 {
                         let state = MatchStateSync {

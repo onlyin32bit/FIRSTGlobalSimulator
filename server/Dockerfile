@@ -12,7 +12,7 @@ RUN cargo build --release --locked \
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes ca-certificates \
+    && apt-get install --no-install-recommends --yes ca-certificates dnsutils \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --create-home --uid 10001 fgsim
 

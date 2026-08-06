@@ -76,6 +76,58 @@ export type GameServer = {
 	updatedAt: string | Date;
 	disabledAt: string | Date | null;
 	health: 'online' | 'offline' | 'disabled';
+	runtime: {
+		platform?: string;
+		hostname?: string;
+		machineId?: string;
+		appName?: string;
+		region?: string;
+		privateIp?: string;
+		os?: string;
+		arch?: string;
+		cpuCores?: number;
+		memoryTotalBytes?: number;
+		cpuPercent?: number;
+		rssBytes?: number;
+		uptimeSeconds?: number;
+	} | null;
+};
+
+export type GameServerRuntimeMatch = {
+	id: string;
+	serverId: string;
+	matchId: string;
+	players: number;
+	objects: number;
+	contacts: number;
+	tick: number;
+	tps: number;
+	physicsTickMs: number;
+	physicsLoadPercent: number;
+	clockDriftMs: number;
+	updatedAt: string | Date;
+};
+
+export type GameServerInstance = {
+	id: string;
+	serverId: string;
+	machineId: string;
+	appName: string | null;
+	region: string | null;
+	privateIp: string | null;
+	discoveredAt: string | Date;
+	lastSeenAt: string | Date;
+};
+
+export type GameServerCommand = {
+	id: string;
+	type: string;
+	status: string;
+	payload: { matchId?: string; userId?: string };
+	error: string | null;
+	createdAt: string | Date;
+	deliveredAt: string | Date | null;
+	completedAt: string | Date | null;
 };
 
 export type LobbySlotId =
@@ -483,6 +535,22 @@ export class APIClient {
 				body: JSON.stringify(input)
 			}
 		);
+	}
+
+	getGameServer(id: string) {
+		return this.request<{ server: GameServer; instances: GameServerInstance[]; matches: GameServerRuntimeMatch[]; commands: GameServerCommand[] }>(
+			`/api/admin/game-servers/${encodeURIComponent(id)}`
+		);
+	}
+
+	commandGameServer(id: string, input: { type: 'kick_player' | 'stop_match' | 'clear_match' | 'cleanup_idle' | 'reset_host'; matchId?: string; userId?: string }) {
+		return this.request<{ command: GameServerCommand }>(`/api/admin/game-servers/${encodeURIComponent(id)}/commands`, {
+			method: 'POST', body: JSON.stringify(input)
+		});
+	}
+
+	deleteGameServer(id: string) {
+		return this.request<{ deleted: true }>(`/api/admin/game-servers/${encodeURIComponent(id)}`, { method: 'DELETE' });
 	}
 }
 

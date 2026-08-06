@@ -16,7 +16,8 @@ import {
   updateInvitationSchema,
   userRoleSchema,
   createGameServerSchema,
-  updateGameServerSchema
+  updateGameServerSchema,
+  gameServerCommandSchema
 } from '../lib/validation'
 import { requireAdmin } from '../middleware'
 import { jsonError, jsonSuccess } from '../responses'
@@ -28,7 +29,13 @@ const app = new Hono<{ Bindings: Bindings }>()
 function gameServerDto(server: typeof schema.gameServers.$inferSelect) {
   const lastHeartbeat = server.lastHeartbeatAt?.getTime() ?? 0
   const healthy = Boolean(server.lastHeartbeatAt && Date.now() - lastHeartbeat < 30_000 && !server.disabledAt)
-  return { ...server, keyHash: undefined, health: healthy ? 'online' : server.disabledAt ? 'disabled' : 'offline' }
+  return {
+    ...server,
+    keyHash: undefined,
+    runtime: server.runtimeJson ? JSON.parse(server.runtimeJson) : null,
+    runtimeJson: undefined,
+    health: healthy ? 'online' : server.disabledAt ? 'disabled' : 'offline'
+  }
 }
 
 function invitationDto(invitation: typeof schema.invitations.$inferSelect) {
@@ -402,6 +409,59 @@ app.patch('/game-servers/:id', async (c) => {
   const updated = await db.update(schema.gameServers).set({ ...body, origin: body.origin?.replace(/\/$/, ''), disabledAt: body.status === 'disabled' ? (current.disabledAt ?? now) : body.status ? null : current.disabledAt, updatedAt: now }).where(eq(schema.gameServers.id, id)).returning()
   await writeAdminAudit(c.env, { actorUserId: session.user.id, action: body.status === 'disabled' ? 'game_server.disabled' : 'game_server.updated', targetType: 'game_server', targetId: id, metadata: { name: current.name, status: body.status ?? current.status } })
   return jsonSuccess(c, { server: gameServerDto(updated[0]) })
+})
+
+app.get('/game-servers/:id', async (c) => {
+  const session = await requireAdmin(c)
+  if (!session) return jsonError(c, 403, 'AUTH_FAILED', 'Administrator access is required.')
+  const db = drizzle(c.env.DB, { schema })
+  const id = c.req.param('id')
+  const server = await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, id) })
+  if (!server) return jsonError(c, 404, 'VALIDATION_ERROR', 'Game server not found.')
+  const [instances, matches, commands] = await Promise.all([
+    db.select().from(schema.gameServerInstances).where(eq(schema.gameServerInstances.serverId, id)).orderBy(desc(schema.gameServerInstances.lastSeenAt)),
+    db.select().from(schema.gameServerRuntimeMatches).where(eq(schema.gameServerRuntimeMatches.serverId, id)).orderBy(desc(schema.gameServerRuntimeMatches.updatedAt)),
+    db.select().from(schema.gameServerCommands).where(eq(schema.gameServerCommands.serverId, id)).orderBy(desc(schema.gameServerCommands.createdAt)).limit(30)
+  ])
+  return jsonSuccess(c, { server: gameServerDto(server), instances, matches, commands: commands.map((command) => ({ ...command, payload: JSON.parse(command.payload) })) })
+})
+
+app.post('/game-servers/:id/commands', async (c) => {
+  const session = await requireAdmin(c)
+  if (!session) return jsonError(c, 403, 'AUTH_FAILED', 'Administrator access is required.')
+  const body = await parseJson(c, gameServerCommandSchema)
+  if (isResponse(body)) return body
+  const id = c.req.param('id')
+  const db = drizzle(c.env.DB, { schema })
+  const server = await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, id) })
+  if (!server) return jsonError(c, 404, 'VALIDATION_ERROR', 'Game server not found.')
+  if (server.disabledAt) return jsonError(c, 409, 'VALIDATION_ERROR', 'Enable this game server before sending control commands.')
+  const now = new Date()
+  const command = { id: crypto.randomUUID(), serverId: id, type: body.type, payload: JSON.stringify({ matchId: body.matchId, userId: body.userId }), status: 'pending', error: null, createdAt: now, deliveredAt: null, completedAt: null }
+  await db.insert(schema.gameServerCommands).values(command)
+  if (body.type === 'stop_match' && body.matchId) {
+    await db.update(schema.matches).set({ status: 'CANCELLED', cancelledAt: now, cancelReason: 'Stopped by an administrator.', updatedAt: now })
+      .where(and(eq(schema.matches.id, body.matchId), eq(schema.matches.gameServerId, id)))
+  }
+  await writeAdminAudit(c.env, { actorUserId: session.user.id, action: 'game_server.commanded', targetType: 'game_server', targetId: id, metadata: { type: body.type, matchId: body.matchId ?? null, userId: body.userId ?? null } })
+  return jsonSuccess(c, { command: { ...command, payload: JSON.parse(command.payload) } }, 202)
+})
+
+app.delete('/game-servers/:id', async (c) => {
+  const session = await requireAdmin(c)
+  if (!session) return jsonError(c, 403, 'AUTH_FAILED', 'Administrator access is required.')
+  const id = c.req.param('id')
+  const db = drizzle(c.env.DB, { schema })
+  const server = await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, id) })
+  if (!server) return jsonError(c, 404, 'VALIDATION_ERROR', 'Game server not found.')
+  const now = new Date()
+  await db.update(schema.matches).set({ gameServerId: null, status: 'CANCELLED', cancelledAt: now, cancelReason: 'Assigned game server was deleted.', updatedAt: now }).where(eq(schema.matches.gameServerId, id))
+  await db.delete(schema.gameServerRuntimeMatches).where(eq(schema.gameServerRuntimeMatches.serverId, id))
+  await db.delete(schema.gameServerInstances).where(eq(schema.gameServerInstances.serverId, id))
+  await db.delete(schema.gameServerCommands).where(eq(schema.gameServerCommands.serverId, id))
+  await db.delete(schema.gameServers).where(eq(schema.gameServers.id, id))
+  await writeAdminAudit(c.env, { actorUserId: session.user.id, action: 'game_server.deleted', targetType: 'game_server', targetId: id, metadata: { name: server.name, origin: server.origin } })
+  return jsonSuccess(c, { deleted: true })
 })
 
 app.get('/audit-log', async (c) => {

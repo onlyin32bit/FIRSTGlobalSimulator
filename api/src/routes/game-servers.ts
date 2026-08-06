@@ -1,5 +1,5 @@
 import { Hono, type Context } from 'hono'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { verify } from 'hono/jwt'
 import * as schema from '../db/schema'
@@ -29,6 +29,13 @@ app.post('/heartbeat', async (c) => {
   if (!server || server.disabledAt) return jsonError(c, 401, 'AUTH_FAILED', 'The game server key is invalid or disabled.')
   const db = drizzle(c.env.DB, { schema })
   const now = new Date()
+  for (const result of body.commandResults ?? []) {
+    await db.update(schema.gameServerCommands).set({
+      status: result.ok ? 'completed' : 'failed',
+      error: result.ok ? null : (result.error ?? 'Host rejected the command.'),
+      completedAt: now
+    }).where(and(eq(schema.gameServerCommands.id, result.id), eq(schema.gameServerCommands.serverId, server.id)))
+  }
   const updated = await db.update(schema.gameServers).set({
     activeUsers: body.activeUsers,
     activeMatches: body.activeMatches,
@@ -37,9 +44,54 @@ app.post('/heartbeat', async (c) => {
     slots: body.slots ?? server.slots,
     status: 'online',
     lastHeartbeatAt: now,
-    updatedAt: now
+    updatedAt: now,
+    runtimeJson: body.runtime ? JSON.stringify(body.runtime) : server.runtimeJson
   }).where(eq(schema.gameServers.id, server.id)).returning({ id: schema.gameServers.id, status: schema.gameServers.status })
-  return jsonSuccess(c, { server: updated[0], heartbeatAt: now })
+
+  for (const instance of body.instances ?? []) {
+    await db.insert(schema.gameServerInstances).values({
+      id: `${server.id}:${instance.machineId}`,
+      serverId: server.id,
+      machineId: instance.machineId,
+      appName: instance.appName ?? null,
+      region: instance.region ?? null,
+      privateIp: instance.privateIp ?? null,
+      discoveredAt: now,
+      lastSeenAt: now
+    }).onConflictDoUpdate({
+      target: [schema.gameServerInstances.serverId, schema.gameServerInstances.machineId],
+      set: { appName: instance.appName ?? null, region: instance.region ?? null, privateIp: instance.privateIp ?? null, lastSeenAt: now }
+    })
+  }
+  if (body.matches) {
+    await db.delete(schema.gameServerRuntimeMatches).where(eq(schema.gameServerRuntimeMatches.serverId, server.id))
+    if (body.matches.length) await db.insert(schema.gameServerRuntimeMatches).values(body.matches.map((match) => ({
+      id: `${server.id}:${match.id}`,
+      serverId: server.id,
+      matchId: match.id,
+      players: match.players,
+      objects: match.objects,
+      contacts: match.contacts,
+      tick: match.tick,
+      tps: match.tps,
+      physicsTickMs: match.physicsTickMs,
+      physicsLoadPercent: match.physicsLoadPercent,
+      clockDriftMs: match.clockDriftMs,
+      updatedAt: now
+    })))
+  }
+  const commands = await db.select().from(schema.gameServerCommands)
+    .where(and(eq(schema.gameServerCommands.serverId, server.id), eq(schema.gameServerCommands.status, 'pending')))
+    .limit(50)
+  for (const command of commands) {
+    await db.update(schema.gameServerCommands).set({ status: 'delivered', deliveredAt: now })
+      .where(and(eq(schema.gameServerCommands.id, command.id), eq(schema.gameServerCommands.status, 'pending')))
+  }
+  return jsonSuccess(c, {
+    server: updated[0],
+    heartbeatAt: now,
+    commands: commands.map((command) => ({ id: command.id, type: command.type, ...JSON.parse(command.payload) }))
+  })
 })
 
 /**
