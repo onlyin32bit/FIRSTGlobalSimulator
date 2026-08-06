@@ -387,6 +387,15 @@ impl RhaiEngine {
                     &intake_restitution,
                     "robot.intake_restitution_curve",
                 )?,
+                storage_capacity: nested_number(&robot, "robot", "storage_capacity")?.max(0.0)
+                    as usize,
+                intake_rate_bps: nested_number(&robot, "robot", "intake_rate_bps")?,
+                outtake_rate_bps: nested_number(&robot, "robot", "outtake_rate_bps")?,
+                outtake_velocity_mps: nested_number(&robot, "robot", "outtake_velocity_mps")?,
+                outtake_angle_deg: nested_number(&robot, "robot", "outtake_angle_deg")?,
+                flywheel_width_m: nested_number(&robot, "robot", "flywheel_width_m")?,
+                outtake_forward_offset_m: nested_number(&robot, "robot", "outtake_forward_offset_m")?,
+                outtake_height_m: nested_number(&robot, "robot", "outtake_height_m")?,
             },
             goal_wall: crate::game::pack_loader::SurfacePhysicsConfig {
                 material: nested_string(&goal_wall, "goal_wall", "material")?,

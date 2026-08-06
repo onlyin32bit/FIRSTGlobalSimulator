@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::info;
 
-use super::match_runtime::{MatchRuntime, PlayerSnapshot};
+use super::match_runtime::{MatchRuntime, PlayerSnapshot, ScoreState};
 use super::pack_loader::{ArenaConfig, GamePackMetadata};
 use super::rhai_engine::RhaiEngine;
-use super::sphere_runtime::{SphereRuntime, StepMetrics};
+use super::sphere_runtime::{MechSpec, SphereRuntime, StepMetrics};
 
 pub struct MatchRegistry {
     matches: RwLock<HashMap<String, MatchHandle>>,
@@ -55,8 +55,17 @@ pub enum MatchInput {
         move_x: f32,
         move_z: f32,
         intake_power: f32,
+        outtake_power: f32,
         sequence: u64,
     },
+    PlayerMech {
+        user_id: String,
+        mech: MechSpec,
+    },
+    /// Keep simulating past the 150 s clock so teams can keep practising with
+    /// the same field. Scoring stays disabled while practice continues.
+    ContinuePractice,
+    EndPractice,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +80,9 @@ pub struct MatchStateSync {
     pub object_positions: Vec<[f32; 3]>,
     pub contacts: usize,
     pub match_clock: f64,
+    pub match_duration_seconds: f64,
+    pub pre_match_remaining_seconds: f64,
+    pub match_running: bool,
     pub simulation_clock: f64,
     pub physics_tick_ms: f64,
     pub physics_load_percent: f64,
@@ -79,7 +91,39 @@ pub struct MatchStateSync {
     pub clock_drift_ms: f64,
     pub step_metrics: StepMetrics,
     pub physics: PhysicsSync,
+    pub drive: DriveSync,
     pub semantic_events: Vec<String>,
+    pub score: ScoreState,
+    /// True while physics keeps running past the match clock for practice.
+    pub practice_running: bool,
+}
+
+/// Drivetrain model constants the client needs to reproduce the server's
+/// `apply_player_drive` locally for client-side prediction. Sent once per
+/// snapshot as its own protocol section so older readers skip it unchanged.
+#[derive(Debug, Clone, Copy)]
+pub struct DriveSync {
+    pub max_acceleration_mps2: f32,
+    pub max_deceleration_mps2: f32,
+    pub max_turn_rate_radps: f32,
+    pub max_angular_acceleration_radps2: f32,
+    pub lateral_grip_mps2: f32,
+    pub traction_friction: f32,
+    pub track_width_m: f32,
+}
+
+impl Default for DriveSync {
+    fn default() -> Self {
+        Self {
+            max_acceleration_mps2: 3.0,
+            max_deceleration_mps2: 4.0,
+            max_turn_rate_radps: 2.5,
+            max_angular_acceleration_radps2: 6.0,
+            lateral_grip_mps2: 6.0,
+            traction_friction: 0.85,
+            track_width_m: 0.4,
+        }
+    }
 }
 
 enum RuntimeBackend {
@@ -123,10 +167,20 @@ impl RuntimeBackend {
         }
     }
 
-    fn set_player_input(&mut self, id: &str, x: f32, z: f32, intake: f32, sequence: u64) {
+    fn set_player_input(
+        &mut self,
+        id: &str,
+        x: f32,
+        z: f32,
+        intake: f32,
+        outtake: f32,
+        sequence: u64,
+    ) {
         match self {
             Self::Rapier(runtime) => runtime.set_player_input(id, x, z, sequence),
-            Self::Sphere(runtime) => runtime.set_player_input(id, x, z, intake, sequence),
+            Self::Sphere(runtime) => {
+                runtime.set_player_input(id, x, z, intake, outtake, sequence)
+            }
         }
     }
 
@@ -140,6 +194,49 @@ impl RuntimeBackend {
                 runtime.apply_player_drive(arena, dt as f32);
                 runtime.tick(dt);
             }
+        }
+    }
+
+    fn set_player_mech(&mut self, id: &str, mech: MechSpec) {
+        if let Self::Sphere(runtime) = self {
+            runtime.set_player_mech(id, mech);
+        }
+    }
+
+    /// Remove a game piece from play after a scoring trigger. The ball is
+    /// deactivated so it can never be scored twice.
+    fn contain_ball(&mut self, entity_id: &str) -> bool {
+        match self {
+            Self::Rapier(_) => false,
+            Self::Sphere(runtime) => runtime.contain_ball(entity_id),
+        }
+    }
+
+    /// Accumulate a single scored outcome into the runtime score ledger.
+    fn apply_score(&mut self, team: &str, category: &str, points: i32) {
+        let score = match self {
+            Self::Rapier(runtime) => &mut runtime.score_state,
+            Self::Sphere(runtime) => &mut runtime.score_state,
+        };
+        match team {
+            "blue" => score.blue_score += points,
+            "red" => score.red_score += points,
+            _ => score.global_score += points,
+        }
+        *score.breakdown.entry(category.to_string()).or_insert(0) += points;
+    }
+
+    fn score_state(&self) -> ScoreState {
+        match self {
+            Self::Rapier(runtime) => runtime.score_state.clone(),
+            Self::Sphere(runtime) => runtime.score_state.clone(),
+        }
+    }
+
+    fn begin_match(&mut self) {
+        match self {
+            Self::Rapier(runtime) => runtime.begin_match(),
+            Self::Sphere(runtime) => runtime.begin_match(),
         }
     }
 
@@ -230,6 +327,14 @@ pub struct PhysicsSync {
     pub max_drive_force_n: f32,
     pub max_drive_power_w: f32,
     pub max_brake_force_n: f32,
+    pub storage_capacity: f32,
+    pub intake_rate_bps: f32,
+    pub outtake_rate_bps: f32,
+    pub outtake_velocity_mps: f32,
+    pub outtake_angle_deg: f32,
+    pub flywheel_width_m: f32,
+    pub outtake_forward_offset_m: f32,
+    pub outtake_height_m: f32,
 }
 
 impl From<&ArenaConfig> for PhysicsSync {
@@ -276,6 +381,14 @@ impl From<&ArenaConfig> for PhysicsSync {
             max_drive_force_n: arena.robot.max_drive_force_n,
             max_drive_power_w: arena.robot.max_drive_power_w,
             max_brake_force_n: arena.robot.max_brake_force_n,
+            storage_capacity: arena.robot.storage_capacity as f32,
+            intake_rate_bps: arena.robot.intake_rate_bps,
+            outtake_rate_bps: arena.robot.outtake_rate_bps,
+            outtake_velocity_mps: arena.robot.outtake_velocity_mps,
+            outtake_angle_deg: arena.robot.outtake_angle_deg,
+            flywheel_width_m: arena.robot.flywheel_width_m,
+            outtake_forward_offset_m: arena.robot.outtake_forward_offset_m,
+            outtake_height_m: arena.robot.outtake_height_m,
         }
     }
 }
@@ -497,7 +610,16 @@ impl MatchRegistry {
                 let tick_duration = Duration::from_secs_f64(1.0 / 60.0);
                 let tick_budget_ms = tick_duration.as_secs_f64() * 1_000.0;
                 let mut next_tick = Instant::now();
-                let match_started = next_tick;
+                // A short, server-owned staging phase gives every redirected
+                // client the same 5→1 presentation and prevents movement or
+                // game-piece release before the match actually starts.
+                const PRE_MATCH_COUNTDOWN: Duration = Duration::from_secs(5);
+                const MATCH_DURATION: Duration = Duration::from_secs(150);
+                let match_created = next_tick;
+                let match_started = match_created + PRE_MATCH_COUNTDOWN;
+                let match_ends = match_started + MATCH_DURATION;
+                let mut live_phase_entered = false;
+                let mut practice_continue = false;
                 let mut tps_window_started = next_tick;
                 let mut ticks_in_tps_window = 0_u64;
                 let mut ticks_per_second = 60.0;
@@ -529,23 +651,51 @@ impl MatchRegistry {
                                 move_x,
                                 move_z,
                                 intake_power,
+                                outtake_power,
                                 sequence,
                             } => runtime.set_player_input(
                                 &user_id,
                                 move_x,
                                 move_z,
                                 intake_power,
+                                outtake_power,
                                 sequence,
                             ),
+                            MatchInput::PlayerMech { user_id, mech } => {
+                                runtime.set_player_mech(&user_id, mech)
+                            }
+                            MatchInput::ContinuePractice => practice_continue = true,
+                            MatchInput::EndPractice => practice_continue = false,
                         }
                     }
 
+                    let clock_now = Instant::now();
+                    if !live_phase_entered && clock_now >= match_started {
+                        runtime.begin_match();
+                        live_phase_entered = true;
+                    }
+                    let match_running = live_phase_entered && clock_now < match_ends;
                     let physics_started = Instant::now();
-                    runtime.step(&pack.arena, 1.0 / 60.0);
+                    if match_running || practice_continue {
+                        runtime.step(&pack.arena, 1.0 / 60.0);
+                    }
                     for event in runtime.drain_semantic_events() {
                         let mut label = format!("{} {} ← {}", event.kind, event.target_id, event.entity_id);
-                        for outcome in rules.on_trigger_enter(&event.target_id, &event.entity_id) {
-                            label.push_str(&format!(" · {} {}/{} +{}", outcome.kind, outcome.team, outcome.category, outcome.points));
+                        if match_running {
+                            let outcomes = rules.on_trigger_enter(&event.target_id, &event.entity_id);
+                            for outcome in outcomes {
+                                label.push_str(&format!(" · {} {}/{} +{}", outcome.kind, outcome.team, outcome.category, outcome.points));
+                                // Native scoring: the authored rule's outcome
+                                // is the source of truth for team, category and
+                                // points, so tweaking scoring.rhai rebalances a
+                                // match without a rebuild.
+                                runtime.apply_score(&outcome.team, &outcome.category, outcome.points as i32);
+                                // SU containment and EXT extinguishing remove the
+                                // piece from the field entirely (never re-scored).
+                                if outcome.category == "SU" || outcome.category == "EXT" {
+                                    runtime.contain_ball(&event.entity_id);
+                                }
+                            }
                         }
                         recent_semantic_events.push_back(label);
                         while recent_semantic_events.len() > 16 {
@@ -562,9 +712,25 @@ impl MatchRegistry {
                         ticks_in_tps_window = 0;
                         tps_window_started = physics_started;
                     }
-                    let match_clock = match_started.elapsed().as_secs_f64();
+                    let match_clock = match_ends
+                        .checked_duration_since(clock_now)
+                        .unwrap_or_default()
+                        .as_secs_f64();
+                    let pre_match_remaining_seconds = match_started
+                        .checked_duration_since(clock_now)
+                        .unwrap_or_default()
+                        .as_secs_f64();
                     let simulation_clock = runtime.simulation_clock();
-                    let clock_drift_ms = (simulation_clock - match_clock) * 1_000.0;
+                    let elapsed_live_seconds = clock_now
+                        .checked_duration_since(match_started)
+                        .unwrap_or_default()
+                        .as_secs_f64()
+                        .min(MATCH_DURATION.as_secs_f64());
+                    let clock_drift_ms = if match_running {
+                        (simulation_clock - elapsed_live_seconds) * 1_000.0
+                    } else {
+                        0.0
+                    };
 
                     if let Ok(mut current) = telemetry.lock() {
                         *current = RuntimeMatchTelemetry {
@@ -592,6 +758,9 @@ impl MatchRegistry {
                             object_positions: runtime.positions(),
                             contacts: runtime.contacts(),
                             match_clock,
+                            match_duration_seconds: MATCH_DURATION.as_secs_f64(),
+                            pre_match_remaining_seconds,
+                            match_running,
                             simulation_clock,
                             physics_tick_ms,
                             physics_load_percent,
@@ -600,7 +769,21 @@ impl MatchRegistry {
                             clock_drift_ms,
                             step_metrics: runtime.step_metrics(),
                             physics: physics.clone(),
+                            drive: DriveSync {
+                                max_acceleration_mps2: pack.arena.robot.max_acceleration_mps2,
+                                max_deceleration_mps2: pack.arena.robot.max_deceleration_mps2,
+                                max_turn_rate_radps: pack.arena.robot.max_turn_rate_radps,
+                                max_angular_acceleration_radps2: pack
+                                    .arena
+                                    .robot
+                                    .max_angular_acceleration_radps2,
+                                lateral_grip_mps2: pack.arena.robot.lateral_grip_mps2,
+                                traction_friction: pack.arena.robot.traction_friction,
+                                track_width_m: pack.arena.robot.track_width_m,
+                            },
                             semantic_events: recent_semantic_events.iter().cloned().collect(),
+                            score: runtime.score_state(),
+                            practice_running: practice_continue,
                         };
                         if let Ok(mut slot) = latest_state.lock() {
                             *slot = Some(Arc::new(state));
@@ -625,10 +808,12 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
     const OBJECTS: u16 = 5;
     const PHYSICS: u16 = 6;
     const SEMANTIC_EVENTS: u16 = 7;
+    const DRIVE: u16 = 8;
+    const SCORE: u16 = 9;
     let mut output = Vec::with_capacity(1024 + state.object_positions.len() * 12);
     output.extend_from_slice(b"FGS1");
     put_u16(&mut output, 1);
-    put_u16(&mut output, 2);
+    put_u16(&mut output, 4);
     put_u16(&mut output, 1); // StateSnapshot
     put_u16(&mut output, 0);
     put_u32(&mut output, 0);
@@ -645,6 +830,10 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
         put_f64(bytes, state.match_clock);
         put_f64(bytes, state.simulation_clock);
         put_f64(bytes, state.clock_drift_ms);
+        put_f64(bytes, state.match_duration_seconds);
+        put_f64(bytes, state.pre_match_remaining_seconds);
+        put_u8(bytes, u8::from(state.match_running));
+        put_u8(bytes, u8::from(state.practice_running));
     });
     section(&mut output, METRICS, |bytes| {
         put_f64(bytes, state.physics_tick_ms);
@@ -681,6 +870,8 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
             ] {
                 put_f32(bytes, value);
             }
+            put_u32(bytes, player.stored_balls as u32);
+            put_u32(bytes, player.capacity as u32);
         }
     });
     section(&mut output, OBJECTS, |bytes| {
@@ -741,11 +932,46 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
         ] {
             put_f32(bytes, value);
         }
+        for value in [
+            state.physics.storage_capacity,
+            state.physics.intake_rate_bps,
+            state.physics.outtake_rate_bps,
+            state.physics.outtake_velocity_mps,
+            state.physics.outtake_angle_deg,
+            state.physics.flywheel_width_m,
+            state.physics.outtake_forward_offset_m,
+            state.physics.outtake_height_m,
+        ] {
+            put_f32(bytes, value);
+        }
+    });
+    section(&mut output, SCORE, |bytes| {
+        put_i32(bytes, state.score.blue_score);
+        put_i32(bytes, state.score.red_score);
+        put_i32(bytes, state.score.global_score);
+        put_u32(bytes, state.score.breakdown.len() as u32);
+        for (category, points) in &state.score.breakdown {
+            put_string(bytes, category);
+            put_i32(bytes, *points);
+        }
     });
     section(&mut output, SEMANTIC_EVENTS, |bytes| {
         put_u16(bytes, state.semantic_events.len() as u16);
         for event in &state.semantic_events {
             put_string(bytes, event);
+        }
+    });
+    section(&mut output, DRIVE, |bytes| {
+        for value in [
+            state.drive.max_acceleration_mps2,
+            state.drive.max_deceleration_mps2,
+            state.drive.max_turn_rate_radps,
+            state.drive.max_angular_acceleration_radps2,
+            state.drive.lateral_grip_mps2,
+            state.drive.traction_friction,
+            state.drive.track_width_m,
+        ] {
+            put_f32(bytes, value);
         }
     });
     let payload_len = (output.len() - 16) as u32;
@@ -832,6 +1058,9 @@ fn put_u16(output: &mut Vec<u8>, value: u16) {
 fn put_u8(output: &mut Vec<u8>, value: u8) {
     output.push(value);
 }
+fn put_i32(output: &mut Vec<u8>, value: i32) {
+    output.extend_from_slice(&value.to_le_bytes());
+}
 fn put_u32(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_le_bytes());
 }
@@ -867,6 +1096,9 @@ mod protocol_tests {
             object_positions: vec![[1.0, 2.0, 3.0]; 1000],
             contacts: 2,
             match_clock: 1.0,
+            match_duration_seconds: 150.0,
+            pre_match_remaining_seconds: 0.0,
+            match_running: true,
             simulation_clock: 1.0,
             physics_tick_ms: 2.0,
             physics_load_percent: 12.0,
@@ -880,12 +1112,15 @@ mod protocol_tests {
                     .unwrap()
                     .arena,
             ),
+            drive: DriveSync::default(),
             semantic_events: Vec::new(),
+            score: ScoreState::default(),
+            practice_running: false,
         };
         let encoded = encode_state(&state, ProcessMetrics::default());
         assert_eq!(&encoded[..4], b"FGS1");
         assert_eq!(u16::from_le_bytes(encoded[4..6].try_into().unwrap()), 1);
-        assert_eq!(u16::from_le_bytes(encoded[6..8].try_into().unwrap()), 2);
+        assert_eq!(u16::from_le_bytes(encoded[6..8].try_into().unwrap()), 4);
         assert_eq!(u16::from_le_bytes(encoded[8..10].try_into().unwrap()), 1);
         assert_eq!(
             u32::from_le_bytes(encoded[12..16].try_into().unwrap()) as usize,

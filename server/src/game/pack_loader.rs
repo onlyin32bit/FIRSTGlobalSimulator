@@ -258,6 +258,23 @@ pub struct RobotPhysicsConfig {
     pub intake_friction: f32,
     pub intake_normal_force_n: f32,
     pub intake_restitution_curve: RestitutionCurveConfig,
+    /// Ball storage capacity of the on-robot hopper (0 = no storage, balls
+    /// simply deflect off the chassis as before).
+    pub storage_capacity: usize,
+    /// Max balls pulled into storage per second while intake is powered.
+    pub intake_rate_bps: f32,
+    /// Max balls ejected per second while outtake is powered.
+    pub outtake_rate_bps: f32,
+    /// Flywheel launch speed in metres per second.
+    pub outtake_velocity_mps: f32,
+    /// Flywheel launch pitch angle above horizontal, in degrees.
+    pub outtake_angle_deg: f32,
+    /// Width of the flywheel mouth. 3–4 WILDFIRE (100 mm) wide ≈ 0.30–0.40 m.
+    pub flywheel_width_m: f32,
+    /// Forward offset of the flywheel exit from the chassis centre.
+    pub outtake_forward_offset_m: f32,
+    /// Height of the flywheel exit above the floor.
+    pub outtake_height_m: f32,
 }
 
 pub struct PackLoader {

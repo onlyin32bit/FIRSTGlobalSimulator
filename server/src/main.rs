@@ -220,7 +220,25 @@ enum ClientMessage {
         move_z: f32,
         #[serde(default)]
         intake_power: f32,
+        #[serde(default)]
+        outtake_power: f32,
     },
+    RobotSpecs {
+        #[serde(default)]
+        capacity: Option<usize>,
+        #[serde(default)]
+        intake_rate_bps: Option<f32>,
+        #[serde(default)]
+        outtake_rate_bps: Option<f32>,
+        #[serde(default)]
+        outtake_velocity_mps: Option<f32>,
+        #[serde(default)]
+        outtake_angle_deg: Option<f32>,
+        #[serde(default)]
+        flywheel_width_m: Option<f32>,
+    },
+    ContinuePractice,
+    EndPractice,
     Ping {
         nonce: u64,
     },
@@ -527,8 +545,25 @@ async fn handle_socket(
             },
             message = receiver.next() => match message {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
-                    Ok(ClientMessage::Input { sequence, move_x, move_z, intake_power }) => {
-                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, intake_power, sequence }).await;
+                    Ok(ClientMessage::Input { sequence, move_x, move_z, intake_power, outtake_power }) => {
+                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, intake_power, outtake_power, sequence }).await;
+                    }
+                    Ok(ClientMessage::RobotSpecs { capacity, intake_rate_bps, outtake_rate_bps, outtake_velocity_mps, outtake_angle_deg, flywheel_width_m }) => {
+                        let _ = match_handle.input_tx.send(MatchInput::PlayerMech { user_id: claims.sub.clone(), mech: game::sphere_runtime::MechSpec {
+                            capacity,
+                            intake_rate_bps,
+                            outtake_rate_bps,
+                            outtake_velocity_mps,
+                            outtake_angle_deg,
+                            flywheel_width_m,
+                            intake_surface_speed_mps: None,
+                        } }).await;
+                    }
+                    Ok(ClientMessage::ContinuePractice) => {
+                        let _ = match_handle.input_tx.send(MatchInput::ContinuePractice).await;
+                    }
+                    Ok(ClientMessage::EndPractice) => {
+                        let _ = match_handle.input_tx.send(MatchInput::EndPractice).await;
                     }
                     Ok(ClientMessage::Ping { nonce }) => {
                         if let Ok(message) = serde_json::to_string(&PongMessage { r#type: "pong", nonce })

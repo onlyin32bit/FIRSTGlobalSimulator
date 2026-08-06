@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use super::match_runtime::{MatchContext, MatchPhase, PlayerSnapshot, ScoreState};
@@ -42,6 +42,9 @@ struct Ball {
     on_ramp: bool,
     active: bool,
     release_at_seconds: f32,
+    /// Whether the EXT dispenser has poured this piece. A released piece that
+    /// is later captured or contained must never be poured again.
+    released: bool,
 }
 
 struct PlayerBody {
@@ -54,8 +57,68 @@ struct PlayerBody {
     move_x: f32,
     move_z: f32,
     intake_power: f32,
+    outtake_power: f32,
     sequence: u64,
     color: &'static str,
+    /// Outward normal of a static surface touched during the previous solver
+    /// step. This keeps the drivetrain from turning shallow wall contact into
+    /// a complete stop on the following tick.
+    wall_contact_normal: Option<Vec3>,
+    /// FIFO of ball indices captured into the on-robot hopper. Popping feeds
+    /// the flywheel so contained (scored) balls are never recycled.
+    stored: VecDeque<usize>,
+    /// Fractional outtake accumulator so slow rates don't lose partial balls.
+    outtake_accumulator: f32,
+    /// Fractional intake accumulator (capture is rate-limited too).
+    intake_accumulator: f32,
+    /// Per-player adjustable mech spec overrides (capacity, flywheel, rates).
+    mech: MechSpec,
+}
+
+/// Adjustable robot mechanic spec. Unset fields fall back to the arena pack.
+#[derive(Debug, Clone, Default)]
+pub struct MechSpec {
+    pub capacity: Option<usize>,
+    pub intake_rate_bps: Option<f32>,
+    pub intake_surface_speed_mps: Option<f32>,
+    pub outtake_rate_bps: Option<f32>,
+    pub outtake_velocity_mps: Option<f32>,
+    pub outtake_angle_deg: Option<f32>,
+    pub flywheel_width_m: Option<f32>,
+}
+
+impl MechSpec {
+    pub fn capacity_with(&self, base: usize) -> usize {
+        self.capacity.unwrap_or(base)
+    }
+}
+
+/// Effective robot config = arena pack defaults merged with the player's
+/// adjustable mechanic overrides.
+fn effective_robot<'a>(base: &'a RobotPhysicsConfig, mech: &MechSpec) -> RobotPhysicsConfig {
+    let mut robot = base.clone();
+    if let Some(capacity) = mech.capacity {
+        robot.storage_capacity = capacity;
+    }
+    if let Some(rate) = mech.intake_rate_bps {
+        robot.intake_rate_bps = rate;
+    }
+    if let Some(speed) = mech.intake_surface_speed_mps {
+        robot.intake_surface_speed_mps = speed;
+    }
+    if let Some(rate) = mech.outtake_rate_bps {
+        robot.outtake_rate_bps = rate;
+    }
+    if let Some(velocity) = mech.outtake_velocity_mps {
+        robot.outtake_velocity_mps = velocity;
+    }
+    if let Some(angle) = mech.outtake_angle_deg {
+        robot.outtake_angle_deg = angle;
+    }
+    if let Some(width) = mech.flywheel_width_m {
+        robot.flywheel_width_m = width;
+    }
+    robot
 }
 
 /// A narrow, deterministic physics backend for the simulator's dominant case:
@@ -96,7 +159,7 @@ impl SphereRuntime {
                 game_pack_version: "1.0.0".into(),
                 engine_version: "0.1.0".into(),
                 match_seed,
-                phase: MatchPhase::Teleop,
+                phase: MatchPhase::PreMatch,
                 clock: 0.0,
             },
             score_state: ScoreState::default(),
@@ -122,8 +185,20 @@ impl SphereRuntime {
 
     pub fn create_test_arena(&mut self, arena: &ArenaConfig) {
         self.create_field_arena(arena, &FieldDefinition::default());
+        self.context.phase = MatchPhase::Teleop;
         self.ball_release_elapsed = Some(arena.spawn_release_seconds.max(0.0));
         self.release_queued_balls(arena);
+    }
+
+    /// Enter the live phase. Field packs begin with their game pieces queued
+    /// inside the semantic dispenser; no ball is released until this method is
+    /// called by the authoritative match clock.
+    pub fn begin_match(&mut self) {
+        if self.context.phase != MatchPhase::PreMatch {
+            return;
+        }
+        self.context.phase = MatchPhase::Teleop;
+        self.ball_release_elapsed = Some(0.0);
     }
 
     pub fn create_field_arena(&mut self, arena: &ArenaConfig, field: &FieldDefinition) {
@@ -160,6 +235,7 @@ impl SphereRuntime {
                 on_ramp: false,
                 active: false,
                 release_at_seconds: arena.spawn_release_seconds.max(0.0) * index as f32 / count,
+                released: false,
             });
         }
         self.trigger_inside =
@@ -185,7 +261,7 @@ impl SphereRuntime {
 
     /// Release queued balls from the semantic EXT dispenser. The trajectory
     /// points into the field centre with a small deterministic fan, so every
-    /// client observes the same three-second pour without random state.
+    /// client observes the same four-second pour without random state.
     fn release_queued_balls(&mut self, arena: &ArenaConfig) {
         let Some(elapsed) = self.ball_release_elapsed else {
             return;
@@ -201,7 +277,7 @@ impl SphereRuntime {
         ];
         let lateral = [-forward[2], 0.0, forward[0]];
         for (index, ball) in self.balls.iter_mut().enumerate() {
-            if ball.active || ball.release_at_seconds > elapsed {
+            if ball.released || ball.release_at_seconds > elapsed {
                 continue;
             }
             // Deterministic, hash-like variation prevents the regular
@@ -232,6 +308,7 @@ impl SphereRuntime {
             ball.angular_velocity = [0.0, lateral_noise * 8.0, 0.0];
             ball.quiet_ticks = 0;
             ball.sleeping = false;
+            ball.released = true;
             ball.active = true;
         }
     }
@@ -246,9 +323,6 @@ impl SphereRuntime {
     ) {
         if self.players.contains_key(&user_id) {
             return;
-        }
-        if self.ball_release_elapsed.is_none() {
-            self.ball_release_elapsed = Some(0.0);
         }
         let slot = self.players.len();
         let angle = slot as f32 * std::f32::consts::TAU / 8.0;
@@ -289,8 +363,14 @@ impl SphereRuntime {
                 move_x: 0.0,
                 move_z: 0.0,
                 intake_power: 0.0,
+                outtake_power: 0.0,
                 sequence: 0,
                 color,
+                wall_contact_normal: None,
+                stored: VecDeque::new(),
+                outtake_accumulator: 0.0,
+                intake_accumulator: 0.0,
+                mech: MechSpec::default(),
             },
         );
     }
@@ -305,6 +385,7 @@ impl SphereRuntime {
         move_x: f32,
         move_z: f32,
         intake_power: f32,
+        outtake_power: f32,
         sequence: u64,
     ) {
         if let Some(player) = self.players.get_mut(user_id)
@@ -314,6 +395,13 @@ impl SphereRuntime {
             player.move_x = move_x.clamp(-1.0, 1.0);
             player.move_z = move_z.clamp(-1.0, 1.0);
             player.intake_power = intake_power.clamp(0.0, 1.0);
+            player.outtake_power = outtake_power.clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn set_player_mech(&mut self, user_id: &str, mech: MechSpec) {
+        if let Some(player) = self.players.get_mut(user_id) {
+            player.mech = mech;
         }
     }
 
@@ -355,8 +443,30 @@ impl SphereRuntime {
             let forward_delta = drive_force / mass * dt;
             let lateral_delta =
                 (-lateral_speed).clamp(-robot.lateral_grip_mps2 * dt, robot.lateral_grip_mps2 * dt);
-            player.velocity[0] += forward[0] * forward_delta + right[0] * lateral_delta;
-            player.velocity[2] += forward[2] * forward_delta + right[2] * lateral_delta;
+            let wall_normal = player.wall_contact_normal;
+            let mut lateral_change = [right[0] * lateral_delta, 0.0, right[2] * lateral_delta];
+            if let Some(normal) = wall_normal {
+                // A differential-drive robot rubbing a perimeter panel still
+                // has a wall-parallel component of its wheel force. The old
+                // virtual lateral-grip model removed all of it, which made a
+                // robot stop dead for even a very shallow impact. The carpet
+                // rolling resistance below still slows the robot, while the
+                // wall itself removes no tangential speed.
+                let normal_change = mul(normal, dot(lateral_change, normal));
+                lateral_change = normal_change;
+            }
+            player.velocity[0] += forward[0] * forward_delta + lateral_change[0];
+            player.velocity[2] += forward[2] * forward_delta + lateral_change[2];
+
+            if let Some(normal) = wall_normal {
+                // A wall is unilateral: remove only motion into it. Applying
+                // this before integration avoids a one-frame inward pulse,
+                // while keeping the tangent component intact.
+                let into_surface = dot(player.velocity, normal);
+                if into_surface < 0.0 {
+                    player.velocity = sub(player.velocity, mul(normal, into_surface));
+                }
+            }
 
             let target_turn = ((right_power - left) * robot.max_speed_mps
                 / robot.track_width_m.max(0.1))
@@ -369,10 +479,125 @@ impl SphereRuntime {
         }
     }
 
+    /// Ball hopper mechanics: powered intake captures balls in the roller
+    /// mouth into storage, and the wide flywheel launches stored balls at the
+    /// adjustable velocity/angle with a deterministic lateral spread. Both
+    /// steps are rate-limited so a full robot swallows and spits at a steady
+    /// pace instead of vacuuming the field in one tick.
+    fn step_mechanics(&mut self, arena: &ArenaConfig, dt: f32) {
+        let radius = arena.ball.radius_m();
+        for (player_id, player) in self.players.iter_mut() {
+            let robot = effective_robot(&arena.robot, &player.mech);
+
+            // Intake capture.
+            if player.intake_power > 0.0
+                && robot.storage_capacity > 0
+                && robot.intake_rate_bps > 0.0
+            {
+                let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
+                let right = [-forward[2], 0.0, forward[0]];
+                player.intake_accumulator = (player.intake_accumulator
+                    + robot.intake_rate_bps * player.intake_power * dt)
+                    .min(120.0);
+                let mut candidates: Vec<(f32, usize)> = Vec::with_capacity(16);
+                let intake_world_y = (player.position[1] - robot.height_m * 0.5) + robot.intake_center_height_m;
+                for (index, ball) in self.balls.iter().enumerate() {
+                    if !ball.active {
+                        continue;
+                    }
+                    let delta = sub(ball.position, player.position);
+                    let forward_dist = dot(delta, forward);
+                    if forward_dist < -0.10
+                        || forward_dist > robot.intake_forward_offset_m + radius + 0.10
+                    {
+                        continue;
+                    }
+                    let lateral_dist = dot(delta, right);
+                    if lateral_dist.abs() > robot.intake_width_m * 0.5 + 0.08 {
+                        continue;
+                    }
+                    let vertical_dist = (ball.position[1] - intake_world_y).abs();
+                    if vertical_dist > radius + robot.intake_radius_m + 0.10 {
+                        continue;
+                    }
+                    candidates.push((forward_dist.abs(), index));
+                }
+                candidates.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+                for (_, index) in candidates {
+                    if player.intake_accumulator < 1.0 {
+                        break;
+                    }
+                    if player.stored.len() >= robot.storage_capacity {
+                        break;
+                    }
+                    if !self.balls[index].active {
+                        continue;
+                    }
+                    self.balls[index].active = false;
+                    player.stored.push_back(index);
+                    player.intake_accumulator -= 1.0;
+                    self.semantic_events.push(SemanticEvent {
+                        kind: "intake",
+                        target_id: player_id.clone(),
+                        entity_id: format!("ball:{index}"),
+                    });
+                }
+            }
+
+            // Wide flywheel outtake.
+            if player.outtake_power > 0.0
+                && !player.stored.is_empty()
+                && robot.outtake_rate_bps > 0.0
+                && robot.outtake_velocity_mps > 0.0
+            {
+                let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
+                let right = [-forward[2], 0.0, forward[0]];
+                player.outtake_accumulator +=
+                    robot.outtake_rate_bps * player.outtake_power * dt;
+                let pitch = robot.outtake_angle_deg.to_radians();
+                let horizontal = robot.outtake_velocity_mps * pitch.cos();
+                let vertical = robot.outtake_velocity_mps * pitch.sin();
+                let outtake_world_y = (player.position[1] - robot.height_m * 0.5) + robot.outtake_height_m;
+                while player.outtake_accumulator >= 1.0 && !player.stored.is_empty() {
+                    player.outtake_accumulator -= 1.0;
+                    let index = player.stored.pop_front().unwrap();
+                    // Deterministic hash spread so the wide mouth actually
+                    // spits across its width without breaking replayability.
+                    let jitter = (((index as u32).wrapping_mul(2654435761u32)) as f32
+                        / 4294967296.0)
+                        - 0.5;
+                    let exit = add(
+                        add(player.position, mul(forward, robot.outtake_forward_offset_m)),
+                        mul(right, jitter * robot.flywheel_width_m),
+                    );
+                    let ball = &mut self.balls[index];
+                    ball.position = [exit[0], outtake_world_y, exit[2]];
+                    ball.velocity = [
+                        forward[0] * horizontal + player.velocity[0],
+                        vertical + player.velocity[1],
+                        forward[2] * horizontal + player.velocity[2],
+                    ];
+                    ball.pre_solve_velocity = ball.velocity;
+                    // Realistic flywheel backspin (spin axis along right vector)
+                    let spin_rate = horizontal / arena.ball.radius_m().max(0.01);
+                    ball.angular_velocity = mul(right, -spin_rate);
+                    ball.quiet_ticks = 0;
+                    ball.sleeping = false;
+                    ball.grounded = false;
+                    ball.active = true;
+                    self.semantic_events.push(SemanticEvent {
+                        kind: "outtake",
+                        target_id: player_id.clone(),
+                        entity_id: format!("ball:{index}"),
+                    });
+                }
+            }
+        }
+    }
+
     pub fn tick(&mut self, dt: f64) {
         let dt = dt as f32;
-        self.context.clock += dt as f64;
-        let Some(arena) = self.arena.clone() else {
+        self.context.clock += dt as f64;        let Some(arena) = self.arena.clone() else {
             return;
         };
         if let Some(elapsed) = &mut self.ball_release_elapsed {
@@ -400,6 +625,7 @@ impl SphereRuntime {
             self.apply_robot_wall_velocity_constraints(&arena);
         }
         self.limit_ball_energy(&arena);
+        self.step_mechanics(&arena, dt);
         self.update_sleeping(&arena, dt);
         self.metrics.solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
         self.metrics.contacts = contacts;
@@ -447,6 +673,10 @@ impl SphereRuntime {
         let robot_center_y = self.robot_center_y(arena);
         let field_boundary = self.field_boundary.clone();
         for player in self.players.values_mut() {
+            // Contacts are refreshed by the position solver below. Keeping a
+            // normal for one drive step gives stable wall sliding without
+            // constraining a robot that has already driven away.
+            player.wall_contact_normal = None;
             // The robot is a carpet-supported planar body. Ball contacts may
             // transfer X/Z momentum and yaw, but must never integrate lift.
             player.velocity[1] = 0.0;
@@ -461,15 +691,29 @@ impl SphereRuntime {
             let max_z = field_boundary.max[2] - robot_z_extent;
             player.position[0] = player.position[0].clamp(min_x, max_x);
             player.position[2] = player.position[2].clamp(min_z, max_z);
-            if (player.position[0] <= min_x + 1.0e-6 && player.velocity[0] < 0.0)
-                || (player.position[0] >= max_x - 1.0e-6 && player.velocity[0] > 0.0)
-            {
-                player.velocity[0] = 0.0;
+            if player.position[0] <= min_x + 1.0e-6 || player.position[0] >= max_x - 1.0e-6 {
+                let normal = if player.position[0] <= min_x + 1.0e-6 {
+                    [1.0, 0.0, 0.0]
+                } else {
+                    [-1.0, 0.0, 0.0]
+                };
+                player.wall_contact_normal = Some(normal);
+                let into_surface = dot(player.velocity, normal);
+                if into_surface < 0.0 {
+                    player.velocity = sub(player.velocity, mul(normal, into_surface));
+                }
             }
-            if (player.position[2] <= min_z + 1.0e-6 && player.velocity[2] < 0.0)
-                || (player.position[2] >= max_z - 1.0e-6 && player.velocity[2] > 0.0)
-            {
-                player.velocity[2] = 0.0;
+            if player.position[2] <= min_z + 1.0e-6 || player.position[2] >= max_z - 1.0e-6 {
+                let normal = if player.position[2] <= min_z + 1.0e-6 {
+                    [0.0, 0.0, 1.0]
+                } else {
+                    [0.0, 0.0, -1.0]
+                };
+                player.wall_contact_normal = Some(normal);
+                let into_surface = dot(player.velocity, normal);
+                if into_surface < 0.0 {
+                    player.velocity = sub(player.velocity, mul(normal, into_surface));
+                }
             }
             let drag = (-arena.robot.rolling_resistance * dt).exp();
             player.velocity[0] *= drag;
@@ -604,8 +848,7 @@ impl SphereRuntime {
 
         let field_colliders = &self.field_colliders;
         let robot_center_y = self.robot_center_y(arena);
-        let (robot_min_x, robot_max_x, robot_min_z, robot_max_z) =
-            self.planar_limits(arena.robot.width_m * 0.5, arena.robot.length_m * 0.5);
+        let field_boundary = self.field_boundary.clone();
         for player in self.players.values_mut() {
             if arena.robot.intake_enabled {
                 for ball in &mut self.balls {
@@ -670,9 +913,23 @@ impl SphereRuntime {
                     ball.quiet_ticks = 0;
                 }
             }
-            player.position[0] = player.position[0].clamp(robot_min_x, robot_max_x);
-            player.position[2] = player.position[2].clamp(robot_min_z, robot_max_z);
-            contacts += project_robot_field_colliders(player, &arena.robot, field_colliders);
+            // The chassis is rotated, so its projected footprint—not the
+            // unrotated 50 cm box—sets the perimeter clearance.
+            let (robot_x_extent, robot_z_extent) = robot_planar_extents(&arena.robot, player.yaw);
+            player.position[0] = player.position[0].clamp(
+                field_boundary.min[0] + robot_x_extent,
+                field_boundary.max[0] - robot_x_extent,
+            );
+            player.position[2] = player.position[2].clamp(
+                field_boundary.min[2] + robot_z_extent,
+                field_boundary.max[2] - robot_z_extent,
+            );
+            let (field_contacts, wall_normal) =
+                project_robot_field_colliders(player, &arena.robot, field_colliders);
+            contacts += field_contacts;
+            if wall_normal.is_some() {
+                player.wall_contact_normal = wall_normal;
+            }
         }
         // Dynamic contacts can push a ball through a static boundary. End
         // every iteration by projecting onto the field/ramp so the last
@@ -790,6 +1047,31 @@ impl SphereRuntime {
                     // The test fixture uses polycarbonate at the goal ends
                     // (Z) and metal perimeter structure at the sidelines (X).
                     let surface = if axis == 2 {
+                        &arena.goal_wall
+                    } else {
+                        &arena.metal_wall
+                    };
+                    resolve_sphere_surface_velocity(
+                        ball,
+                        normal,
+                        [0.0; 3],
+                        &surface.restitution_curve,
+                        surface.static_friction,
+                        surface.dynamic_friction,
+                        arena.ball.radius_m(),
+                        arena.ball.mass_kg,
+                        arena.ball.inertia_factor,
+                        0.0,
+                        arena.solver.restitution_velocity_threshold_mps,
+                    );
+                }
+            }
+
+            // Resolve velocity, restitution (bouncing), and friction for all 3D field colliders (including SU goal walls)
+            for collider in &self.field_colliders {
+                if let Some(normal) = sphere_collider_contact(ball.position, arena.ball.radius_m() * 1.01, collider) {
+                    let id_lower = collider.id.to_lowercase();
+                    let surface = if id_lower.contains("su") || id_lower.contains("goal") || id_lower.contains("polycarbonate") {
                         &arena.goal_wall
                     } else {
                         &arena.metal_wall
@@ -982,7 +1264,7 @@ impl SphereRuntime {
                     );
                     let roller_angular_velocity = mul(
                         roller_axis,
-                        arena.robot.intake_surface_speed_mps * player.intake_power
+                        -arena.robot.intake_surface_speed_mps * player.intake_power
                             / arena.robot.intake_radius_m.max(0.001),
                     );
                     let roller_surface_velocity = add(
@@ -1007,10 +1289,30 @@ impl SphereRuntime {
                     );
                 }
             }
+            let robot = effective_robot(&arena.robot, &player.mech);
             for ball in &mut self.balls {
                 if !ball.active {
                     continue;
                 }
+                // Allow balls entering the intake opening when intake is enabled to pass into the hopper
+                if arena.robot.intake_enabled && (player.intake_power > 0.0 || player.stored.len() < robot.storage_capacity) {
+                    let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
+                    let right = [-forward[2], 0.0, forward[0]];
+                    let delta = sub(ball.position, player.position);
+                    let forward_dist = dot(delta, forward);
+                    let lateral_dist = dot(delta, right).abs();
+                    let intake_world_y = (player.position[1] - robot.height_m * 0.5) + robot.intake_center_height_m;
+                    let vertical_dist = (ball.position[1] - intake_world_y).abs();
+
+                    if forward_dist >= 0.0
+                        && forward_dist <= robot.intake_forward_offset_m + arena.ball.radius_m() * 1.5
+                        && lateral_dist <= robot.intake_width_m * 0.5 + arena.ball.radius_m() * 0.5
+                        && vertical_dist <= arena.ball.radius_m() + robot.intake_radius_m + 0.10
+                    {
+                        continue; // skip rigid front chassis bounce for intaking balls
+                    }
+                }
+
                 let Some((normal, _)) = sphere_obb_contact(
                     ball.position,
                     arena.ball.radius_m() * 1.01,
@@ -1130,6 +1432,11 @@ impl SphereRuntime {
     }
 
     pub fn player_snapshots(&self) -> Vec<PlayerSnapshot> {
+        let base_capacity = self
+            .arena
+            .as_ref()
+            .map(|arena| arena.robot.storage_capacity)
+            .unwrap_or(0);
         self.players
             .iter()
             .map(|(id, player)| PlayerSnapshot {
@@ -1146,12 +1453,20 @@ impl SphereRuntime {
                 velocity_z: player.velocity[2],
                 angular_velocity_y: player.angular_velocity_y,
                 color: player.color.into(),
+                stored_balls: player.stored.len(),
+                capacity: player.mech.capacity_with(base_capacity),
             })
             .collect()
     }
 
     pub fn field_object_positions(&self) -> Vec<[f32; 3]> {
-        self.balls.iter().map(|ball| ball.position).collect()
+        // Unreleased balls remain inside the dispenser and must not be drawn
+        // as a visible stack before the match-start signal.
+        self.balls
+            .iter()
+            .filter(|ball| ball.active)
+            .map(|ball| ball.position)
+            .collect()
     }
 
     pub fn contact_count(&self) -> usize {
@@ -1164,6 +1479,22 @@ impl SphereRuntime {
 
     pub fn drain_semantic_events(&mut self) -> Vec<SemanticEvent> {
         std::mem::take(&mut self.semantic_events)
+    }
+
+    /// Contain a game piece identified by a `ball:{index}` entity string —
+    /// deactivating it so it is removed from play and can never be re-scored.
+    /// Used when WILDFIRE enters a SUPPRESSION UNIT or the EXTINGUISHER.
+    pub fn contain_ball(&mut self, entity_id: &str) -> bool {
+        let Some(index) = entity_id.strip_prefix("ball:").and_then(|v| v.parse::<usize>().ok()) else {
+            return false;
+        };
+        if let Some(ball) = self.balls.get_mut(index)
+            && ball.active
+        {
+            ball.active = false;
+            return true;
+        }
+        false
     }
 
     fn detect_trigger_entries(&mut self) {
@@ -1371,6 +1702,85 @@ fn project_sphere_obb(ball: &mut Ball, collider: &FieldCollider, radius: f32) ->
     1
 }
 
+/// Compute contact normal between a ball and a field collider (AABB or OBB)
+fn sphere_collider_contact(position: Vec3, radius: f32, collider: &FieldCollider) -> Option<Vec3> {
+    if collider.half_extents.iter().any(|extent| *extent > 1.0e-6) {
+        let delta = sub(position, collider.center);
+        let local = [
+            dot(delta, collider.axes[0]),
+            dot(delta, collider.axes[1]),
+            dot(delta, collider.axes[2]),
+        ];
+        let closest = [
+            local[0].clamp(-collider.half_extents[0], collider.half_extents[0]),
+            local[1].clamp(-collider.half_extents[1], collider.half_extents[1]),
+            local[2].clamp(-collider.half_extents[2], collider.half_extents[2]),
+        ];
+        let local_delta = [
+            local[0] - closest[0],
+            local[1] - closest[1],
+            local[2] - closest[2],
+        ];
+        let distance_sq = dot(local_delta, local_delta);
+        if distance_sq >= radius * radius {
+            return None;
+        }
+        if distance_sq > 1.0e-10 {
+            let distance = distance_sq.sqrt();
+            let normal = [
+                collider.axes[0][0] * local_delta[0] / distance
+                    + collider.axes[1][0] * local_delta[1] / distance
+                    + collider.axes[2][0] * local_delta[2] / distance,
+                collider.axes[0][1] * local_delta[0] / distance
+                    + collider.axes[1][1] * local_delta[1] / distance
+                    + collider.axes[2][1] * local_delta[2] / distance,
+                collider.axes[0][2] * local_delta[0] / distance
+                    + collider.axes[1][2] * local_delta[1] / distance
+                    + collider.axes[2][2] * local_delta[2] / distance,
+            ];
+            return Some(normal);
+        }
+        let mut nearest_axis = 0;
+        let mut nearest_distance = f32::INFINITY;
+        for axis in 0..3 {
+            let distance = collider.half_extents[axis] - local[axis].abs();
+            if distance < nearest_distance {
+                nearest_distance = distance;
+                nearest_axis = axis;
+            }
+        }
+        let sign = if local[nearest_axis] < 0.0 { -1.0 } else { 1.0 };
+        return Some(mul(collider.axes[nearest_axis], sign));
+    }
+
+    let closest = [
+        position[0].clamp(collider.min[0], collider.max[0]),
+        position[1].clamp(collider.min[1], collider.max[1]),
+        position[2].clamp(collider.min[2], collider.max[2]),
+    ];
+    let delta = sub(position, closest);
+    let distance_sq = length_sq(delta);
+    if distance_sq >= radius * radius {
+        return None;
+    }
+    if distance_sq > 1.0e-10 {
+        let distance = distance_sq.sqrt();
+        return Some(mul(delta, 1.0 / distance));
+    }
+    let candidates = [
+        (position[0] - collider.min[0], [-1.0, 0.0, 0.0]),
+        (collider.max[0] - position[0], [1.0, 0.0, 0.0]),
+        (position[1] - collider.min[1], [0.0, -1.0, 0.0]),
+        (collider.max[1] - position[1], [0.0, 1.0, 0.0]),
+        (position[2] - collider.min[2], [0.0, 0.0, -1.0]),
+        (collider.max[2] - position[2], [0.0, 0.0, 1.0]),
+    ];
+    candidates
+        .into_iter()
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, normal)| normal)
+}
+
 /// The high-throughput backend represents the robot chassis as a planar box.
 /// Projecting that box against the authored static bounds prevents drive input
 /// from passing through field structures without adding an expensive general
@@ -1379,12 +1789,13 @@ fn project_robot_field_colliders(
     player: &mut PlayerBody,
     robot: &RobotPhysicsConfig,
     field_colliders: &[FieldCollider],
-) -> usize {
+) -> (usize, Option<Vec3>) {
     let half_x = robot.width_m * 0.5;
     let half_z = robot.length_m * 0.5;
     let robot_min_y = player.position[1] - robot.height_m * 0.5;
     let robot_max_y = player.position[1] + robot.height_m * 0.5;
     let mut contacts = 0;
+    let mut contact_normal = None;
 
     for collider in field_colliders {
         if robot_max_y <= collider.min[1] || robot_min_y >= collider.max[1] {
@@ -1403,6 +1814,7 @@ fn project_robot_field_colliders(
                     player.velocity = sub(player.velocity, mul(normal, into_surface));
                 }
                 contacts += 1;
+                contact_normal = Some(normal);
             }
             continue;
         }
@@ -1438,9 +1850,10 @@ fn project_robot_field_colliders(
                 player.velocity = sub(player.velocity, mul(normal, into_surface));
             }
             contacts += 1;
+            contact_normal = Some(normal);
         }
     }
-    contacts
+    (contacts, contact_normal)
 }
 
 /// Return the minimum-translation contact for the rotated robot box against
@@ -1734,9 +2147,10 @@ fn roller_contact(
 ) -> Option<(Vec3, f32, Vec3, Vec3)> {
     let forward = [-yaw.sin(), 0.0, -yaw.cos()];
     let right = [-forward[2], 0.0, forward[0]];
+    let intake_world_y = (robot_position[1] - robot.height_m * 0.5) + robot.intake_center_height_m;
     let center = [
         robot_position[0] + forward[0] * robot.intake_forward_offset_m,
-        robot.intake_center_height_m,
+        intake_world_y,
         robot_position[2] + forward[2] * robot.intake_forward_offset_m,
     ];
     let along_axis = dot(sub(sphere, center), right)
@@ -1867,7 +2281,7 @@ mod tests {
     }
 
     #[test]
-    fn ext_dispenser_releases_a_deterministic_three_second_fountain() {
+    fn ext_dispenser_releases_a_deterministic_four_second_fountain() {
         let mut arena = arena();
         arena.object_count = 12;
         arena.ramp.enabled = false;
@@ -1890,6 +2304,11 @@ mod tests {
             Some("red-driver-1"),
             &arena,
         );
+        // Players may enter during the lobby countdown, but the dispenser
+        // remains closed until the authoritative match-start transition.
+        runtime.tick(1.0 / 60.0);
+        assert!(runtime.balls.iter().all(|ball| !ball.active));
+        runtime.begin_match();
         for _ in 0..60 {
             runtime.tick(1.0 / 60.0);
         }
@@ -1902,7 +2321,7 @@ mod tests {
                 .any(|ball| ball.active && ball.position[2] > runtime.ball_spawn[2])
         );
 
-        for _ in 0..121 {
+        for _ in 0..181 {
             runtime.tick(1.0 / 60.0);
         }
         assert!(runtime.balls.iter().all(|ball| ball.active));
@@ -1915,7 +2334,7 @@ mod tests {
         let mut runtime = SphereRuntime::new("test".into(), "fgc-2026".into(), 0);
         runtime.create_test_arena(&arena);
         runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
-        runtime.set_player_input("p", 0.25, 1.0, 0.0, 1);
+        runtime.set_player_input("p", 0.25, 1.0, 0.0, 0.0, 1);
         for _ in 0..120 {
             runtime.apply_player_drive(&arena, 1.0 / 60.0);
             runtime.tick(1.0 / 60.0);
@@ -2021,7 +2440,7 @@ mod tests {
         let player = runtime.players.get_mut("p").unwrap();
         player.position = [0.0, arena.robot.height_m * 0.5, wall_limit];
         player.yaw = 0.0;
-        runtime.set_player_input("p", 0.0, 1.0, 0.0, 1);
+        runtime.set_player_input("p", 0.0, 1.0, 0.0, 0.0, 1);
 
         for _ in 0..180 {
             runtime.apply_player_drive(&arena, 1.0 / 60.0);
@@ -2031,6 +2450,45 @@ mod tests {
         let player = runtime.players.get("p").unwrap();
         assert!((player.position[2] - wall_limit).abs() < 1.0e-5);
         assert!(player.velocity[2].abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn drivetrain_slides_along_wall_after_shallow_impact() {
+        let mut arena = arena();
+        arena.object_count = 0;
+        arena.ramp.enabled = false;
+        let mut runtime = SphereRuntime::new("wall-slide".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+
+        // Drive almost into the negative-Z perimeter wall. Forward has a
+        // small X component, which should carry the robot along the wall
+        // rather than being erased by virtual lateral wheel scrub.
+        let yaw = 0.20;
+        let (_, z_extent) = robot_planar_extents(&arena.robot, yaw);
+        let wall_limit = -SphereRuntime::FIELD_HALF_EXTENT + z_extent;
+        let player = runtime.players.get_mut("p").unwrap();
+        player.position = [0.0, arena.robot.height_m * 0.5, wall_limit];
+        player.yaw = yaw;
+        runtime.set_player_input("p", 0.0, 1.0, 0.0, 0.0, 1);
+
+        for _ in 0..180 {
+            runtime.apply_player_drive(&arena, 1.0 / 60.0);
+            runtime.tick(1.0 / 60.0);
+        }
+
+        let player = runtime.players.get("p").unwrap();
+        assert!(player.position[2] >= wall_limit - 1.0e-4);
+        assert!(
+            player.position[0].abs() > 0.35,
+            "robot did not slide along wall: {:?}",
+            player.position
+        );
+        assert!(
+            player.velocity[0].abs() > 0.1,
+            "robot lost its wall-parallel velocity: {:?}",
+            player.velocity
+        );
     }
 
     #[test]
@@ -2049,7 +2507,7 @@ mod tests {
         player.yaw = 0.0;
         runtime.balls[0].position = [0.0, arena.ball.radius_m(), ball_limit];
         runtime.balls[0].velocity = [0.0; 3];
-        runtime.set_player_input("p", 0.0, 1.0, 0.0, 1);
+        runtime.set_player_input("p", 0.0, 1.0, 0.0, 0.0, 1);
 
         let mut maximum_ball_speed = 0.0_f32;
         for _ in 0..240 {
@@ -2134,6 +2592,7 @@ mod tests {
             on_ramp: false,
             active: true,
             release_at_seconds: 0.0,
+            released: true,
         };
         resolve_sphere_surface_velocity(
             &mut ball,
@@ -2192,11 +2651,10 @@ mod tests {
             player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
             player.yaw = 0.0;
             player.intake_power = power;
-            let combined_radius = arena.ball.radius_m() + arena.robot.intake_radius_m;
             runtime.balls[0].position = [
                 0.0,
-                arena.robot.intake_center_height_m + combined_radius,
-                -arena.robot.intake_forward_offset_m,
+                arena.ball.radius_m(),
+                -arena.robot.intake_forward_offset_m - 0.03,
             ];
             runtime.balls[0].velocity = [0.0; 3];
             runtime.balls[0].pre_solve_velocity = [0.0; 3];
@@ -2208,7 +2666,10 @@ mod tests {
         let idle = roller_velocity(arena.clone(), 0.0);
         let powered = roller_velocity(arena, 1.0);
         assert!(idle.abs() < 0.001);
-        assert!(powered > 0.1, "powered intake velocity={powered:.3}");
+        assert!(
+            powered > 0.1,
+            "floor ball should be pulled into the hopper, powered velocity={powered:.3}"
+        );
     }
 
     #[test]
@@ -2233,6 +2694,157 @@ mod tests {
             "ball z={} did not roll down from {start_z}",
             runtime.balls[0].position[2]
         );
+    }
+
+    #[test]
+    fn powered_intake_captures_a_ball_in_the_roller_mouth() {
+        let mut arena = arena();
+        arena.object_count = 1;
+        arena.ramp.enabled = false;
+        let mut runtime = SphereRuntime::new("capture".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+        let player = runtime.players.get_mut("p").unwrap();
+        player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+        player.yaw = 0.0;
+        player.intake_power = 1.0;
+        runtime.balls[0].position = [
+            0.0,
+            arena.ball.radius_m(),
+            -arena.robot.intake_forward_offset_m,
+        ];
+        runtime.balls[0].velocity = [0.0; 3];
+        runtime.balls[0].pre_solve_velocity = [0.0; 3];
+        for _ in 0..20 {
+            runtime.tick(1.0 / 60.0);
+        }
+        assert!(!runtime.balls[0].active, "ball should be captured into the hopper");
+        assert_eq!(runtime.players["p"].stored.len(), 1);
+        assert_eq!(runtime.players["p"].stored[0], 0);
+        assert!(
+            runtime
+                .drain_semantic_events()
+                .iter()
+                .any(|event| event.kind == "intake")
+        );
+    }
+
+    #[test]
+    fn driving_with_intake_captures_a_floor_ball() {
+        let mut arena = arena();
+        arena.object_count = 1;
+        arena.ramp.enabled = false;
+        let mut runtime = SphereRuntime::new("drive-intake".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+        runtime.set_player_input("p", 0.0, 1.0, 1.0, 0.0, 1);
+        let player = runtime.players.get_mut("p").unwrap();
+        player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+        player.yaw = 0.0;
+        runtime.balls[0].position = [0.0, arena.ball.radius_m(), -0.6];
+        runtime.balls[0].velocity = [0.0; 3];
+        runtime.balls[0].pre_solve_velocity = [0.0; 3];
+        for _ in 0..180 {
+            runtime.apply_player_drive(&arena, 1.0 / 60.0);
+            runtime.tick(1.0 / 60.0);
+            if runtime.players["p"].stored.len() == 1 {
+                break;
+            }
+        }
+        assert_eq!(runtime.players["p"].stored.len(), 1, "driving into a floor ball with intake should capture it");
+        assert_eq!(runtime.players["p"].stored[0], 0);
+        assert!(
+            runtime
+                .drain_semantic_events()
+                .iter()
+                .any(|event| event.kind == "intake")
+        );
+    }
+
+    #[test]
+    fn zero_capacity_mech_override_blocks_intake() {
+        let mut arena = arena();
+        arena.object_count = 1;
+        arena.ramp.enabled = false;
+        let mut runtime = SphereRuntime::new("blocked".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+        let player = runtime.players.get_mut("p").unwrap();
+        player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+        player.yaw = 0.0;
+        player.intake_power = 1.0;
+        player.mech = MechSpec {
+            capacity: Some(0),
+            ..MechSpec::default()
+        };
+        runtime.balls[0].position = [
+            0.0,
+            arena.ball.radius_m(),
+            -arena.robot.intake_forward_offset_m,
+        ];
+        runtime.balls[0].velocity = [0.0; 3];
+        runtime.balls[0].pre_solve_velocity = [0.0; 3];
+        for _ in 0..20 {
+            runtime.tick(1.0 / 60.0);
+        }
+        assert!(runtime.balls[0].active, "ball stays free when hopper capacity is zero");
+        assert!(runtime.players["p"].stored.is_empty());
+    }
+
+    #[test]
+    fn outtake_launches_a_stored_ball_through_the_wide_flywheel() {
+        let mut arena = arena();
+        arena.object_count = 1;
+        arena.ramp.enabled = false;
+        let mut runtime = SphereRuntime::new("launch".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+        let player = runtime.players.get_mut("p").unwrap();
+        player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+        player.yaw = 0.0;
+        player.outtake_power = 1.0;
+        player.stored.push_back(0);
+        for _ in 0..25 {
+            runtime.tick(1.0 / 60.0);
+        }
+        let ball = &runtime.balls[0];
+        assert!(ball.active, "launched ball should be active");
+        assert!(runtime.players["p"].stored.is_empty(), "hopper should drain");
+        assert!(
+            ball.velocity[1] > 0.5,
+            "upward launch velocity was {}",
+            ball.velocity[1]
+        );
+        assert!(
+            ball.velocity[2] < 0.0,
+            "forward launch at yaw 0 was {}",
+            ball.velocity[2]
+        );
+        assert!(
+            ball.position[1] > arena.robot.height_m + arena.ball.radius_m(),
+            "launch height was {}",
+            ball.position[1]
+        );
+        assert!(
+            runtime
+                .drain_semantic_events()
+                .iter()
+                .any(|event| event.kind == "outtake")
+        );
+    }
+
+    #[test]
+    fn contain_ball_deactivates_a_scored_piece() {
+        let mut arena = arena();
+        arena.object_count = 1;
+        arena.ramp.enabled = false;
+        let mut runtime = SphereRuntime::new("contain".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        assert!(runtime.contain_ball("ball:0"));
+        assert!(!runtime.balls[0].active);
+        assert!(!runtime.contain_ball("ball:0"), "already-contained piece");
+        assert!(!runtime.contain_ball("ball:999"));
+        assert!(!runtime.contain_ball("object:3"));
     }
 
     #[test]
@@ -2261,7 +2873,7 @@ mod tests {
         let mut runtime = SphereRuntime::new("benchmark".into(), "fgc-2026".into(), 0);
         runtime.create_test_arena(&arena);
         runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
-        runtime.set_player_input("p", 0.28, 1.0, 1.0, 1);
+        runtime.set_player_input("p", 0.28, 1.0, 1.0, 0.0, 1);
         for _ in 0..120 {
             runtime.apply_player_drive(&arena, 1.0 / 60.0);
             runtime.tick(1.0 / 60.0);

@@ -53,6 +53,9 @@ pub struct PlayerSnapshot {
     #[serde(rename = "angularVelocityY")]
     pub angular_velocity_y: f32,
     pub color: String,
+    #[serde(rename = "storedBalls")]
+    pub stored_balls: usize,
+    pub capacity: usize,
 }
 
 struct PlayerBody {
@@ -88,6 +91,7 @@ pub struct MatchRuntime {
     objects: Vec<FieldObject>,
     ball_radius: f32,
     ball_rolling_resistance_mps2: f32,
+    storage_capacity: usize,
 }
 
 impl MatchRuntime {
@@ -108,7 +112,7 @@ impl MatchRuntime {
                 game_pack_version: "1.0.0".to_string(),
                 engine_version: "0.1.0".to_string(),
                 match_seed,
-                phase: MatchPhase::Teleop,
+                phase: MatchPhase::PreMatch,
                 clock: 0.0,
             },
             score_state: ScoreState::default(),
@@ -127,7 +131,12 @@ impl MatchRuntime {
             objects: Vec::new(),
             ball_radius: 0.05,
             ball_rolling_resistance_mps2: 0.0,
+            storage_capacity: 0,
         }
+    }
+
+    pub fn begin_match(&mut self) {
+        self.context.phase = MatchPhase::Teleop;
     }
 
     pub fn create_test_arena(&mut self, arena: &ArenaConfig) {
@@ -185,6 +194,7 @@ impl MatchRuntime {
         let object_radius = arena.ball.radius_m();
         self.ball_radius = object_radius;
         self.ball_rolling_resistance_mps2 = arena.ball.rolling_resistance_mps2.max(0.0);
+        self.storage_capacity = arena.robot.storage_capacity;
         let object_count = arena.object_count.max(1) as f32;
         let golden_angle = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
         for index in 0..arena.object_count {
@@ -440,6 +450,8 @@ impl MatchRuntime {
                         velocity_z: velocity.z,
                         angular_velocity_y: angular_velocity.y,
                         color: player.color.to_string(),
+                        stored_balls: 0,
+                        capacity: self.storage_capacity,
                     }
                 })
             })
