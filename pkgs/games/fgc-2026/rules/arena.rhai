@@ -23,13 +23,13 @@ fn arena_config() {
         // override this at runtime without changing the competition pack.
         object_count: 500,
         // Balls originate at the semantic EXTballspawn dispenser; they are
-        // released in a deterministic three-second pour, not scattered.
+        // released in a deterministic four-second pour, not scattered.
         spawn_radius: 0.045,
         spawn_height: 1.8,
         // TEMP: EXTballspawn was authored too high in Blender. Remove this
         // offset after correcting the semantic node in the field asset.
         spawn_offset_y_m: -1.55,
-        spawn_release_seconds: 3.0,
+        spawn_release_seconds: 4.0,
         spawn_fountain_vertical_speed_mps: 0.14,
         spawn_fountain_forward_speed_mps: 2.55,
         spawn_fountain_spread_mps: 0.72,
@@ -125,7 +125,19 @@ fn arena_config() {
                 high_speed: 0.10,
                 transition_speed_mps: 1.50,
                 exponent: 0.70
-            }
+            },
+            // Hopper storage + wide flywheel outtake. The flywheel spans 3.5
+            // WILDFIRE widths so the mouth accepts a spread of incoming balls
+            // and launches them across a matching opening.
+            storage_capacity: 40.0,
+            intake_rate_bps: 6.0,
+            outtake_rate_bps: 3.0,
+            outtake_velocity_mps: 8.0,
+            outtake_angle_deg: 35.0,
+            flywheel_width_m: 0.35,
+            outtake_forward_offset_m: 0.0,
+            // Above the 50 cm chassis top so a launched ball clears the body.
+            outtake_height_m: 0.55
         },
 
         goal_wall: #{

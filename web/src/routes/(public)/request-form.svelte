@@ -66,7 +66,7 @@
 				</div>
 				<p class="font-bold">Request Received!</p>
 				<p class="text-sm text-muted-foreground">Keep an eye on your inbox.</p>
-				<Button onclick={() => (isInviteDialogOpen = false)} class="mt-4">Close</Button>
+				<Button onclick={() => (isOpen = false)} class="mt-4">Close</Button>
 			</div>
 		{:else}
 			<form onsubmit={requestInvite} class="flex flex-col gap-4 py-4">

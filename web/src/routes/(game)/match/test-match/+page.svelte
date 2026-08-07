@@ -17,6 +17,12 @@
 		type MatchPhysics as PhysicsModel,
 		type MatchPlayer as Player
 	} from './match-protocol';
+	import {
+		DrivePredictor,
+		type DriveParams,
+		type FieldCollider,
+		type RobotPose
+	} from './prediction';
 	const activeMatchId = $derived(page.params.matchId ?? '');
 
 	type ObjectFrame = {
@@ -61,6 +67,13 @@
 		robotHeightM: 0.5,
 		robotLengthM: 0.5,
 		robotMaxSpeedMps: 4,
+		robotMaxAccelerationMps2: 3,
+		robotMaxDecelerationMps2: 4,
+		robotMaxTurnRateRadps: 2.5,
+		robotMaxAngularAccelerationRadps2: 6,
+		robotLateralGripMps2: 6,
+		robotTractionFriction: 0.85,
+		robotTrackWidthM: 0.4,
 		ballInertiaFactor: 0.4,
 		ballDragCoefficient: 0.47,
 		airDensityKgM3: 1.225,
@@ -87,12 +100,32 @@
 		maxBallAngularSpeedRadps: 240,
 		maxDriveForceN: 140,
 		maxDrivePowerW: 420,
-		maxBrakeForceN: 200
+		maxBrakeForceN: 200,
+		storageCapacity: 40,
+		intakeRateBps: 6,
+		outtakeRateBps: 3,
+		outtakeVelocityMps: 8,
+		outtakeAngleDeg: 35,
+		flywheelWidthM: 0.35,
+		outtakeForwardOffsetM: 0,
+		outtakeHeightM: 0.55
 	});
+	let robotSpecs = $state({
+		capacity: 40,
+		intake_rate_bps: 6,
+		outtake_rate_bps: 3,
+		outtake_velocity_mps: 8,
+		outtake_angle_deg: 35,
+		flywheel_width_m: 0.35
+	});
+	let robotSpecsOpen = $state(false);
+	let robotSpecsTimer: number | undefined;
 	let status = $state('Connecting…');
 	let error = $state('');
 	let localId = $state('');
 	let socket = $state.raw<WebSocket | undefined>(undefined);
+	let predictor = $state.raw<DrivePredictor | undefined>(undefined);
+	let predictionErrorM = $state(0);
 	let sequence = 0;
 	let pingNonce = 0;
 	let pingMs = $state<number | null>(null);
@@ -131,6 +164,7 @@
 	let inputDrive = $state(0);
 	let inputTurn = $state(0);
 	let inputIntake = $state(0);
+	let inputOuttake = $state(0);
 	let cameraMode = $state<'overview' | 'robot'>('overview');
 	let cameraDirection = $state<'north' | 'south'>('north');
 	let robotCameraDistance = $state(8);
@@ -155,7 +189,17 @@
 	let ticksPerSecond = $state(0);
 	let targetTicksPerSecond = $state(60);
 	let clockDriftMs = $state(0);
-	let matchClock = $state(0);
+	let matchClock = $state(150);
+	let matchDurationSeconds = $state(150);
+	let preMatchRemainingSeconds = $state(0);
+	let matchRunning = $state(false);
+	let practiceRunning = $state(false);
+	let blueScore = $state(0);
+	let redScore = $state(0);
+	let globalScore = $state(0);
+	let receivedMatchState = false;
+	let startCueVisible = $state(false);
+	let startCueTimer: number | undefined;
 	let integrateMs = $state(0);
 	let broadPhaseMs = $state(0);
 	let solveMs = $state(0);
@@ -192,6 +236,7 @@
 		'a',
 		's',
 		'd',
+		'e',
 		'arrowup',
 		'arrowdown',
 		'arrowleft',
@@ -209,6 +254,7 @@
 	let lastSentDrive = Number.NaN;
 	let lastSentTurn = Number.NaN;
 	let lastSentIntake = Number.NaN;
+	let lastSentOuttake = Number.NaN;
 	let lastInputSentAt = 0;
 	const highIsBadTone = (value: number, warning: number, critical: number) =>
 		value >= critical ? 'text-fuchsia-300' : value >= warning ? 'text-amber-300' : 'text-cyan-300';
@@ -218,6 +264,13 @@
 		value >= critical ? '×' : value >= warning ? '!' : '·';
 	const lowIsBadMarker = (value: number, warning: number, critical: number) =>
 		value < critical ? '×' : value < warning ? '!' : '·';
+	const formatMatchClock = (seconds: number) => {
+		const wholeSeconds = Math.max(0, Math.ceil(seconds - 0.001));
+		return `${Math.floor(wholeSeconds / 60)}:${String(wholeSeconds % 60).padStart(2, '0')}`;
+	};
+	const redRoster = $derived(players.filter((player) => player.teamName === 'red').slice(0, 3));
+	const blueRoster = $derived(players.filter((player) => player.teamName === 'blue').slice(0, 3));
+	const countdownVisible = $derived(!matchRunning && preMatchRemainingSeconds > 0.05);
 
 	function diagnosticsReport() {
 		return {
@@ -254,6 +307,9 @@
 				physicsLoadPercent: serverPhysicsLoadPercent,
 				simulationClockSeconds: simulationClock,
 				matchClockSeconds: matchClock,
+				matchDurationSeconds,
+				preMatchRemainingSeconds,
+				matchRunning,
 				clockDriftMs,
 				stagesMs: { integrate: integrateMs, broadPhase: broadPhaseMs, solve: solveMs },
 				candidatePairs,
@@ -339,8 +395,7 @@
 		gamepadName = gamepad?.id ?? 'No gamepad';
 	}
 
-	function sendInput(force = false) {
-		if (!socket || socket.readyState !== WebSocket.OPEN) return;
+	function sampleInput() {
 		const keyboardTurn =
 			Number(pressed.has('d') || pressed.has('arrowright')) -
 			Number(pressed.has('a') || pressed.has('arrowleft'));
@@ -352,15 +407,18 @@
 		let gamepadDrive = 0;
 		let gamepadTurn = 0;
 		let gamepadIntake = 0;
+		let gamepadOuttake = 0;
 		if (gamepad) {
 			gamepadDrive = applyDeadzone(-(gamepad.axes[1] ?? 0));
 			gamepadTurn = applyDeadzone(gamepad.axes[2] ?? gamepad.axes[0] ?? 0);
-			gamepadIntake = gamepad.buttons[7]?.value ?? 0;
-			// Left trigger progressively enables precision mode. The A button
-			// commands neutral input, allowing the server-side brake limit to act.
-			const precisionScale = 1 - (gamepad.buttons[6]?.value ?? 0) * 0.65;
-			gamepadDrive *= precisionScale;
-			gamepadTurn *= precisionScale;
+			// Left side (LB/LT) intakes, right side (RB/RT) outtakes. Either
+			// trigger or bumper on its side drives the corresponding mechanism.
+			const left = Math.max(gamepad.buttons[4]?.value ?? 0, gamepad.buttons[6]?.value ?? 0);
+			const right = Math.max(gamepad.buttons[5]?.value ?? 0, gamepad.buttons[7]?.value ?? 0);
+			gamepadIntake = left;
+			gamepadOuttake = right;
+			// The A button commands neutral input, allowing the server-side
+			// brake limit to act.
 			if (gamepad.buttons[0]?.pressed) {
 				gamepadDrive = 0;
 				gamepadTurn = 0;
@@ -368,40 +426,169 @@
 		}
 
 		const keyboardActive = keyboardDrive !== 0 || keyboardTurn !== 0;
-		const drive = keyboardActive ? keyboardDrive : gamepadDrive;
-		const turn = keyboardActive ? keyboardTurn : gamepadTurn;
-		const intake = pressed.has(' ') ? 1 : gamepadIntake;
-		const nextSource = keyboardActive ? 'keyboard' : gamepad ? 'gamepad' : 'keyboard';
+		return {
+			drive: keyboardActive ? keyboardDrive : gamepadDrive,
+			turn: keyboardActive ? keyboardTurn : gamepadTurn,
+			intake: pressed.has(' ') ? 1 : gamepadIntake,
+			outtake: pressed.has('e') ? 1 : gamepadOuttake,
+			source: (keyboardActive ? 'keyboard' : gamepad ? 'gamepad' : 'keyboard') as
+				'keyboard' | 'gamepad'
+		};
+	}
+
+	function sendInputFrom(input: ReturnType<typeof sampleInput>, force = false) {
+		if (!socket || socket.readyState !== WebSocket.OPEN) return;
 		const now = performance.now();
 		const changed =
-			Math.abs(drive - lastSentDrive) > 0.005 ||
-			Math.abs(turn - lastSentTurn) > 0.005 ||
-			Math.abs(intake - lastSentIntake) > 0.005;
+			Math.abs(input.drive - lastSentDrive) > 0.005 ||
+			Math.abs(input.turn - lastSentTurn) > 0.005 ||
+			Math.abs(input.intake - lastSentIntake) > 0.005 ||
+			Math.abs(input.outtake - lastSentOuttake) > 0.005;
 		if (!force && !changed && now - lastInputSentAt < 250) return;
 
-		controlSource = nextSource;
-		inputDrive = drive;
-		inputTurn = turn;
-		inputIntake = intake;
-		lastSentDrive = drive;
-		lastSentTurn = turn;
-		lastSentIntake = intake;
+		controlSource = input.source;
+		inputDrive = input.drive;
+		inputTurn = input.turn;
+		inputIntake = input.intake;
+		inputOuttake = input.outtake;
+		lastSentDrive = input.drive;
+		lastSentTurn = input.turn;
+		lastSentIntake = input.intake;
+		lastSentOuttake = input.outtake;
 		lastInputSentAt = now;
 		socket.send(
 			JSON.stringify({
 				type: 'input',
 				sequence: ++sequence,
-				move_x: turn,
-				move_z: drive,
-				intake_power: intake
+				move_x: input.turn,
+				move_z: input.drive,
+				intake_power: input.intake,
+				outtake_power: input.outtake
 			})
 		);
+	}
+	function sendInput(force = false) {
+		sendInputFrom(sampleInput(), force);
 	}
 	function sendPing() {
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
 		const nonce = ++pingNonce;
 		pendingPings.set(nonce, performance.now());
 		socket.send(JSON.stringify({ type: 'ping', nonce }));
+	}
+	function continuePractice() {
+		if (!socket || socket.readyState !== WebSocket.OPEN) return;
+		socket.send(JSON.stringify({ type: 'continue_practice' }));
+	}
+	function endPractice() {
+		if (!socket || socket.readyState !== WebSocket.OPEN) return;
+		socket.send(JSON.stringify({ type: 'end_practice' }));
+	}
+	function sendRobotSpecs() {
+		if (!socket || socket.readyState !== WebSocket.OPEN) return;
+		socket.send(
+			JSON.stringify({
+				type: 'robot_specs',
+				capacity: robotSpecs.capacity,
+				intake_rate_bps: robotSpecs.intake_rate_bps,
+				outtake_rate_bps: robotSpecs.outtake_rate_bps,
+				outtake_velocity_mps: robotSpecs.outtake_velocity_mps,
+				outtake_angle_deg: robotSpecs.outtake_angle_deg,
+				flywheel_width_m: robotSpecs.flywheel_width_m
+			})
+		);
+	}
+	function scheduleRobotSpecs() {
+		if (robotSpecsTimer !== undefined) window.clearTimeout(robotSpecsTimer);
+		robotSpecsTimer = window.setTimeout(() => {
+			robotSpecsTimer = undefined;
+			sendRobotSpecs();
+		}, 180);
+	}
+
+	function driveParams(): DriveParams | null {
+		if (!physicsLoaded || !fieldDefinition) return null;
+		const boundary = fieldDefinition.boundary;
+		const axes: FieldCollider['axes'] = [
+			[1, 0, 0],
+			[0, 1, 0],
+			[0, 0, 1]
+		];
+		return {
+			maxSpeedMps: physics.robotMaxSpeedMps,
+			maxAccelerationMps2: physics.robotMaxAccelerationMps2,
+			maxDecelerationMps2: physics.robotMaxDecelerationMps2,
+			maxTurnRateRadps: physics.robotMaxTurnRateRadps,
+			maxAngularAccelerationRadps2: physics.robotMaxAngularAccelerationRadps2,
+			lateralGripMps2: physics.robotLateralGripMps2,
+			tractionFriction: physics.robotTractionFriction,
+			trackWidthM: physics.robotTrackWidthM,
+			widthM: physics.robotWidthM,
+			lengthM: physics.robotLengthM,
+			heightM: physics.robotHeightM,
+			boundaryMinX: boundary.min[0],
+			boundaryMaxX: boundary.max[0],
+			boundaryMinZ: boundary.min[2],
+			boundaryMaxZ: boundary.max[2],
+			colliders: fieldDefinition.colliders.map((collider) => ({
+				min: collider.min,
+				max: collider.max,
+				center: collider.center ?? [0, 0, 0],
+				halfExtents: collider.halfExtents ?? [0, 0, 0],
+				axes: collider.axes ?? axes
+			}))
+		};
+	}
+
+	function poseOf(player: Player): RobotPose {
+		return {
+			x: player.x,
+			y: player.y,
+			z: player.z,
+			yaw: player.yaw,
+			vx: player.velocityX ?? 0,
+			vz: player.velocityZ ?? 0,
+			angularVelocityY: player.angularVelocityY ?? 0
+		};
+	}
+
+	function ensurePredictor(serverPose: RobotPose): DrivePredictor | null {
+		if (predictor) return predictor;
+		const params = driveParams();
+		if (!params) return null;
+		predictor = new DrivePredictor(params, serverPose);
+		return predictor;
+	}
+
+	/**
+	 * Pull the local predictor back toward the authoritative server pose each
+	 * snapshot. Large divergence (e.g. a collision the client cannot model)
+	 * snaps; small drift is blended invisibly so prediction never feels jumpy.
+	 */
+	function reconcileLocal(server: Player) {
+		const pred = ensurePredictor(poseOf(server));
+		if (!pred) return;
+		const dx = server.x - pred.pose.x;
+		const dz = server.z - pred.pose.z;
+		const distance = Math.hypot(dx, dz);
+		const yawDelta = Math.atan2(
+			Math.sin(server.yaw - pred.pose.yaw),
+			Math.cos(server.yaw - pred.pose.yaw)
+		);
+		if (distance > 0.5 || Math.abs(yawDelta) > 0.5) {
+			pred.setPose(poseOf(server));
+			predictionErrorM = 0;
+		} else {
+			const pull = 0.08;
+			pred.setPose({
+				...pred.pose,
+				x: pred.pose.x + dx * pull,
+				y: server.y,
+				z: pred.pose.z + dz * pull,
+				yaw: pred.pose.yaw + yawDelta * pull
+			});
+		}
+		predictionErrorM = distance;
 	}
 
 	onMount(() => {
@@ -471,6 +658,51 @@
 				longTaskTimeMs = 0;
 				frameSamples = [];
 			}
+			// Gamepad is sampled every animation frame so stick input reaches
+			// prediction and the network at frame rate instead of the 20 Hz
+			// input timer. State writes are guarded to avoid reactivity churn.
+			const input = sampleInput();
+			if (input.drive !== inputDrive) inputDrive = input.drive;
+			if (input.turn !== inputTurn) inputTurn = input.turn;
+			if (input.intake !== inputIntake) inputIntake = input.intake;
+			if (input.outtake !== inputOuttake) inputOuttake = input.outtake;
+			if (input.source !== controlSource) controlSource = input.source;
+			sendInputFrom(input);
+
+			let localPose: RobotPose | null = null;
+			if (matchRunning && localId) {
+				const pred = predictor;
+				const serverLocal = players.find((player) => player.id === localId);
+				if (pred && serverLocal) {
+					pred.step({ turn: input.turn, drive: input.drive }, dt);
+					localPose = pred.pose;
+					// Balls still render at their server positions, which lag
+					// the predicted robot by roughly one round-trip. Where the
+					// predicted footprint would sink into a ball, blend the
+					// rendered pose back toward the last server pose so the
+					// robot visibly nudges balls instead of clipping through
+					// them. The factor ramps continuously with proximity.
+					const robotRadius = Math.hypot(physics.robotWidthM, physics.robotLengthM) * 0.5;
+					const reach = robotRadius + objectFrame.radius;
+					const renderedPositions = renderedObjectFrame.positions;
+					let nearestBall = Infinity;
+					for (let index = 0; index < renderedPositions.length; index += 3) {
+						const dx = renderedPositions[index] - localPose.x;
+						const dz = renderedPositions[index + 2] - localPose.z;
+						const distance = Math.hypot(dx, dz);
+						if (distance < nearestBall) nearestBall = distance;
+					}
+					if (nearestBall < reach) {
+						const blendToServer = ((reach - nearestBall) / reach) * 0.55;
+						localPose = {
+							...localPose,
+							x: localPose.x + (serverLocal.x - localPose.x) * blendToServer,
+							z: localPose.z + (serverLocal.z - localPose.z) * blendToServer
+						};
+					}
+				}
+			}
+
 			const currentById = new Map(renderedPlayers.map((player) => [player.id, player]));
 			const blend = 1 - Math.exp(-24 * dt);
 
@@ -479,6 +711,24 @@
 			} else {
 				let changed = players.length !== renderedPlayers.length;
 				const nextPlayers = players.map((target) => {
+					// The local robot renders its predicted pose directly with
+					// no smoothing; prediction already eliminates perceived lag.
+					if (localPose && target.id === localId) {
+						changed = true;
+						return {
+							...target,
+							x: localPose.x,
+							y: localPose.y,
+							z: localPose.z,
+							yaw: localPose.yaw,
+							headingDeg: (localPose.yaw * 180) / Math.PI,
+							velocityX: localPose.vx,
+							velocityY: target.velocityY ?? 0,
+							velocityZ: localPose.vz,
+							angularVelocityY: localPose.angularVelocityY
+						};
+					}
+
 					const current = currentById.get(target.id);
 					if (!current) {
 						changed = true;
@@ -646,6 +896,10 @@
 							stateMessagesInWindow += 1;
 							snapshotBytes = event.data.byteLength;
 							players = message.players;
+							if (localId) {
+								const localServer = message.players.find((player) => player.id === localId);
+								if (localServer) reconcileLocal(localServer);
+							}
 							objectFrame = {
 								objectId: message.objectId,
 								positions: message.positions,
@@ -653,7 +907,20 @@
 								color: message.objectColor
 							};
 							contacts = message.contacts;
+							if (message.matchRunning && receivedMatchState && !matchRunning) {
+								startCueVisible = true;
+								if (startCueTimer !== undefined) window.clearTimeout(startCueTimer);
+								startCueTimer = window.setTimeout(() => (startCueVisible = false), 900);
+							}
 							matchClock = message.matchClock;
+							matchDurationSeconds = message.matchDurationSeconds;
+							preMatchRemainingSeconds = message.preMatchRemainingSeconds;
+							matchRunning = message.matchRunning;
+							practiceRunning = message.practiceRunning;
+							blueScore = message.score.blue;
+							redScore = message.score.red;
+							globalScore = message.score.global;
+							receivedMatchState = true;
 							simulationClock = message.simulationClock;
 							serverTick = message.tick;
 							serverPhysicsTickMs = message.physicsTickMs;
@@ -672,6 +939,12 @@
 							if (message.physics && !physicsLoaded) {
 								physics = message.physics;
 								physicsLoaded = true;
+								robotSpecs.capacity = Math.round(physics.storageCapacity);
+								robotSpecs.intake_rate_bps = physics.intakeRateBps;
+								robotSpecs.outtake_rate_bps = physics.outtakeRateBps;
+								robotSpecs.outtake_velocity_mps = physics.outtakeVelocityMps;
+								robotSpecs.outtake_angle_deg = physics.outtakeAngleDeg;
+								robotSpecs.flywheel_width_m = physics.flywheelWidthM;
 							}
 							packVersion = `${message.gamePackId} · v${message.gamePackVersion}`;
 							semanticEvents = message.semanticEvents;
@@ -709,6 +982,8 @@
 			longTaskObserver?.disconnect();
 			window.clearInterval(inputTimer);
 			window.clearInterval(pingTimer);
+			if (startCueTimer !== undefined) window.clearTimeout(startCueTimer);
+			if (robotSpecsTimer !== undefined) window.clearTimeout(robotSpecsTimer);
 			window.removeEventListener('keydown', keydown);
 			window.removeEventListener('keyup', keyup);
 			window.removeEventListener('gamepadconnected', gamepadChanged);
@@ -721,6 +996,97 @@
 </script>
 
 <div class="relative h-[calc(100vh-3.5rem)] overflow-hidden bg-slate-950">
+	<!-- Compact field scoreboard. SU containment and EXT extinguishing scores
+	     arrive in the SCORE protocol section and are summed live. -->
+	<section
+		class="pointer-events-none fixed bottom-0 left-1/2 z-20 w-[600px] -translate-x-1/2 rounded-t-2xl bg-black font-sans leading-none font-black text-white drop-shadow-[0_3px_5px_rgba(0,0,0,0.65)]"
+		aria-label="Match scoreboard"
+	>
+		<div
+			class="m-2 flex items-stretch overflow-hidden rounded-lg border-2 border-slate-950 bg-slate-950 shadow-2xl"
+		>
+			<div
+				class="flex min-h-[132px] flex-1 flex-col justify-center gap-2 bg-[#c82d31] px-4 text-right text-[clamp(1rem,2.3vw,1.65rem)]"
+			>
+				{#each Array(3) as _, index (index)}
+					<p class="truncate">{redRoster[index]?.name ?? '—'}</p>
+				{/each}
+			</div>
+			<div class="flex w-[clamp(152px,23vw,206px)] shrink-0 flex-col bg-slate-950 text-center">
+				<div
+					class="flex flex-1 items-center justify-center bg-[#f8bd4c] px-2 text-[clamp(2.65rem,6.2vw,5.3rem)] tracking-[-0.08em] text-slate-950 tabular-nums"
+				>
+					{formatMatchClock(matchClock)}
+				</div>
+				<div
+					class="grid h-14 grid-cols-2 border-t-2 border-slate-950 text-[clamp(2rem,4.2vw,3.7rem)] tabular-nums sm:h-20"
+				>
+					<div class="flex items-center justify-center bg-[#c82d31]">{redScore}</div>
+					<div class="flex items-center justify-center border-l-2 border-slate-950 bg-[#627fe9]">
+						{blueScore}
+					</div>
+				</div>
+				{#if globalScore > 0}
+					<div
+						class="flex items-center justify-center gap-1 border-t border-slate-700 bg-slate-900 py-0.5 text-[0.9rem] text-[#d7ff7b]"
+					>
+						EXT {globalScore}
+					</div>
+				{/if}
+			</div>
+			<div
+				class="flex min-h-[132px] flex-1 flex-col justify-center gap-2 bg-[#627fe9] px-4 text-[clamp(1rem,2.3vw,1.65rem)]"
+			>
+				{#each Array(3) as _, index (index)}
+					<p class="truncate">{blueRoster[index]?.name ?? '—'}</p>
+				{/each}
+			</div>
+		</div>
+		<div
+			class="grid grid-cols-2 overflow-hidden bg-[#d7ff7b] px-3 py-1 text-[0.6rem] tracking-normal text-slate-950 sm:text-xs"
+		>
+			<span class="text-right">FIRST Global 2026</span>
+		</div>
+	</section>
+
+	{#if !matchRunning && practiceRunning}
+		<div class="fixed bottom-40 left-1/2 z-20 -translate-x-1/2">
+			<Button
+				variant="outline"
+				class="border-[#d7ff7b]/60 bg-black/70 text-[#d7ff7b] hover:bg-[#d7ff7b]/10"
+				onclick={endPractice}
+			>
+				End practice (freeze field)
+			</Button>
+		</div>
+	{/if}
+	{#if !matchRunning && !practiceRunning && receivedMatchState}
+		<div class="fixed bottom-40 left-1/2 z-20 -translate-x-1/2">
+			<Button
+				variant="outline"
+				class="border-white/20 bg-black/70 text-white hover:bg-white/10"
+				onclick={continuePractice}
+			>
+				Continue practising past the timer
+			</Button>
+		</div>
+	{/if}
+
+	{#if countdownVisible || startCueVisible}
+		<div
+			class="pointer-events-none absolute inset-0 z-30 grid place-items-center"
+			aria-live="assertive"
+		>
+			<p
+				class="font-black tracking-[-0.08em] text-white drop-shadow-[0_7px_16px_rgba(0,0,0,0.9)] select-none {startCueVisible
+					? 'text-[clamp(4.5rem,16vw,13rem)] tracking-[-0.1em]'
+					: 'text-[clamp(7rem,24vw,18rem)]'}"
+			>
+				{startCueVisible ? 'START' : Math.max(1, Math.ceil(preMatchRemainingSeconds))}
+			</p>
+		</div>
+	{/if}
+
 	<div
 		class="absolute top-4 left-4 z-10 rounded-lg border border-white/15 bg-black/60 px-4 py-3 text-sm text-white backdrop-blur"
 	>
@@ -732,13 +1098,14 @@
 		</p>
 		<p class="mt-1 text-xs text-white/60">Pack: {packVersion}</p>
 		<p class="mt-2 text-xs text-white/60">
-			W/S drive · A/D turn · Space intake · Gamepad: LS-Y + RS-X + RT
+			W/S drive · A/D turn · Space intake · E flywheel outtake · Gamepad: LS-Y + RS-X, left side
+			intakes · right side outtakes
 		</p>
 		<p class="mt-1 max-w-72 truncate text-xs text-white/50" title={gamepadName}>
 			<span class={gamepadConnected ? 'text-cyan-300' : 'text-white/35'}>●</span>
 			{gamepadConnected ? gamepadName : 'Connect a gamepad and press a button'}
 		</p>
-		<p class="mt-1 text-xs text-white/40">Left trigger: precision · A: brake</p>
+		<p class="mt-1 text-xs text-white/40">A: brake</p>
 		<p class="mt-1 text-xs text-white/40">
 			C: camera · F: flip north/south · B: field bounds · Ctrl+F3: diagnostics
 		</p>
@@ -794,11 +1161,128 @@
 			{fieldDebugOpen ? 'Hide field bounds' : 'Field bounds'}
 		</Button>
 		<Button
+			variant="outline"
+			class={robotSpecsOpen
+				? 'border-amber-300/60 bg-amber-300/15 text-amber-100 hover:bg-amber-300/25'
+				: 'border-white/20 bg-black/40 text-white hover:bg-white/10'}
+			onclick={() => (robotSpecsOpen = !robotSpecsOpen)}
+		>
+			Robot specs
+		</Button>
+		<Button
 			href="/dashboard"
 			variant="outline"
 			class="border-white/20 bg-black/40 text-white hover:bg-white/10">Leave match</Button
 		>
 	</div>
+	{#if robotSpecsOpen}
+		<section
+			class="absolute top-18 right-4 z-10 w-[19rem] rounded-lg border border-white/20 bg-black/85 p-3 text-sm text-white backdrop-blur"
+			aria-label="Robot mechanics specs"
+		>
+			<div class="mb-2 flex items-baseline justify-between">
+				<h2 class="font-semibold">ROBOT MECH SPECS</h2>
+				<span class="text-xs text-white/40">apply live</span>
+			</div>
+			<p class="mb-2 text-xs leading-relaxed text-white/55">
+				Space/E intake, E/LB outtake the wide flywheel. Values rebalance your robot without
+				restarting the match.
+			</p>
+			<div class="space-y-2 text-xs">
+				<label class="flex items-center justify-between gap-2" for="spec-capacity">
+					<span class="text-white/70">Storage</span>
+					<input
+						id="spec-capacity"
+						type="range"
+						min="1"
+						max="80"
+						step="1"
+						bind:value={robotSpecs.capacity}
+						onchange={scheduleRobotSpecs}
+						class="w-32 accent-amber-300"
+					/>
+					<span class="w-10 text-right tabular-nums">{robotSpecs.capacity}</span>
+				</label>
+				<label class="flex items-center justify-between gap-2" for="spec-intake">
+					<span class="text-white/70">Intake rate</span>
+					<input
+						id="spec-intake"
+						type="range"
+						min="1"
+						max="20"
+						step="0.5"
+						bind:value={robotSpecs.intake_rate_bps}
+						onchange={scheduleRobotSpecs}
+						class="w-32 accent-amber-300"
+					/>
+					<span class="w-10 text-right tabular-nums">{robotSpecs.intake_rate_bps.toFixed(1)}/s</span
+					>
+				</label>
+				<label class="flex items-center justify-between gap-2" for="spec-outrate">
+					<span class="text-white/70">Outtake rate</span>
+					<input
+						id="spec-outrate"
+						type="range"
+						min="1"
+						max="20"
+						step="0.5"
+						bind:value={robotSpecs.outtake_rate_bps}
+						onchange={scheduleRobotSpecs}
+						class="w-32 accent-amber-300"
+					/>
+					<span class="w-10 text-right tabular-nums"
+						>{robotSpecs.outtake_rate_bps.toFixed(1)}/s</span
+					>
+				</label>
+				<label class="flex items-center justify-between gap-2" for="spec-vel">
+					<span class="text-white/70">Launch speed</span>
+					<input
+						id="spec-vel"
+						type="range"
+						min="2"
+						max="12"
+						step="0.5"
+						bind:value={robotSpecs.outtake_velocity_mps}
+						onchange={scheduleRobotSpecs}
+						class="w-32 accent-amber-300"
+					/>
+					<span class="w-10 text-right tabular-nums"
+						>{robotSpecs.outtake_velocity_mps.toFixed(1)} m/s</span
+					>
+				</label>
+				<label class="flex items-center justify-between gap-2" for="spec-angle">
+					<span class="text-white/70">Launch angle</span>
+					<input
+						id="spec-angle"
+						type="range"
+						min="5"
+						max="60"
+						step="1"
+						bind:value={robotSpecs.outtake_angle_deg}
+						onchange={scheduleRobotSpecs}
+						class="w-32 accent-amber-300"
+					/>
+					<span class="w-10 text-right tabular-nums">{robotSpecs.outtake_angle_deg}°</span>
+				</label>
+				<label class="flex items-center justify-between gap-2" for="spec-width">
+					<span class="text-white/70">Flywheel width</span>
+					<input
+						id="spec-width"
+						type="range"
+						min="0.1"
+						max="0.6"
+						step="0.05"
+						bind:value={robotSpecs.flywheel_width_m}
+						onchange={scheduleRobotSpecs}
+						class="w-32 accent-amber-300"
+					/>
+					<span class="w-10 text-right tabular-nums"
+						>{robotSpecs.flywheel_width_m.toFixed(2)} m</span
+					>
+				</label>
+			</div>
+		</section>
+	{/if}
 	{#if debugOpen}
 		<aside
 			class="absolute top-18 right-4 z-10 max-h-[calc(100vh-5.5rem)] w-[19rem] overflow-y-auto border border-white/20 bg-black/92 p-2 font-mono text-[10px] leading-tight text-slate-200"
@@ -959,7 +1443,11 @@
 				<dd>
 					{controlSource} · d {inputDrive.toFixed(2)} · t {inputTurn.toFixed(2)} · i {inputIntake.toFixed(
 						2
-					)}
+					)} · o {inputOuttake.toFixed(2)}
+				</dd>
+				<dt class="text-white/40">pred</dt>
+				<dd class={highIsBadTone(predictionErrorM, 0.2, 0.5)}>
+					{predictor ? `${predictionErrorM.toFixed(3)} m err` : 'off'}
 				</dd>
 				<dt class="text-white/40">camera</dt>
 				<dd>{cameraMode}{cameraMode === 'robot' ? `/${cameraDirection}` : ''}</dd>
@@ -1040,7 +1528,13 @@
 		<ScriptedObjects frame={renderedObjectFrame} />
 		<T.Group>
 			{#each renderedPlayers as player (player.id)}
-				<RobotModel {player} {physics} local={player.id === localId} />
+				<RobotModel
+					{player}
+					{physics}
+					local={player.id === localId}
+					isIntaking={player.id === localId ? inputIntake > 0 : false}
+					isOuttaking={player.id === localId ? inputOuttake > 0 : false}
+				/>
 			{/each}
 		</T.Group>
 	</Canvas>

@@ -22,9 +22,19 @@ export function createAuth(env: AuthEnvironment, requestUrl?: string) {
   const webOrigin = (env.WEB_ORIGIN || 'http://localhost:5173').replace(/\/$/, '')
   const baseURL = `${apiOrigin}/api/auth`
 
+  const trustedOrigins = Array.from(new Set([
+    webOrigin,
+    apiOrigin,
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:4173',
+    'http://127.0.0.1:4173',
+    'http://localhost:8787'
+  ]))
+
   return betterAuth({
     baseURL,
-    trustedOrigins: [webOrigin, apiOrigin],
+    trustedOrigins,
     database: drizzleAdapter(db, {
       provider: "sqlite",
     }),

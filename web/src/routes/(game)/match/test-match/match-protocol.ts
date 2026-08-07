@@ -12,6 +12,8 @@ export type MatchPlayer = {
 	velocityY: number;
 	velocityZ: number;
 	angularVelocityY: number;
+	storedBalls: number;
+	capacity: number;
 };
 
 export type MatchPhysics = {
@@ -29,6 +31,13 @@ export type MatchPhysics = {
 	robotHeightM: number;
 	robotLengthM: number;
 	robotMaxSpeedMps: number;
+	robotMaxAccelerationMps2: number;
+	robotMaxDecelerationMps2: number;
+	robotMaxTurnRateRadps: number;
+	robotMaxAngularAccelerationRadps2: number;
+	robotLateralGripMps2: number;
+	robotTractionFriction: number;
+	robotTrackWidthM: number;
 	ballInertiaFactor: number;
 	ballDragCoefficient: number;
 	airDensityKgM3: number;
@@ -56,6 +65,14 @@ export type MatchPhysics = {
 	maxDriveForceN: number;
 	maxDrivePowerW: number;
 	maxBrakeForceN: number;
+	storageCapacity: number;
+	intakeRateBps: number;
+	outtakeRateBps: number;
+	outtakeVelocityMps: number;
+	outtakeAngleDeg: number;
+	flywheelWidthM: number;
+	outtakeForwardOffsetM: number;
+	outtakeHeightM: number;
 };
 
 export type MatchSnapshot = {
@@ -67,6 +84,10 @@ export type MatchSnapshot = {
 	objectRadius: number;
 	tick: number;
 	matchClock: number;
+	matchDurationSeconds: number;
+	preMatchRemainingSeconds: number;
+	matchRunning: boolean;
+	practiceRunning: boolean;
 	simulationClock: number;
 	clockDriftMs: number;
 	physicsTickMs: number;
@@ -86,6 +107,12 @@ export type MatchSnapshot = {
 	positions: Float32Array;
 	physics?: MatchPhysics;
 	semanticEvents: string[];
+	score: {
+		blue: number;
+		red: number;
+		global: number;
+		breakdown: Record<string, number>;
+	};
 };
 
 const decoder = new TextDecoder();
@@ -113,6 +140,12 @@ class Reader {
 
 	u32() {
 		const value = this.view.getUint32(this.offset, true);
+		this.offset += 4;
+		return value;
+	}
+
+	i32() {
+		const value = this.view.getInt32(this.offset, true);
 		this.offset += 4;
 		return value;
 	}
@@ -170,6 +203,10 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 		objectRadius: 0.05,
 		tick: 0,
 		matchClock: 0,
+		matchDurationSeconds: 150,
+		preMatchRemainingSeconds: 0,
+		matchRunning: true,
+		practiceRunning: false,
 		simulationClock: 0,
 		clockDriftMs: 0,
 		physicsTickMs: 0,
@@ -187,7 +224,8 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 		serverRssMiB: 0,
 		players: [],
 		positions: new Float32Array(),
-		semanticEvents: []
+		semanticEvents: [],
+		score: { blue: 0, red: 0, global: 0, breakdown: {} }
 	};
 
 	const view = new DataView(buffer);
@@ -216,6 +254,14 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 				snapshot.matchClock = section.f64();
 				snapshot.simulationClock = section.f64();
 				snapshot.clockDriftMs = section.f64();
+				if (section.offset + 17 <= sectionEnd) {
+					snapshot.matchDurationSeconds = section.f64();
+					snapshot.preMatchRemainingSeconds = section.f64();
+					snapshot.matchRunning = section.u8() !== 0;
+				}
+				if (section.offset + 1 <= sectionEnd) {
+					snapshot.practiceRunning = section.u8() !== 0;
+				}
 				break;
 			case 3:
 				snapshot.physicsTickMs = section.f64();
@@ -255,7 +301,9 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 						velocityX: section.f32(),
 						velocityY: section.f32(),
 						velocityZ: section.f32(),
-						angularVelocityY: section.f32()
+						angularVelocityY: section.f32(),
+						storedBalls: section.u32(),
+						capacity: section.u32()
 					});
 				}
 				snapshot.players = players;
@@ -293,6 +341,13 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					robotHeightM: section.f32(),
 					robotLengthM: section.f32(),
 					robotMaxSpeedMps: section.f32(),
+					robotMaxAccelerationMps2: 3,
+					robotMaxDecelerationMps2: 4,
+					robotMaxTurnRateRadps: 2.5,
+					robotMaxAngularAccelerationRadps2: 6,
+					robotLateralGripMps2: 6,
+					robotTractionFriction: 0.85,
+					robotTrackWidthM: 0.4,
 					ballInertiaFactor: 0.4,
 					ballDragCoefficient: 0.47,
 					airDensityKgM3: 1.225,
@@ -319,7 +374,15 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					maxBallAngularSpeedRadps: 240,
 					maxDriveForceN: 140,
 					maxDrivePowerW: 420,
-					maxBrakeForceN: 200
+					maxBrakeForceN: 200,
+					storageCapacity: 40,
+					intakeRateBps: 6,
+					outtakeRateBps: 3,
+					outtakeVelocityMps: 8,
+					outtakeAngleDeg: 35,
+					flywheelWidthM: 0.35,
+					outtakeForwardOffsetM: 0,
+					outtakeHeightM: 0.55
 				};
 				if (section.offset + 70 <= sectionEnd) {
 					physics.intakeEnabled = section.u8() !== 0;
@@ -352,8 +415,44 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					physics.maxDrivePowerW = section.f32();
 					physics.maxBrakeForceN = section.f32();
 				}
+				if (section.offset + 32 <= sectionEnd) {
+					physics.storageCapacity = section.f32();
+					physics.intakeRateBps = section.f32();
+					physics.outtakeRateBps = section.f32();
+					physics.outtakeVelocityMps = section.f32();
+					physics.outtakeAngleDeg = section.f32();
+					physics.flywheelWidthM = section.f32();
+					physics.outtakeForwardOffsetM = section.f32();
+					physics.outtakeHeightM = section.f32();
+				}
 				snapshot.physics = physics;
 				break;
+			case 8: {
+				const drivePhysics = snapshot.physics;
+				if (drivePhysics && section.offset + 28 <= sectionEnd) {
+					drivePhysics.robotMaxAccelerationMps2 = section.f32();
+					drivePhysics.robotMaxDecelerationMps2 = section.f32();
+					drivePhysics.robotMaxTurnRateRadps = section.f32();
+					drivePhysics.robotMaxAngularAccelerationRadps2 = section.f32();
+					drivePhysics.robotLateralGripMps2 = section.f32();
+					drivePhysics.robotTractionFriction = section.f32();
+					drivePhysics.robotTrackWidthM = section.f32();
+				}
+				break;
+			}
+			case 9: {
+				const blue = section.i32();
+				const red = section.i32();
+				const global = section.i32();
+				const breakdownCount = section.u32();
+				const breakdown: Record<string, number> = {};
+				for (let index = 0; index < breakdownCount && section.offset < sectionEnd; index += 1) {
+					const category = section.string();
+					breakdown[category] = section.i32();
+				}
+				snapshot.score = { blue, red, global, breakdown };
+				break;
+			}
 		}
 		offset = sectionEnd;
 	}

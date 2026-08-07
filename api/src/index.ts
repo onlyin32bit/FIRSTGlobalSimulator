@@ -20,13 +20,18 @@ app.use('*', logger())
 
 app.use('*', cors({
   origin: (origin, c) => {
+    if (!origin) return '*'
     const webOrigin = (c.env.WEB_ORIGIN || 'http://localhost:5173').replace(/\/$/, '')
     const apiOrigin = (c.env.API_ORIGIN || new URL(c.req.url).origin).replace(/\/$/, '')
-    return origin === webOrigin || origin === apiOrigin ? origin : null
+    const norm = origin.replace(/\/$/, '')
+    if (norm === webOrigin || norm === apiOrigin) return origin
+    if (norm.startsWith('http://localhost:') || norm.startsWith('http://127.0.0.1:')) return origin
+    return null
   },
   credentials: true,
-  allowHeaders: ['Content-Type', 'Authorization'],
-  allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
+  allowHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-Requested-With', 'Accept', 'Origin'],
+  allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  exposeHeaders: ['Set-Cookie']
 }))
 
 app.route('/api/auth', authRoutes)

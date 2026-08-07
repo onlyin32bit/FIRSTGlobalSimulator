@@ -1,63 +1,85 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "fgsim-api-dev",
-  "compatibility_date": "2026-08-05",
-  "main": "./src/index.ts",
-  "assets": {
-    "directory": "../pkgs/games",
-    "binding": "PACK_ASSETS",
-    "run_worker_first": true
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "fgsim",
-      "database_id": "local",
-      "migrations_dir": "drizzle"
-    }
-  ],
-  "compatibility_flags": [
-    "nodejs_compat"
-  ],
-  "durable_objects": {
-    "bindings": [
-      { "name": "MATCH_LOBBY", "class_name": "MatchLobby" }
-    ]
-  },
-  "migrations": [
-    { "tag": "v1-match-lobby", "new_sqlite_classes": ["MatchLobby"] }
-  ],
-  "vars": {
-    "WEB_ORIGIN": "http://localhost:5173",
-    "API_ORIGIN": "http://localhost:8787"
-  },
-  "env": {
-    "production": {
-      "name": "fgsim-api",
-      "compatibility_date": "2026-08-05",
-      "assets": {
-        "directory": "../pkgs/games",
-        "binding": "PACK_ASSETS",
-        "run_worker_first": true
-      },
-      "d1_databases": [
-        {
-          "binding": "DB",
-          "database_name": "fgsim",
-          "database_id": "e693e904-7e8d-437b-a071-663c0aec36ec",
-          "migrations_dir": "drizzle"
-        }
-      ],
-      "compatibility_flags": ["nodejs_compat"],
-      "durable_objects": {
-        "bindings": [
-          { "name": "MATCH_LOBBY", "class_name": "MatchLobby" }
-        ]
-      },
-      "vars": {
-        "WEB_ORIGIN": "https://REPLACE_WITH_WEB_ORIGIN",
-        "API_ORIGIN": "https://REPLACE_WITH_API_ORIGIN"
-      }
-    }
-  }
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "fgsim-api-dev",
+	"compatibility_date": "2026-08-05",
+	"main": "./src/index.ts",
+	"assets": {
+		"directory": "../pkgs/games",
+		"binding": "PACK_ASSETS",
+		"run_worker_first": true
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "fgsim",
+			"database_id": "local",
+			"migrations_dir": "drizzle"
+		}
+	],
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "MATCH_LOBBY",
+				"class_name": "MatchLobby"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1-match-lobby",
+			"new_sqlite_classes": [
+				"MatchLobby"
+			]
+		}
+	],
+	"vars": {
+		"WEB_ORIGIN": "https://fgsim.colloid.dev",
+		"API_ORIGIN": "https://api.fgsim.colloid.dev"
+	},
+	"env": {
+		"production": {
+			"name": "fgsim-api",
+			"compatibility_date": "2026-08-05",
+			"assets": {
+				"directory": "../pkgs/games",
+				"binding": "PACK_ASSETS",
+				"run_worker_first": true
+			},
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "fgsim",
+					"database_id": "e693e904-7e8d-437b-a071-663c0aec36ec",
+					"migrations_dir": "drizzle"
+				}
+			],
+			"compatibility_flags": [
+				"nodejs_compat"
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "MATCH_LOBBY",
+						"class_name": "MatchLobby"
+					}
+				]
+			},
+			"vars": {
+				"WEB_ORIGIN": "https://fgsim.colloid.dev",
+				"API_ORIGIN": "https://api.fgsim.colloid.dev"
+			},
+			"routes": [
+				{
+					"pattern": "api.fgsim.colloid.dev",
+					"zone_name": "colloid.dev",
+					"custom_domain": true,
+					"enabled": true,
+					"previews_enabled": false
+				}
+			]
+		}
+	}
 }
