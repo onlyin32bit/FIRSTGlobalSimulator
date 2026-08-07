@@ -131,6 +131,7 @@
 	let pingMs = $state<number | null>(null);
 	let packVersion = $state('Loading pack…');
 	let fieldAssets = $state<{ visual: string; physics: string; semantics: string } | null>(null);
+	let robotAssets = $state<{ visual: string; physics: string } | null>(null);
 	type FieldDefinition = {
 		colliders: Array<{
 			id: string;
@@ -851,16 +852,18 @@
 				return;
 			}
 			try {
-				const [ticket, currentUser, assets, metadata] = await Promise.all([
+				const [ticket, currentUser, assets, metadata, starterBotAssets] = await Promise.all([
 					api.createMatchTicket(activeMatchId),
 					api.getCurrentUser(),
 					api.getGamePackAssets('fgc-2026'),
-					api.getGamePackMetadata('fgc-2026')
+					api.getGamePackMetadata('fgc-2026'),
+					api.getRobotAssets('StarterBot')
 				]);
 				if (disposed) return;
 
 				localId = currentUser.user.id;
 				fieldAssets = assets;
+				robotAssets = starterBotAssets;
 				fieldDefinition = metadata.fieldDefinition;
 				const nextSocket = new WebSocket(ticket.ws_url);
 				nextSocket.binaryType = 'arraybuffer';
@@ -1528,13 +1531,16 @@
 		<ScriptedObjects frame={renderedObjectFrame} />
 		<T.Group>
 			{#each renderedPlayers as player (player.id)}
-				<RobotModel
-					{player}
-					{physics}
-					local={player.id === localId}
-					isIntaking={player.id === localId ? inputIntake > 0 : false}
-					isOuttaking={player.id === localId ? inputOuttake > 0 : false}
-				/>
+				{#if robotAssets}
+					<RobotModel
+						{player}
+						{physics}
+						{robotAssets}
+						local={player.id === localId}
+						isIntaking={player.id === localId ? inputIntake > 0 : false}
+						isOuttaking={player.id === localId ? inputOuttake > 0 : false}
+					/>
+				{/if}
 			{/each}
 		</T.Group>
 	</Canvas>

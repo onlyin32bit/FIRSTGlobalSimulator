@@ -5,6 +5,8 @@ import type { Bindings } from '../types'
 
 const PACK_ID = 'fgc-2026'
 const ALLOWED_ASSETS = new Set(['field.glb', 'field.physics.json', 'field.semantics.json'])
+const STARTER_BOT_ID = 'StarterBot'
+const ALLOWED_ROBOT_ASSETS = new Set(['bot.glb', 'bot.physics.json'])
 
 type Manifest = {
   id: string
@@ -28,7 +30,8 @@ const app = new Hono<{ Bindings: Bindings }>()
 type PackContext = Context<{ Bindings: Bindings }>
 
 function packPath(path: string) {
-  return `/${PACK_ID}/${path.replace(/^\/+/, '')}`
+  const normalized = path.replace(/^\/+/, '')
+  return normalized.startsWith('robots/') ? `/${normalized}` : `/games/${PACK_ID}/${normalized}`
 }
 
 async function getPackAsset(c: PackContext, path: string) {
@@ -217,6 +220,34 @@ app.get('/:id/assets/:asset', async (c) => {
     return new Response(response.body, { status: response.status, headers })
   } catch {
     return c.text('Game pack asset service is unavailable.', 503)
+  }
+})
+
+app.get('/:id/robots/:robot/assets', (c) => {
+  if (c.req.param('id') !== PACK_ID || c.req.param('robot') !== STARTER_BOT_ID) {
+    return jsonError(c, 404, 'VALIDATION_ERROR', 'Robot asset set not found.')
+  }
+  const prefix = `/api/game-packs/${PACK_ID}/robots/${STARTER_BOT_ID}/assets`
+  return jsonSuccess(c, {
+    visual: `${prefix}/bot.glb`,
+    physics: `${prefix}/bot.physics.json`
+  })
+})
+
+app.get('/:id/robots/:robot/assets/:asset', async (c) => {
+  if (c.req.param('id') !== PACK_ID || c.req.param('robot') !== STARTER_BOT_ID) {
+    return c.text('Robot asset set not found.', 404)
+  }
+  const asset = c.req.param('asset')
+  if (!ALLOWED_ROBOT_ASSETS.has(asset)) return c.text('Unknown robot asset.', 404)
+  try {
+    const response = await getPackAsset(c, `robots/${STARTER_BOT_ID}/${asset}`)
+    if (!response.ok) return c.text('Robot asset not found.', response.status === 404 ? 404 : 503)
+    const headers = new Headers(response.headers)
+    headers.set('cache-control', asset === 'bot.glb' ? 'public, max-age=86400' : 'public, max-age=300')
+    return new Response(response.body, { status: response.status, headers })
+  } catch {
+    return c.text('Robot asset service is unavailable.', 503)
   }
 })
 

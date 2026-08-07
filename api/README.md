@@ -29,7 +29,7 @@ The first administrator must be promoted through D1 during bootstrap. Thereafter
 - Configure the web worker service binding `API` to point at this worker (already declared in `web/wrangler.jsonc`).
 - Set `WEB_ORIGIN` to the public web origin and `API_ORIGIN` to the API worker origin.
 - Store `JWT_SECRET` with `wrangler secret put JWT_SECRET`; do not set it in `wrangler.jsonc` or commit it.
-- The Worker packages `../pkgs/games` as its `PACK_ASSETS` binding. It is the only service that serves pack assets and authoritative pack source; do not mount `pkgs/games` on game hosts.
+- The Worker packages `../pkgs` as its `PACK_ASSETS` binding. It is the only service that serves game-pack and robot assets plus authoritative pack source; do not mount `pkgs` on game hosts.
 - In the admin control center, create a Game server and copy its one-time key to the host as `GAME_SERVER_KEY`.
 - Configure the Rust host with `API_URL=https://your-api.example.com`, `GAME_SERVER_KEY=...`, and optional `GAME_SERVER_MAX_USERS=50`, `GAME_SERVER_MAX_MATCHES=10`, and `GAME_SERVER_SLOTS=10`. At startup it fetches `/api/game-packs/:id/runtime`, compiles the received physics, semantics, and Rhai sources in memory, then heartbeats every 10 seconds. Ticket routing only uses hosts whose heartbeat is less than 30 seconds old and whose reported capacity is not full.
 - The API alone signs and validates match tickets. A host exchanges the browser ticket for claims at `/api/game-servers/tickets/verify` using its generated server key, so `JWT_SECRET` is never deployed to a game server.

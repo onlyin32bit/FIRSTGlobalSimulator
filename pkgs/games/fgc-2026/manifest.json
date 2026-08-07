@@ -28,7 +28,16 @@
     "scoring": "rules/scoring.rhai",
     "penalties": "rules/penalties.rhai",
     "robot_rules": "rules/robot.rhai",
+    "starter_bot_behavior": "robots/StarterBot/robot.rhai",
     "arena": "rules/arena.rhai"
+  },
+  "robots": {
+    "StarterBot": {
+      "name": "Starter Robot",
+      "visual": "robots/StarterBot/bot.glb",
+      "physics": "robots/StarterBot/bot.physics.json",
+      "behavior": "robots/StarterBot/robot.rhai"
+    }
   },
   "directories": {
     "rules": "rules",

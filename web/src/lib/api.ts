@@ -369,6 +369,12 @@ export class APIClient {
 		);
 	}
 
+	getRobotAssets(id: 'StarterBot') {
+		return this.request<{ visual: string; physics: string }>(
+			`/api/game-packs/fgc-2026/robots/${encodeURIComponent(id)}/assets`
+		);
+	}
+
 	getAdminOverview() {
 		return this.request<{
 			metrics: {

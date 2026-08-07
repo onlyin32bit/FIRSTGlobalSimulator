@@ -8,7 +8,7 @@ use tracing::info;
 
 use super::match_runtime::{MatchRuntime, PlayerSnapshot, ScoreState};
 use super::pack_loader::{ArenaConfig, GamePackMetadata};
-use super::rhai_engine::RhaiEngine;
+use super::rhai_engine::{RhaiEngine, RobotInput};
 use super::sphere_runtime::{MechSpec, SphereRuntime, StepMetrics};
 
 pub struct MatchRegistry {
@@ -653,14 +653,22 @@ impl MatchRegistry {
                                 intake_power,
                                 outtake_power,
                                 sequence,
-                            } => runtime.set_player_input(
-                                &user_id,
-                                move_x,
-                                move_z,
-                                intake_power,
-                                outtake_power,
-                                sequence,
-                            ),
+                            } => {
+                                let input = rules.process_robot_input(RobotInput {
+                                    move_x,
+                                    move_z,
+                                    intake_power,
+                                    outtake_power,
+                                });
+                                runtime.set_player_input(
+                                    &user_id,
+                                    input.move_x,
+                                    input.move_z,
+                                    input.intake_power,
+                                    input.outtake_power,
+                                    sequence,
+                                )
+                            }
                             MatchInput::PlayerMech { user_id, mech } => {
                                 runtime.set_player_mech(&user_id, mech)
                             }

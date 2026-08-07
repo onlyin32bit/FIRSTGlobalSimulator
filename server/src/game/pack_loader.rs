@@ -393,7 +393,15 @@ impl PackLoader {
             .scripts
             .values()
             .map(|path| {
-                std::fs::read_to_string(root.join(path))
+                let source_path = if path.starts_with("robots/") {
+                    root.parent()
+                        .and_then(std::path::Path::parent)
+                        .unwrap_or(root)
+                        .join(path)
+                } else {
+                    root.join(path)
+                };
+                std::fs::read_to_string(source_path)
                     .map(|source| (path.clone(), source))
                     .map_err(|error| GameError::ManifestParseError(error.to_string()))
             })
@@ -672,12 +680,18 @@ mod tests {
             "rules/penalties.rhai",
             "rules/robot.rhai",
             "rules/scoring.rhai",
+            "robots/StarterBot/robot.rhai",
         ]
         .into_iter()
         .map(|path| {
+            let source_path = if path.starts_with("robots/") {
+                std::path::Path::new("../pkgs").join(path)
+            } else {
+                root.join(path)
+            };
             (
                 path.to_string(),
-                std::fs::read_to_string(root.join(path)).unwrap(),
+                std::fs::read_to_string(source_path).unwrap(),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -690,7 +704,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(metadata.manifest.id, "fgc-2026");
-        assert_eq!(metadata.scripts.len(), 4);
+        assert_eq!(metadata.scripts.len(), 5);
         assert_eq!(metadata.arena.object_count, 500);
         assert_eq!(metadata.arena.ball.diameter_m, 0.100);
         assert_eq!(metadata.arena.ball.mass_kg, 0.062);

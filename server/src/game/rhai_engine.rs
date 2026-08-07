@@ -1,4 +1,4 @@
-use rhai::{AST, Engine, Map, Scope};
+use rhai::{AST, Dynamic, Engine, Map, Scope};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -27,9 +27,18 @@ pub struct RuleOutcome {
     pub points: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RobotInput {
+    pub move_x: f32,
+    pub move_z: f32,
+    pub intake_power: f32,
+    pub outtake_power: f32,
+}
+
 pub struct RhaiEngine {
     engine: Engine,
     scoring_ast: Option<AST>,
+    robot_input_ast: Option<AST>,
     scripts: HashMap<String, AST>,
     outcomes: Arc<Mutex<Vec<RuleOutcome>>>,
 }
@@ -67,6 +76,7 @@ impl RhaiEngine {
         Self {
             engine,
             scoring_ast: None,
+            robot_input_ast: None,
             scripts: HashMap::new(),
             outcomes,
         }
@@ -77,6 +87,12 @@ impl RhaiEngine {
             Ok(ast) => {
                 if path.ends_with("scoring.rhai") {
                     self.scoring_ast = Some(ast.clone());
+                }
+                if ast
+                    .iter_functions()
+                    .any(|function| function.name == "robot_input" && function.params.len() == 1)
+                {
+                    self.robot_input_ast = Some(ast.clone());
                 }
                 self.scripts.insert(path.to_string(), ast);
                 info!("Successfully loaded and compiled API rule source: {}", path);
@@ -91,6 +107,46 @@ impl RhaiEngine {
 
     pub fn loaded_script_count(&self) -> usize {
         self.scripts.len()
+    }
+
+    /// Apply the robot package's authored input contract before simulation.
+    /// A failed or absent hook is fail-open so a malformed optional behavior
+    /// script cannot strand a connected driver.
+    pub fn process_robot_input(&self, input: RobotInput) -> RobotInput {
+        let Some(ast) = &self.robot_input_ast else {
+            return input;
+        };
+        let mut scope = Scope::new();
+        let mut authored = Map::new();
+        authored.insert("move_x".into(), Dynamic::from_float(input.move_x as f64));
+        authored.insert("move_z".into(), Dynamic::from_float(input.move_z as f64));
+        authored.insert(
+            "intake_power".into(),
+            Dynamic::from_float(input.intake_power as f64),
+        );
+        authored.insert(
+            "outtake_power".into(),
+            Dynamic::from_float(input.outtake_power as f64),
+        );
+        let result: Result<Map, _> =
+            self.engine.call_fn(&mut scope, ast, "robot_input", (authored,));
+        let Ok(result) = result else {
+            error!("Rhai robot_input hook failed; using raw driver input");
+            return input;
+        };
+        let number = |name: &str, fallback: f32| {
+            result
+                .get(name)
+                .and_then(|value| value.as_float().ok())
+                .map(|value| value as f32)
+                .unwrap_or(fallback)
+        };
+        RobotInput {
+            move_x: number("move_x", input.move_x),
+            move_z: number("move_z", input.move_z),
+            intake_power: number("intake_power", input.intake_power),
+            outtake_power: number("outtake_power", input.outtake_power),
+        }
     }
 
     /// Execute the authored semantic hook, if the scoring script defines it.
@@ -592,7 +648,7 @@ impl RhaiEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::RhaiEngine;
+    use super::{RhaiEngine, RobotInput};
 
     #[test]
     fn inspects_functions_and_engine_calls() {
@@ -630,5 +686,22 @@ mod tests {
         assert_eq!(outcomes[0].team, "blue");
         assert_eq!(outcomes[0].category, "SU");
         assert_eq!(outcomes[0].points, 1);
+    }
+
+    #[test]
+    fn executes_authored_robot_input_hook() {
+        let mut engine = RhaiEngine::new();
+        assert!(engine.load_source(
+            "robots/StarterBot/robot.rhai",
+            "fn robot_input(input) { #{ move_x: input.move_x, move_z: input.move_z, intake_power: 0.0, outtake_power: input.outtake_power } }"
+        ));
+        let input = engine.process_robot_input(RobotInput {
+            move_x: 0.2,
+            move_z: -0.4,
+            intake_power: 1.0,
+            outtake_power: 0.5,
+        });
+        assert_eq!(input.intake_power, 0.0);
+        assert_eq!(input.outtake_power, 0.5);
     }
 }

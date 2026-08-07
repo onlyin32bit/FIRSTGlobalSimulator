@@ -1,0 +1,19 @@
+Wheels:
+Wheel1
+Wheel2
+Wheel3
+Wheel4
+Wheel5
+Wheel6
+
+Intake:
+IntakeRoller: Roller for intake (Rotate along local X-axis)
+
+Outtake:
+OuttakeRoller: Shooter Roller (Rotate along local X-axis)
+
+Transfer: 
+Transfer Flap: Flap to transfer balls into Shooter (Rotate along local X-axis)
+
+Climbing Mechanism:
+ClimbWheel1 & ClimbWheel2: Climb Wheels (Rotate along local X-axis)
