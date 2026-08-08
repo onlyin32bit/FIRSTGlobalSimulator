@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 
 use super::pack_loader::ArenaConfig;
+use super::match_registry::ObjectPositionsSync;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchPhase {
@@ -458,16 +459,35 @@ impl MatchRuntime {
             .collect()
     }
 
-    pub fn field_object_positions(&self) -> Vec<[f32; 3]> {
-        self.objects
-            .iter()
-            .filter_map(|object| {
-                self.rigid_body_set.get(object.body).map(|body| {
+    pub fn field_object_positions(&self) -> ObjectPositionsSync {
+        let count = self.objects.len() as u32;
+        let mask_bytes = (count as usize + 7) / 8;
+        let mut active_mask = vec![0u8; mask_bytes];
+        let mut moving_mask = vec![0u8; mask_bytes];
+        let mut quantized_positions = Vec::with_capacity(count as usize * 3);
+
+        for (i, object) in self.objects.iter().enumerate() {
+            if let Some(body) = self.rigid_body_set.get(object.body) {
+                active_mask[i / 8] |= 1 << (i % 8);
+                if !body.is_sleeping() {
+                    moving_mask[i / 8] |= 1 << (i % 8);
                     let position = body.translation();
-                    [position.x, position.y, position.z]
-                })
-            })
-            .collect()
+                    let quantize = |v: f32| -> u16 {
+                        ((v + 8.0) * 4095.9375).clamp(0.0, 65535.0) as u16
+                    };
+                    quantized_positions.push(quantize(position.x));
+                    quantized_positions.push(quantize(position.y));
+                    quantized_positions.push(quantize(position.z));
+                }
+            }
+        }
+
+        ObjectPositionsSync {
+            count,
+            active_mask,
+            moving_mask,
+            quantized_positions,
+        }
     }
 
     pub fn contact_count(&self) -> usize {

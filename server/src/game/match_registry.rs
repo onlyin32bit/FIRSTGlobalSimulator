@@ -69,6 +69,14 @@ pub enum MatchInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct ObjectPositionsSync {
+    pub count: u32,
+    pub active_mask: Vec<u8>,
+    pub moving_mask: Vec<u8>,
+    pub quantized_positions: Vec<u16>,
+}
+
+#[derive(Debug, Clone)]
 pub struct MatchStateSync {
     pub tick: u64,
     pub game_pack_id: String,
@@ -77,7 +85,7 @@ pub struct MatchStateSync {
     pub object_id: String,
     pub object_radius: f32,
     pub object_color: String,
-    pub object_positions: Vec<[f32; 3]>,
+    pub object_positions: ObjectPositionsSync,
     pub contacts: usize,
     pub match_clock: f64,
     pub match_duration_seconds: f64,
@@ -254,7 +262,7 @@ impl RuntimeBackend {
         }
     }
 
-    fn positions(&self) -> Vec<[f32; 3]> {
+    fn positions(&self) -> ObjectPositionsSync {
         match self {
             Self::Rapier(runtime) => runtime.field_object_positions(),
             Self::Sphere(runtime) => runtime.field_object_positions(),
@@ -813,7 +821,7 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics, include_physics
     const SEMANTIC_EVENTS: u16 = 7;
     const DRIVE: u16 = 8;
     const SCORE: u16 = 9;
-    let mut output = Vec::with_capacity(1024 + state.object_positions.len() * 12);
+    let mut output = Vec::with_capacity(1024 + state.object_positions.count as usize * 12);
     output.extend_from_slice(b"FGS1");
     put_u16(&mut output, 1);
     put_u16(&mut output, 4);
@@ -878,11 +886,11 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics, include_physics
         }
     });
     section(&mut output, OBJECTS, |bytes| {
-        put_u32(bytes, state.object_positions.len() as u32);
-        for position in &state.object_positions {
-            for value in position {
-                put_f32(bytes, *value);
-            }
+        put_u32(bytes, state.object_positions.count);
+        bytes.extend_from_slice(&state.object_positions.active_mask);
+        bytes.extend_from_slice(&state.object_positions.moving_mask);
+        for value in &state.object_positions.quantized_positions {
+            put_u16(bytes, *value);
         }
     });
     if include_physics {
@@ -1099,9 +1107,14 @@ mod protocol_tests {
             players: Vec::new(),
             object_id: "ball".into(),
             object_radius: 0.05,
-            object_color: "#fff".into(),
-            object_positions: vec![[1.0, 2.0, 3.0]; 1000],
-            contacts: 2,
+            object_color: "test".to_string(),
+            object_positions: ObjectPositionsSync {
+                count: 0,
+                active_mask: vec![],
+                moving_mask: vec![],
+                quantized_positions: vec![],
+            },
+            contacts: 0,
             match_clock: 1.0,
             match_duration_seconds: 150.0,
             pre_match_remaining_seconds: 0.0,

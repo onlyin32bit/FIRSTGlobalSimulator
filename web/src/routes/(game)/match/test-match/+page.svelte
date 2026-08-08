@@ -459,16 +459,15 @@
 		lastSentIntake = input.intake;
 		lastSentOuttake = input.outtake;
 		lastInputSentAt = now;
-		socket.send(
-			JSON.stringify({
-				type: 'input',
-				sequence: ++sequence,
-				move_x: input.turn,
-				move_z: input.drive,
-				intake_power: input.intake,
-				outtake_power: input.outtake
-			})
-		);
+		const buffer = new ArrayBuffer(25);
+		const view = new DataView(buffer);
+		view.setUint8(0, 1);
+		view.setBigUint64(1, BigInt(++sequence), true);
+		view.setFloat32(9, input.turn, true);
+		view.setFloat32(13, input.drive, true);
+		view.setFloat32(17, input.intake, true);
+		view.setFloat32(21, input.outtake, true);
+		socket.send(buffer);
 	}
 	function sendInput(force = false) {
 		sendInputFrom(sampleInput(), force);

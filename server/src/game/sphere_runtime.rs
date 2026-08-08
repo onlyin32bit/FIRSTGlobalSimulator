@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
+use super::match_registry::ObjectPositionsSync;
 use super::match_runtime::{MatchContext, MatchPhase, PlayerSnapshot, ScoreState};
 use super::pack_loader::{
     ArenaConfig, FieldBoundary, FieldCollider, FieldDefinition, FieldTrigger, RampPhysicsConfig,
@@ -1462,14 +1463,34 @@ impl SphereRuntime {
             .collect()
     }
 
-    pub fn field_object_positions(&self) -> Vec<[f32; 3]> {
-        // Unreleased balls remain inside the dispenser and must not be drawn
-        // as a visible stack before the match-start signal.
-        self.balls
-            .iter()
-            .filter(|ball| ball.active)
-            .map(|ball| ball.position)
-            .collect()
+    pub fn field_object_positions(&self) -> ObjectPositionsSync {
+        let count = self.balls.len() as u32;
+        let mask_bytes = (count as usize + 7) / 8;
+        let mut active_mask = vec![0u8; mask_bytes];
+        let mut moving_mask = vec![0u8; mask_bytes];
+        let mut quantized_positions = Vec::with_capacity(count as usize * 3);
+
+        for (i, ball) in self.balls.iter().enumerate() {
+            if ball.active {
+                active_mask[i / 8] |= 1 << (i % 8);
+                if !ball.sleeping {
+                    moving_mask[i / 8] |= 1 << (i % 8);
+                    let quantize = |v: f32| -> u16 {
+                        ((v + 8.0) * 4095.9375).clamp(0.0, 65535.0) as u16
+                    };
+                    quantized_positions.push(quantize(ball.position[0]));
+                    quantized_positions.push(quantize(ball.position[1]));
+                    quantized_positions.push(quantize(ball.position[2]));
+                }
+            }
+        }
+
+        ObjectPositionsSync {
+            count,
+            active_mask,
+            moving_mask,
+            quantized_positions,
+        }
     }
 
     pub fn contact_count(&self) -> usize {

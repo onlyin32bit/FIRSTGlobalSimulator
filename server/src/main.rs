@@ -544,6 +544,28 @@ async fn handle_socket(
                 if registry.is_player_kicked(&claims.match_id, &claims.sub).await || registry.is_match_stopped(&claims.match_id).await { break; }
             },
             message = receiver.next() => match message {
+                Some(Ok(Message::Binary(bin))) => {
+                    if bin.len() == 25 && bin[0] == 1 {
+                        let mut arr8 = [0u8; 8];
+                        arr8.copy_from_slice(&bin[1..9]);
+                        let sequence = u64::from_le_bytes(arr8);
+                        
+                        let mut arr4 = [0u8; 4];
+                        arr4.copy_from_slice(&bin[9..13]);
+                        let move_x = f32::from_le_bytes(arr4);
+                        
+                        arr4.copy_from_slice(&bin[13..17]);
+                        let move_z = f32::from_le_bytes(arr4);
+                        
+                        arr4.copy_from_slice(&bin[17..21]);
+                        let intake_power = f32::from_le_bytes(arr4);
+                        
+                        arr4.copy_from_slice(&bin[21..25]);
+                        let outtake_power = f32::from_le_bytes(arr4);
+                        
+                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, intake_power, outtake_power, sequence }).await;
+                    }
+                }
                 Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
                     Ok(ClientMessage::Input { sequence, move_x, move_z, intake_power, outtake_power }) => {
                         let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, intake_power, outtake_power, sequence }).await;

@@ -75,19 +75,20 @@ export type MatchPhysics = {
 	outtakeHeightM: number;
 };
 
-export type MatchSnapshot = {
-	protocol: 'FGS1';
+export interface MatchSnapshot {
+	tick: bigint;
 	gamePackId: string;
 	gamePackVersion: string;
 	objectId: string;
 	objectColor: string;
 	objectRadius: number;
-	tick: number;
+	positions: Float32Array;
 	matchClock: number;
 	matchDurationSeconds: number;
 	preMatchRemainingSeconds: number;
 	matchRunning: boolean;
 	practiceRunning: boolean;
+	protocol: 'FGS1';
 	simulationClock: number;
 	clockDriftMs: number;
 	physicsTickMs: number;
@@ -175,6 +176,9 @@ class Reader {
 		return decoder.decode(bytes);
 	}
 }
+
+// Maintain persistent state for sleeping objects across snapshots
+let persistentPositions = new Float32Array(3000); // Max 1000 balls * 3
 
 /**
  * Decode the FGS1 sectioned little-endian protocol. Unknown section tags are
@@ -320,8 +324,42 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 			}
 			case 5: {
 				const count = section.u32();
-				const positions = new Float32Array(count * 3);
-				for (let index = 0; index < positions.length; index += 1) positions[index] = section.f32();
+				const maskBytes = Math.ceil(count / 8);
+				const activeMask = new Uint8Array(view.buffer, section.offset, maskBytes);
+				section.offset += maskBytes;
+				const movingMask = new Uint8Array(view.buffer, section.offset, maskBytes);
+				section.offset += maskBytes;
+
+				if (persistentPositions.length < count * 3) {
+					const newArr = new Float32Array(count * 3);
+					newArr.set(persistentPositions);
+					persistentPositions = newArr;
+				}
+
+				let activeCount = 0;
+				for (let i = 0; i < count; i++) {
+					if ((activeMask[i >> 3] & (1 << (i & 7))) !== 0) activeCount++;
+				}
+
+				const positions = new Float32Array(activeCount * 3);
+				let writeIndex = 0;
+				for (let i = 0; i < count; i++) {
+					const active = (activeMask[i >> 3] & (1 << (i & 7))) !== 0;
+					if (!active) continue;
+
+					const moving = (movingMask[i >> 3] & (1 << (i & 7))) !== 0;
+					if (moving) {
+						const unquantize = (v: number) => v / 4095.9375 - 8.0;
+						persistentPositions[i * 3] = unquantize(section.u16());
+						persistentPositions[i * 3 + 1] = unquantize(section.u16());
+						persistentPositions[i * 3 + 2] = unquantize(section.u16());
+					}
+
+					positions[writeIndex * 3] = persistentPositions[i * 3];
+					positions[writeIndex * 3 + 1] = persistentPositions[i * 3 + 1];
+					positions[writeIndex * 3 + 2] = persistentPositions[i * 3 + 2];
+					writeIndex++;
+				}
 				snapshot.positions = positions;
 				break;
 			}
