@@ -31,7 +31,6 @@ export type MatchPhysics = {
 	robotHeightM: number;
 	robotLengthM: number;
 	robotMaxSpeedMps: number;
-	robotRollingResistanceMps2: number;
 	robotMaxAccelerationMps2: number;
 	robotMaxDecelerationMps2: number;
 	robotMaxTurnRateRadps: number;
@@ -342,7 +341,6 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					robotHeightM: section.f32(),
 					robotLengthM: section.f32(),
 					robotMaxSpeedMps: section.f32(),
-					robotRollingResistanceMps2: 0.35,
 					robotMaxAccelerationMps2: 3,
 					robotMaxDecelerationMps2: 4,
 					robotMaxTurnRateRadps: 2.5,
@@ -426,9 +424,6 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					physics.flywheelWidthM = section.f32();
 					physics.outtakeForwardOffsetM = section.f32();
 					physics.outtakeHeightM = section.f32();
-				}
-				if (section.offset + 4 <= sectionEnd) {
-					physics.robotRollingResistanceMps2 = section.f32();
 				}
 				snapshot.physics = physics;
 				break;

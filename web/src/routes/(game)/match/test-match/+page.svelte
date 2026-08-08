@@ -17,6 +17,12 @@
 		type MatchPhysics as PhysicsModel,
 		type MatchPlayer as Player
 	} from './match-protocol';
+	import {
+		DrivePredictor,
+		type DriveParams,
+		type FieldCollider,
+		type RobotPose
+	} from './prediction';
 	const activeMatchId = $derived(page.params.matchId ?? '');
 
 	type ObjectFrame = {
@@ -61,7 +67,6 @@
 		robotHeightM: 0.5,
 		robotLengthM: 0.5,
 		robotMaxSpeedMps: 4,
-		robotRollingResistanceMps2: 0.35,
 		robotMaxAccelerationMps2: 3,
 		robotMaxDecelerationMps2: 4,
 		robotMaxTurnRateRadps: 2.5,
@@ -76,12 +81,12 @@
 		floorStaticFriction: 0.85,
 		floorDynamicFriction: 0.65,
 		floorRollingResistanceMps2: 0.55,
-		intakeEnabled: false,
-		intakeWidthM: 0,
-		intakeRadiusM: 0,
-		intakeForwardOffsetM: 0,
-		intakeCenterHeightM: 0,
-		intakeSurfaceSpeedMps: 0,
+		intakeEnabled: true,
+		intakeWidthM: 0.52,
+		intakeRadiusM: 0.045,
+		intakeForwardOffsetM: 0.38,
+		intakeCenterHeightM: 0.075,
+		intakeSurfaceSpeedMps: 3,
 		rampEnabled: true,
 		rampCenterX: -3,
 		rampStartZ: -1,
@@ -96,14 +101,14 @@
 		maxDriveForceN: 140,
 		maxDrivePowerW: 420,
 		maxBrakeForceN: 200,
-		storageCapacity: 0,
-		intakeRateBps: 0,
-		outtakeRateBps: 0,
-		outtakeVelocityMps: 0,
-		outtakeAngleDeg: 0,
-		flywheelWidthM: 0,
+		storageCapacity: 40,
+		intakeRateBps: 6,
+		outtakeRateBps: 3,
+		outtakeVelocityMps: 8,
+		outtakeAngleDeg: 35,
+		flywheelWidthM: 0.35,
 		outtakeForwardOffsetM: 0,
-		outtakeHeightM: 0
+		outtakeHeightM: 0.55
 	});
 	let robotSpecs = $state({
 		capacity: 40,
@@ -119,6 +124,8 @@
 	let error = $state('');
 	let localId = $state('');
 	let socket = $state.raw<WebSocket | undefined>(undefined);
+	let predictor = $state.raw<DrivePredictor | undefined>(undefined);
+	let predictionErrorM = $state(0);
 	let sequence = 0;
 	let pingNonce = 0;
 	let pingMs = $state<number | null>(null);
@@ -139,7 +146,6 @@
 	};
 	let fieldDefinition = $state<FieldDefinition | null>(null);
 	let fieldDebugOpen = $state(false);
-	let robotBoundsDebugOpen = $state(false);
 	let semanticEvents = $state<string[]>([]);
 	let activeTriggerIds = $derived(
 		new Set(
@@ -227,9 +233,11 @@
 	const pressed = new Set<string>();
 	const inputKeys = new Set([
 		'w',
+		' ',
 		'a',
 		's',
 		'd',
+		'e',
 		'arrowup',
 		'arrowdown',
 		'arrowleft',
@@ -399,9 +407,17 @@
 		const gamepad = activeGamepad();
 		let gamepadDrive = 0;
 		let gamepadTurn = 0;
+		let gamepadIntake = 0;
+		let gamepadOuttake = 0;
 		if (gamepad) {
 			gamepadDrive = applyDeadzone(-(gamepad.axes[1] ?? 0));
 			gamepadTurn = applyDeadzone(gamepad.axes[2] ?? gamepad.axes[0] ?? 0);
+			// Left side (LB/LT) intakes, right side (RB/RT) outtakes. Either
+			// trigger or bumper on its side drives the corresponding mechanism.
+			const left = Math.max(gamepad.buttons[4]?.value ?? 0, gamepad.buttons[6]?.value ?? 0);
+			const right = Math.max(gamepad.buttons[5]?.value ?? 0, gamepad.buttons[7]?.value ?? 0);
+			gamepadIntake = left;
+			gamepadOuttake = right;
 			// The A button commands neutral input, allowing the server-side
 			// brake limit to act.
 			if (gamepad.buttons[0]?.pressed) {
@@ -414,8 +430,8 @@
 		return {
 			drive: keyboardActive ? keyboardDrive : gamepadDrive,
 			turn: keyboardActive ? keyboardTurn : gamepadTurn,
-			intake: 0,
-			outtake: 0,
+			intake: pressed.has(' ') ? 1 : gamepadIntake,
+			outtake: pressed.has('e') ? 1 : gamepadOuttake,
 			source: (keyboardActive ? 'keyboard' : gamepad ? 'gamepad' : 'keyboard') as
 				'keyboard' | 'gamepad'
 		};
@@ -491,6 +507,91 @@
 		}, 180);
 	}
 
+	function driveParams(): DriveParams | null {
+		if (!physicsLoaded || !fieldDefinition) return null;
+		const boundary = fieldDefinition.boundary;
+		const axes: FieldCollider['axes'] = [
+			[1, 0, 0],
+			[0, 1, 0],
+			[0, 0, 1]
+		];
+		return {
+			maxSpeedMps: physics.robotMaxSpeedMps,
+			maxAccelerationMps2: physics.robotMaxAccelerationMps2,
+			maxDecelerationMps2: physics.robotMaxDecelerationMps2,
+			maxTurnRateRadps: physics.robotMaxTurnRateRadps,
+			maxAngularAccelerationRadps2: physics.robotMaxAngularAccelerationRadps2,
+			lateralGripMps2: physics.robotLateralGripMps2,
+			tractionFriction: physics.robotTractionFriction,
+			trackWidthM: physics.robotTrackWidthM,
+			widthM: physics.robotWidthM,
+			lengthM: physics.robotLengthM,
+			heightM: physics.robotHeightM,
+			boundaryMinX: boundary.min[0],
+			boundaryMaxX: boundary.max[0],
+			boundaryMinZ: boundary.min[2],
+			boundaryMaxZ: boundary.max[2],
+			colliders: fieldDefinition.colliders.map((collider) => ({
+				min: collider.min,
+				max: collider.max,
+				center: collider.center ?? [0, 0, 0],
+				halfExtents: collider.halfExtents ?? [0, 0, 0],
+				axes: collider.axes ?? axes
+			}))
+		};
+	}
+
+	function poseOf(player: Player): RobotPose {
+		return {
+			x: player.x,
+			y: player.y,
+			z: player.z,
+			yaw: player.yaw,
+			vx: player.velocityX ?? 0,
+			vz: player.velocityZ ?? 0,
+			angularVelocityY: player.angularVelocityY ?? 0
+		};
+	}
+
+	function ensurePredictor(serverPose: RobotPose): DrivePredictor | null {
+		if (predictor) return predictor;
+		const params = driveParams();
+		if (!params) return null;
+		predictor = new DrivePredictor(params, serverPose);
+		return predictor;
+	}
+
+	/**
+	 * Pull the local predictor back toward the authoritative server pose each
+	 * snapshot. Large divergence (e.g. a collision the client cannot model)
+	 * snaps; small drift is blended invisibly so prediction never feels jumpy.
+	 */
+	function reconcileLocal(server: Player) {
+		const pred = ensurePredictor(poseOf(server));
+		if (!pred) return;
+		const dx = server.x - pred.pose.x;
+		const dz = server.z - pred.pose.z;
+		const distance = Math.hypot(dx, dz);
+		const yawDelta = Math.atan2(
+			Math.sin(server.yaw - pred.pose.yaw),
+			Math.cos(server.yaw - pred.pose.yaw)
+		);
+		if (distance > 0.5 || Math.abs(yawDelta) > 0.5) {
+			pred.setPose(poseOf(server));
+			predictionErrorM = 0;
+		} else {
+			const pull = 0.08;
+			pred.setPose({
+				...pred.pose,
+				x: pred.pose.x + dx * pull,
+				y: server.y,
+				z: pred.pose.z + dz * pull,
+				yaw: pred.pose.yaw + yawDelta * pull
+			});
+		}
+		predictionErrorM = distance;
+	}
+
 	onMount(() => {
 		let disposed = false;
 		let animationFrame = 0;
@@ -558,9 +659,9 @@
 				longTaskTimeMs = 0;
 				frameSamples = [];
 			}
-			// Gamepad is sampled every animation frame so input reaches the
-			// network at frame rate instead of the 20 Hz input timer. State writes
-			// are guarded to avoid reactivity churn.
+			// Gamepad is sampled every animation frame so stick input reaches
+			// prediction and the network at frame rate instead of the 20 Hz
+			// input timer. State writes are guarded to avoid reactivity churn.
 			const input = sampleInput();
 			if (input.drive !== inputDrive) inputDrive = input.drive;
 			if (input.turn !== inputTurn) inputTurn = input.turn;
@@ -568,6 +669,40 @@
 			if (input.outtake !== inputOuttake) inputOuttake = input.outtake;
 			if (input.source !== controlSource) controlSource = input.source;
 			sendInputFrom(input);
+
+			let localPose: RobotPose | null = null;
+			if (matchRunning && localId) {
+				const pred = predictor;
+				const serverLocal = players.find((player) => player.id === localId);
+				if (pred && serverLocal) {
+					pred.step({ turn: input.turn, drive: input.drive }, dt);
+					localPose = pred.pose;
+					// Balls still render at their server positions, which lag
+					// the predicted robot by roughly one round-trip. Where the
+					// predicted footprint would sink into a ball, blend the
+					// rendered pose back toward the last server pose so the
+					// robot visibly nudges balls instead of clipping through
+					// them. The factor ramps continuously with proximity.
+					const robotRadius = Math.hypot(physics.robotWidthM, physics.robotLengthM) * 0.5;
+					const reach = robotRadius + objectFrame.radius;
+					const renderedPositions = renderedObjectFrame.positions;
+					let nearestBall = Infinity;
+					for (let index = 0; index < renderedPositions.length; index += 3) {
+						const dx = renderedPositions[index] - localPose.x;
+						const dz = renderedPositions[index + 2] - localPose.z;
+						const distance = Math.hypot(dx, dz);
+						if (distance < nearestBall) nearestBall = distance;
+					}
+					if (nearestBall < reach) {
+						const blendToServer = ((reach - nearestBall) / reach) * 0.55;
+						localPose = {
+							...localPose,
+							x: localPose.x + (serverLocal.x - localPose.x) * blendToServer,
+							z: localPose.z + (serverLocal.z - localPose.z) * blendToServer
+						};
+					}
+				}
+			}
 
 			const currentById = new Map(renderedPlayers.map((player) => [player.id, player]));
 			const blend = 1 - Math.exp(-24 * dt);
@@ -577,6 +712,24 @@
 			} else {
 				let changed = players.length !== renderedPlayers.length;
 				const nextPlayers = players.map((target) => {
+					// The local robot renders its predicted pose directly with
+					// no smoothing; prediction already eliminates perceived lag.
+					if (localPose && target.id === localId) {
+						changed = true;
+						return {
+							...target,
+							x: localPose.x,
+							y: localPose.y,
+							z: localPose.z,
+							yaw: localPose.yaw,
+							headingDeg: (localPose.yaw * 180) / Math.PI,
+							velocityX: localPose.vx,
+							velocityY: target.velocityY ?? 0,
+							velocityZ: localPose.vz,
+							angularVelocityY: localPose.angularVelocityY
+						};
+					}
+
 					const current = currentById.get(target.id);
 					if (!current) {
 						changed = true;
@@ -746,6 +899,10 @@
 							stateMessagesInWindow += 1;
 							snapshotBytes = event.data.byteLength;
 							players = message.players;
+							if (localId) {
+								const localServer = message.players.find((player) => player.id === localId);
+								if (localServer) reconcileLocal(localServer);
+							}
 							objectFrame = {
 								objectId: message.objectId,
 								positions: message.positions,
@@ -943,7 +1100,10 @@
 				: `${Math.round(pingMs)} ms`}
 		</p>
 		<p class="mt-1 text-xs text-white/60">Pack: {packVersion}</p>
-		<p class="mt-2 text-xs text-white/60">W/S drive · A/D turn · Gamepad: LS-Y + RS-X</p>
+		<p class="mt-2 text-xs text-white/60">
+			W/S drive · A/D turn · Space intake · E flywheel outtake · Gamepad: LS-Y + RS-X, left side
+			intakes · right side outtakes
+		</p>
 		<p class="mt-1 max-w-72 truncate text-xs text-white/50" title={gamepadName}>
 			<span class={gamepadConnected ? 'text-cyan-300' : 'text-white/35'}>●</span>
 			{gamepadConnected ? gamepadName : 'Connect a gamepad and press a button'}
@@ -978,7 +1138,7 @@
 				<input
 					id="robot-camera-distance"
 					type="range"
-					min="1"
+					min="2.5"
 					max="18"
 					step="0.5"
 					bind:value={robotCameraDistance}
@@ -1005,12 +1165,12 @@
 		</Button>
 		<Button
 			variant="outline"
-			class={robotBoundsDebugOpen
-				? 'border-red-300/60 bg-red-300/15 text-red-100 hover:bg-red-300/25'
-				: 'border-red-300/30 bg-black/40 text-red-100 hover:bg-red-300/10'}
-			onclick={() => (robotBoundsDebugOpen = !robotBoundsDebugOpen)}
+			class={robotSpecsOpen
+				? 'border-amber-300/60 bg-amber-300/15 text-amber-100 hover:bg-amber-300/25'
+				: 'border-white/20 bg-black/40 text-white hover:bg-white/10'}
+			onclick={() => (robotSpecsOpen = !robotSpecsOpen)}
 		>
-			{robotBoundsDebugOpen ? 'Hide robot physics' : 'Robot physics'}
+			Robot specs
 		</Button>
 		<Button
 			href="/dashboard"
@@ -1288,8 +1448,10 @@
 						2
 					)} · o {inputOuttake.toFixed(2)}
 				</dd>
-				<dt class="text-white/40">pose source</dt>
-				<dd class="text-emerald-300">authoritative snapshot</dd>
+				<dt class="text-white/40">pred</dt>
+				<dd class={highIsBadTone(predictionErrorM, 0.2, 0.5)}>
+					{predictor ? `${predictionErrorM.toFixed(3)} m err` : 'off'}
+				</dd>
 				<dt class="text-white/40">camera</dt>
 				<dd>{cameraMode}{cameraMode === 'robot' ? `/${cameraDirection}` : ''}</dd>
 				<dt class="text-white/40">device</dt>
@@ -1336,7 +1498,7 @@
 			/>
 		{:else}
 			<T.PerspectiveCamera makeDefault position={[11, 12, 14]} fov={50}>
-				<OrbitControls target={[0, 0, 0]} enablePan={false} minDistance={1} maxDistance={28} />
+				<OrbitControls target={[0, 0, 0]} enablePan={false} minDistance={8} maxDistance={28} />
 			</T.PerspectiveCamera>
 		{/if}
 		<T.AmbientLight intensity={0.55} />
@@ -1375,7 +1537,8 @@
 						{physics}
 						{robotAssets}
 						local={player.id === localId}
-						showBounds={robotBoundsDebugOpen}
+						isIntaking={player.id === localId ? inputIntake > 0 : false}
+						isOuttaking={player.id === localId ? inputOuttake > 0 : false}
 					/>
 				{/if}
 			{/each}

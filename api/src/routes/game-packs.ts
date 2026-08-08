@@ -17,7 +17,6 @@ type Manifest = {
   objects: unknown[]
   phases: unknown[]
   scripts: Record<string, string>
-  robots?: Record<string, { physics?: string }>
 }
 
 type Bounds = { id: string; min: [number, number, number]; max: [number, number, number] }
@@ -166,12 +165,6 @@ async function loadPack(c: PackContext) {
   return { manifest, fieldPhysics, fieldSemantics }
 }
 
-async function loadRobotPhysics(c: PackContext, manifest: Manifest) {
-  const robotPhysicsPath = manifest.robots?.[STARTER_BOT_ID]?.physics
-  if (!robotPhysicsPath) throw new Error(`The deployed pack manifest is missing ${STARTER_BOT_ID} physics.`)
-  return readPackJson<unknown>(c, robotPhysicsPath)
-}
-
 app.get('/', (c) => jsonSuccess(c, { packs: [{ id: PACK_ID, name: 'Igniting Innovation', version: '1.0.0' }] }))
 
 app.get('/:id/metadata', async (c) => {
@@ -196,11 +189,10 @@ app.get('/:id/runtime', async (c) => {
   if (!server || server.disabledAt) return jsonError(c, 401, 'AUTH_FAILED', 'A valid game server key is required for runtime pack data.')
   try {
     const { manifest, fieldPhysics, fieldSemantics } = await loadPack(c)
-    const robotPhysics = await loadRobotPhysics(c, manifest)
     const scripts = Object.fromEntries(await Promise.all(
       Object.entries(manifest.scripts).map(async ([name, path]) => [path, await readPackText(c, path)] as const)
     ))
-    return jsonSuccess(c, { manifest, fieldPhysics, fieldSemantics, robotPhysics, scripts })
+    return jsonSuccess(c, { manifest, fieldPhysics, fieldSemantics, scripts })
   } catch (error) {
     return jsonError(c, 503, 'INTERNAL_ERROR', error instanceof Error ? error.message : 'Game pack runtime snapshot is unavailable.')
   }

@@ -112,30 +112,32 @@ fn arena_config() {
                 transition_speed_mps: 1.80,
                 exponent: 0.65
             },
-            // Mechanisms are intentionally disabled until their physical
-            // collision and transfer models are implemented.
-            intake_enabled: false,
-            intake_width_m: 0.001,
-            intake_radius_m: 0.001,
-            intake_forward_offset_m: 0.0,
-            intake_center_height_m: 0.0,
-            intake_surface_speed_mps: 0.001,
-            intake_friction: 0.0,
-            intake_normal_force_n: 0.0,
+            intake_enabled: true,
+            intake_width_m: 0.52,
+            intake_radius_m: 0.045,
+            intake_forward_offset_m: 0.38,
+            intake_center_height_m: 0.075,
+            intake_surface_speed_mps: 3.0,
+            intake_friction: 0.90,
+            intake_normal_force_n: 8.0,
             intake_restitution_curve: #{
                 low_speed: 0.22,
                 high_speed: 0.10,
                 transition_speed_mps: 1.50,
                 exponent: 0.70
             },
-            storage_capacity: 0.0,
-            intake_rate_bps: 0.0,
-            outtake_rate_bps: 0.0,
-            outtake_velocity_mps: 0.0,
-            outtake_angle_deg: 0.0,
-            flywheel_width_m: 0.0,
+            // Hopper storage + wide flywheel outtake. The flywheel spans 3.5
+            // WILDFIRE widths so the mouth accepts a spread of incoming balls
+            // and launches them across a matching opening.
+            storage_capacity: 40.0,
+            intake_rate_bps: 6.0,
+            outtake_rate_bps: 3.0,
+            outtake_velocity_mps: 8.0,
+            outtake_angle_deg: 35.0,
+            flywheel_width_m: 0.35,
             outtake_forward_offset_m: 0.0,
-            outtake_height_m: 0.0
+            // Above the 50 cm chassis top so a launched ball clears the body.
+            outtake_height_m: 0.55
         },
 
         goal_wall: #{

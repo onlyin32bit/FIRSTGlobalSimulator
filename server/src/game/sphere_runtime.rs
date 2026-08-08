@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use super::match_runtime::{MatchContext, MatchPhase, PlayerSnapshot, ScoreState};
@@ -56,12 +56,23 @@ struct PlayerBody {
     angular_velocity_y: f32,
     move_x: f32,
     move_z: f32,
+    intake_power: f32,
+    outtake_power: f32,
     sequence: u64,
     color: &'static str,
     /// Outward normal of a static surface touched during the previous solver
     /// step. This keeps the drivetrain from turning shallow wall contact into
     /// a complete stop on the following tick.
     wall_contact_normal: Option<Vec3>,
+    /// FIFO of ball indices captured into the on-robot hopper. Popping feeds
+    /// the flywheel so contained (scored) balls are never recycled.
+    stored: VecDeque<usize>,
+    /// Fractional outtake accumulator so slow rates don't lose partial balls.
+    outtake_accumulator: f32,
+    /// Fractional intake accumulator (capture is rate-limited too).
+    intake_accumulator: f32,
+    /// Per-player adjustable mech spec overrides (capacity, flywheel, rates).
+    mech: MechSpec,
 }
 
 /// Adjustable robot mechanic spec. Unset fields fall back to the arena pack.
@@ -82,8 +93,36 @@ impl MechSpec {
     }
 }
 
+/// Effective robot config = arena pack defaults merged with the player's
+/// adjustable mechanic overrides.
+fn effective_robot<'a>(base: &'a RobotPhysicsConfig, mech: &MechSpec) -> RobotPhysicsConfig {
+    let mut robot = base.clone();
+    if let Some(capacity) = mech.capacity {
+        robot.storage_capacity = capacity;
+    }
+    if let Some(rate) = mech.intake_rate_bps {
+        robot.intake_rate_bps = rate;
+    }
+    if let Some(speed) = mech.intake_surface_speed_mps {
+        robot.intake_surface_speed_mps = speed;
+    }
+    if let Some(rate) = mech.outtake_rate_bps {
+        robot.outtake_rate_bps = rate;
+    }
+    if let Some(velocity) = mech.outtake_velocity_mps {
+        robot.outtake_velocity_mps = velocity;
+    }
+    if let Some(angle) = mech.outtake_angle_deg {
+        robot.outtake_angle_deg = angle;
+    }
+    if let Some(width) = mech.flywheel_width_m {
+        robot.flywheel_width_m = width;
+    }
+    robot
+}
+
 /// A narrow, deterministic physics backend for the simulator's dominant case:
-/// equal-radius spheres, a carpet plane, four walls and authored robot OBBs.
+/// equal-radius spheres, a carpet plane, four walls and planar robot boxes.
 /// Keeping these arrays contiguous avoids Rapier's general constraint/island
 /// machinery and makes the 1,000-ball workload linear in nearby contacts.
 pub struct SphereRuntime {
@@ -102,7 +141,6 @@ pub struct SphereRuntime {
     ball_spawn: Vec3,
     ball_release_elapsed: Option<f32>,
     field_colliders: Vec<FieldCollider>,
-    robot_colliders: Vec<FieldCollider>,
     field_anchors: BTreeMap<String, Vec3>,
     field_triggers: Vec<FieldTrigger>,
     trigger_inside: Vec<bool>,
@@ -111,7 +149,6 @@ pub struct SphereRuntime {
 
 impl SphereRuntime {
     const GRID_BUCKETS: usize = 1 << 14;
-    #[cfg(test)]
     const FIELD_HALF_EXTENT: f32 = 8.0;
 
     pub fn new(match_id: String, game_pack_id: String, match_seed: u64) -> Self {
@@ -139,7 +176,6 @@ impl SphereRuntime {
             ball_spawn: [0.0; 3],
             ball_release_elapsed: None,
             field_colliders: Vec::new(),
-            robot_colliders: Vec::new(),
             field_anchors: BTreeMap::new(),
             field_triggers: Vec::new(),
             trigger_inside: Vec::new(),
@@ -170,7 +206,6 @@ impl SphereRuntime {
         self.field_boundary = field.boundary.clone();
         self.field_floor_y = field.floor_height_m;
         self.field_colliders = field.colliders.clone();
-        self.robot_colliders = field.robot_colliders.clone();
         self.field_anchors = field.anchors.clone();
         self.field_triggers = field.triggers.clone();
         self.ball_spawn = self.field_anchors.get("EXTballspawn").copied().unwrap_or([
@@ -327,9 +362,15 @@ impl SphereRuntime {
                 angular_velocity_y: 0.0,
                 move_x: 0.0,
                 move_z: 0.0,
+                intake_power: 0.0,
+                outtake_power: 0.0,
                 sequence: 0,
                 color,
                 wall_contact_normal: None,
+                stored: VecDeque::new(),
+                outtake_accumulator: 0.0,
+                intake_accumulator: 0.0,
+                mech: MechSpec::default(),
             },
         );
     }
@@ -353,15 +394,15 @@ impl SphereRuntime {
             player.sequence = sequence;
             player.move_x = move_x.clamp(-1.0, 1.0);
             player.move_z = move_z.clamp(-1.0, 1.0);
-            // Mechanisms are intentionally inert until their physical model
-            // exists. Keep accepting the legacy input fields for protocol
-            // compatibility, but never let them affect match state.
-            let _ = (intake_power, outtake_power);
+            player.intake_power = intake_power.clamp(0.0, 1.0);
+            player.outtake_power = outtake_power.clamp(0.0, 1.0);
         }
     }
 
     pub fn set_player_mech(&mut self, user_id: &str, mech: MechSpec) {
-        let _ = (user_id, mech);
+        if let Some(player) = self.players.get_mut(user_id) {
+            player.mech = mech;
+        }
     }
 
     pub fn apply_player_drive(&mut self, arena: &ArenaConfig, dt: f32) {
@@ -438,22 +479,131 @@ impl SphereRuntime {
         }
     }
 
+    /// Ball hopper mechanics: powered intake captures balls in the roller
+    /// mouth into storage, and the wide flywheel launches stored balls at the
+    /// adjustable velocity/angle with a deterministic lateral spread. Both
+    /// steps are rate-limited so a full robot swallows and spits at a steady
+    /// pace instead of vacuuming the field in one tick.
+    fn step_mechanics(&mut self, arena: &ArenaConfig, dt: f32) {
+        let radius = arena.ball.radius_m();
+        for (player_id, player) in self.players.iter_mut() {
+            let robot = effective_robot(&arena.robot, &player.mech);
+
+            // Intake capture.
+            if player.intake_power > 0.0
+                && robot.storage_capacity > 0
+                && robot.intake_rate_bps > 0.0
+            {
+                let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
+                let right = [-forward[2], 0.0, forward[0]];
+                player.intake_accumulator = (player.intake_accumulator
+                    + robot.intake_rate_bps * player.intake_power * dt)
+                    .min(120.0);
+                let mut candidates: Vec<(f32, usize)> = Vec::with_capacity(16);
+                let intake_world_y = (player.position[1] - robot.height_m * 0.5) + robot.intake_center_height_m;
+                for (index, ball) in self.balls.iter().enumerate() {
+                    if !ball.active {
+                        continue;
+                    }
+                    let delta = sub(ball.position, player.position);
+                    let forward_dist = dot(delta, forward);
+                    if forward_dist < -0.10
+                        || forward_dist > robot.intake_forward_offset_m + radius + 0.10
+                    {
+                        continue;
+                    }
+                    let lateral_dist = dot(delta, right);
+                    if lateral_dist.abs() > robot.intake_width_m * 0.5 + 0.08 {
+                        continue;
+                    }
+                    let vertical_dist = (ball.position[1] - intake_world_y).abs();
+                    if vertical_dist > radius + robot.intake_radius_m + 0.10 {
+                        continue;
+                    }
+                    candidates.push((forward_dist.abs(), index));
+                }
+                candidates.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+                for (_, index) in candidates {
+                    if player.intake_accumulator < 1.0 {
+                        break;
+                    }
+                    if player.stored.len() >= robot.storage_capacity {
+                        break;
+                    }
+                    if !self.balls[index].active {
+                        continue;
+                    }
+                    self.balls[index].active = false;
+                    player.stored.push_back(index);
+                    player.intake_accumulator -= 1.0;
+                    self.semantic_events.push(SemanticEvent {
+                        kind: "intake",
+                        target_id: player_id.clone(),
+                        entity_id: format!("ball:{index}"),
+                    });
+                }
+            }
+
+            // Wide flywheel outtake.
+            if player.outtake_power > 0.0
+                && !player.stored.is_empty()
+                && robot.outtake_rate_bps > 0.0
+                && robot.outtake_velocity_mps > 0.0
+            {
+                let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
+                let right = [-forward[2], 0.0, forward[0]];
+                player.outtake_accumulator +=
+                    robot.outtake_rate_bps * player.outtake_power * dt;
+                let pitch = robot.outtake_angle_deg.to_radians();
+                let horizontal = robot.outtake_velocity_mps * pitch.cos();
+                let vertical = robot.outtake_velocity_mps * pitch.sin();
+                let outtake_world_y = (player.position[1] - robot.height_m * 0.5) + robot.outtake_height_m;
+                while player.outtake_accumulator >= 1.0 && !player.stored.is_empty() {
+                    player.outtake_accumulator -= 1.0;
+                    let index = player.stored.pop_front().unwrap();
+                    // Deterministic hash spread so the wide mouth actually
+                    // spits across its width without breaking replayability.
+                    let jitter = (((index as u32).wrapping_mul(2654435761u32)) as f32
+                        / 4294967296.0)
+                        - 0.5;
+                    let exit = add(
+                        add(player.position, mul(forward, robot.outtake_forward_offset_m)),
+                        mul(right, jitter * robot.flywheel_width_m),
+                    );
+                    let ball = &mut self.balls[index];
+                    ball.position = [exit[0], outtake_world_y, exit[2]];
+                    ball.velocity = [
+                        forward[0] * horizontal + player.velocity[0],
+                        vertical + player.velocity[1],
+                        forward[2] * horizontal + player.velocity[2],
+                    ];
+                    ball.pre_solve_velocity = ball.velocity;
+                    // Realistic flywheel backspin (spin axis along right vector)
+                    let spin_rate = horizontal / arena.ball.radius_m().max(0.01);
+                    ball.angular_velocity = mul(right, -spin_rate);
+                    ball.quiet_ticks = 0;
+                    ball.sleeping = false;
+                    ball.grounded = false;
+                    ball.active = true;
+                    self.semantic_events.push(SemanticEvent {
+                        kind: "outtake",
+                        target_id: player_id.clone(),
+                        entity_id: format!("ball:{index}"),
+                    });
+                }
+            }
+        }
+    }
+
     pub fn tick(&mut self, dt: f64) {
         let dt = dt as f32;
-        self.context.clock += dt as f64;
-        let Some(arena) = self.arena.clone() else {
+        self.context.clock += dt as f64;        let Some(arena) = self.arena.clone() else {
             return;
         };
         if let Some(elapsed) = &mut self.ball_release_elapsed {
             *elapsed += dt;
         }
         self.release_queued_balls(&arena);
-        // Drive forces must be applied before integration so that the robot's
-        // updated velocity, its integrated position, and the collision solve all
-        // use the same frame's state. Calling apply_player_drive from outside
-        // tick() caused a one-tick positional lag: balls were integrated against
-        // the previous robot position while collision detection used the new one.
-        self.apply_player_drive(&arena, dt);
         let integrate_started = Instant::now();
         self.integrate(&arena, dt);
         self.metrics.integrate_ms = integrate_started.elapsed().as_secs_f64() * 1_000.0;
@@ -475,6 +625,7 @@ impl SphereRuntime {
             self.apply_robot_wall_velocity_constraints(&arena);
         }
         self.limit_ball_energy(&arena);
+        self.step_mechanics(&arena, dt);
         self.update_sleeping(&arena, dt);
         self.metrics.solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
         self.metrics.contacts = contacts;
@@ -696,27 +847,22 @@ impl SphereRuntime {
         }
 
         let field_colliders = &self.field_colliders;
-        let robot_colliders = &self.robot_colliders;
         let robot_center_y = self.robot_center_y(arena);
         let field_boundary = self.field_boundary.clone();
         for player in self.players.values_mut() {
-            for ball in &mut self.balls {
-                if !ball.active {
-                    continue;
-                }
-                let mut robot_contacts = 0;
-                if robot_colliders.is_empty() {
-                    if let Some((normal, penetration)) = sphere_obb_contact(
+            if arena.robot.intake_enabled {
+                for ball in &mut self.balls {
+                    if !ball.active {
+                        continue;
+                    }
+                    if let Some((normal, penetration, _, _)) = roller_contact(
                         ball.position,
                         radius,
                         player.position,
                         player.yaw,
-                        [
-                            arena.robot.width_m * 0.5,
-                            arena.robot.height_m * 0.5,
-                            arena.robot.length_m * 0.5,
-                        ],
+                        &arena.robot,
                     ) {
+                        contacts += 1;
                         resolve_ball_robot_position(
                             ball,
                             player,
@@ -729,35 +875,39 @@ impl SphereRuntime {
                             max_correction,
                             &self.field_boundary,
                         );
-                        robot_contacts += 1;
-                    }
-                } else {
-                    for collider in robot_colliders {
-                        if let Some((normal, penetration)) = sphere_robot_collider_contact(
-                            ball.position,
-                            radius,
-                            player,
-                            collider,
-                            self.field_floor_y,
-                        ) {
-                            resolve_ball_robot_position(
-                                ball,
-                                player,
-                                normal,
-                                penetration,
-                                radius,
-                                inverse_ball_mass,
-                                inverse_robot_mass,
-                                alpha,
-                                max_correction,
-                                &self.field_boundary,
-                            );
-                            robot_contacts += 1;
-                        }
+                        ball.sleeping = false;
+                        ball.quiet_ticks = 0;
                     }
                 }
-                if robot_contacts > 0 {
-                    contacts += robot_contacts;
+            }
+            for ball in &mut self.balls {
+                if !ball.active {
+                    continue;
+                }
+                if let Some((normal, penetration)) = sphere_obb_contact(
+                    ball.position,
+                    radius,
+                    player.position,
+                    player.yaw,
+                    [
+                        arena.robot.width_m * 0.5,
+                        arena.robot.height_m * 0.5,
+                        arena.robot.length_m * 0.5,
+                    ],
+                ) {
+                    contacts += 1;
+                    resolve_ball_robot_position(
+                        ball,
+                        player,
+                        normal,
+                        penetration,
+                        radius,
+                        inverse_ball_mass,
+                        inverse_robot_mass,
+                        alpha,
+                        max_correction,
+                        &self.field_boundary,
+                    );
                     player.position[1] = robot_center_y;
                     ball.sleeping = false;
                     ball.quiet_ticks = 0;
@@ -774,20 +924,8 @@ impl SphereRuntime {
                 field_boundary.min[2] + robot_z_extent,
                 field_boundary.max[2] - robot_z_extent,
             );
-            // Production packs provide robot-local authored colliders (for
-            // example the climbing wheels). Use those exact OBBs against the
-            // authored field volumes; retain the chassis fallback only for
-            // minimal test arenas that intentionally have no robot asset.
-            let (field_contacts, wall_normal) = if robot_colliders.is_empty() {
-                project_robot_field_colliders(player, &arena.robot, field_colliders)
-            } else {
-                project_robot_local_colliders(
-                    player,
-                    robot_colliders,
-                    field_colliders,
-                    self.field_floor_y,
-                )
-            };
+            let (field_contacts, wall_normal) =
+                project_robot_field_colliders(player, &arena.robot, field_colliders);
             contacts += field_contacts;
             if wall_normal.is_some() {
                 player.wall_contact_normal = wall_normal;
@@ -931,14 +1069,9 @@ impl SphereRuntime {
 
             // Resolve velocity, restitution (bouncing), and friction for all 3D field colliders (including SU goal walls)
             for collider in &self.field_colliders {
-                if let Some(normal) =
-                    sphere_collider_contact(ball.position, arena.ball.radius_m() * 1.01, collider)
-                {
+                if let Some(normal) = sphere_collider_contact(ball.position, arena.ball.radius_m() * 1.01, collider) {
                     let id_lower = collider.id.to_lowercase();
-                    let surface = if id_lower.contains("su")
-                        || id_lower.contains("goal")
-                        || id_lower.contains("polycarbonate")
-                    {
+                    let surface = if id_lower.contains("su") || id_lower.contains("goal") || id_lower.contains("polycarbonate") {
                         &arena.goal_wall
                     } else {
                         &arena.metal_wall
@@ -1001,7 +1134,7 @@ impl SphereRuntime {
         }
     }
 
-    fn apply_contact_velocities(&mut self, arena: &ArenaConfig, _dt: f32) {
+    fn apply_contact_velocities(&mut self, arena: &ArenaConfig, dt: f32) {
         let diameter_sq = arena.ball.diameter_m * arena.ball.diameter_m * 1.002;
         let robot_center_y = self.robot_center_y(arena);
         for &(left, right) in &self.pairs {
@@ -1109,38 +1242,88 @@ impl SphereRuntime {
             }
         }
 
-        let robot_colliders = &self.robot_colliders;
         for player in self.players.values_mut() {
-            for ball in &mut self.balls {
-                if !ball.active {
-                    continue;
-                }
-                let contact = if !robot_colliders.is_empty() {
-                    robot_colliders.iter().find_map(|collider| {
-                        sphere_robot_collider_contact(
-                            ball.position,
-                            arena.ball.radius_m() * 1.01,
-                            player,
-                            collider,
-                            self.field_floor_y,
-                        )
-                        .map(|(normal, _)| normal)
-                    })
-                } else {
-                    sphere_obb_contact(
+            if arena.robot.intake_enabled {
+                for ball in &mut self.balls {
+                    if !ball.active {
+                        continue;
+                    }
+                    let Some((normal, _, roller_point, roller_axis)) = roller_contact(
                         ball.position,
                         arena.ball.radius_m() * 1.01,
                         player.position,
                         player.yaw,
-                        [
-                            arena.robot.width_m * 0.5,
-                            arena.robot.height_m * 0.5,
-                            arena.robot.length_m * 0.5,
-                        ],
-                    )
-                    .map(|(normal, _)| normal)
-                };
-                let Some(normal) = contact else {
+                        &arena.robot,
+                    ) else {
+                        continue;
+                    };
+                    let robot_arm = sub(roller_point, player.position);
+                    let robot_point_velocity = add(
+                        player.velocity,
+                        cross([0.0, player.angular_velocity_y, 0.0], robot_arm),
+                    );
+                    let roller_angular_velocity = mul(
+                        roller_axis,
+                        -arena.robot.intake_surface_speed_mps * player.intake_power
+                            / arena.robot.intake_radius_m.max(0.001),
+                    );
+                    let roller_surface_velocity = add(
+                        robot_point_velocity,
+                        cross(
+                            roller_angular_velocity,
+                            mul(normal, arena.robot.intake_radius_m),
+                        ),
+                    );
+                    resolve_sphere_surface_velocity(
+                        ball,
+                        normal,
+                        roller_surface_velocity,
+                        &arena.robot.intake_restitution_curve,
+                        arena.robot.intake_friction,
+                        arena.robot.intake_friction,
+                        arena.ball.radius_m(),
+                        arena.ball.mass_kg,
+                        arena.ball.inertia_factor,
+                        arena.robot.intake_normal_force_n * player.intake_power * dt,
+                        arena.solver.restitution_velocity_threshold_mps,
+                    );
+                }
+            }
+            let robot = effective_robot(&arena.robot, &player.mech);
+            for ball in &mut self.balls {
+                if !ball.active {
+                    continue;
+                }
+                // Allow balls entering the intake opening when intake is enabled to pass into the hopper
+                if arena.robot.intake_enabled && (player.intake_power > 0.0 || player.stored.len() < robot.storage_capacity) {
+                    let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
+                    let right = [-forward[2], 0.0, forward[0]];
+                    let delta = sub(ball.position, player.position);
+                    let forward_dist = dot(delta, forward);
+                    let lateral_dist = dot(delta, right).abs();
+                    let intake_world_y = (player.position[1] - robot.height_m * 0.5) + robot.intake_center_height_m;
+                    let vertical_dist = (ball.position[1] - intake_world_y).abs();
+
+                    if forward_dist >= 0.0
+                        && forward_dist <= robot.intake_forward_offset_m + arena.ball.radius_m() * 1.5
+                        && lateral_dist <= robot.intake_width_m * 0.5 + arena.ball.radius_m() * 0.5
+                        && vertical_dist <= arena.ball.radius_m() + robot.intake_radius_m + 0.10
+                    {
+                        continue; // skip rigid front chassis bounce for intaking balls
+                    }
+                }
+
+                let Some((normal, _)) = sphere_obb_contact(
+                    ball.position,
+                    arena.ball.radius_m() * 1.01,
+                    player.position,
+                    player.yaw,
+                    [
+                        arena.robot.width_m * 0.5,
+                        arena.robot.height_m * 0.5,
+                        arena.robot.length_m * 0.5,
+                    ],
+                ) else {
                     continue;
                 };
                 let incoming_relative = dot(sub(ball.pre_solve_velocity, player.velocity), normal);
@@ -1249,6 +1432,11 @@ impl SphereRuntime {
     }
 
     pub fn player_snapshots(&self) -> Vec<PlayerSnapshot> {
+        let base_capacity = self
+            .arena
+            .as_ref()
+            .map(|arena| arena.robot.storage_capacity)
+            .unwrap_or(0);
         self.players
             .iter()
             .map(|(id, player)| PlayerSnapshot {
@@ -1265,8 +1453,8 @@ impl SphereRuntime {
                 velocity_z: player.velocity[2],
                 angular_velocity_y: player.angular_velocity_y,
                 color: player.color.into(),
-                stored_balls: 0,
-                capacity: 0,
+                stored_balls: player.stored.len(),
+                capacity: player.mech.capacity_with(base_capacity),
             })
             .collect()
     }
@@ -1297,10 +1485,7 @@ impl SphereRuntime {
     /// deactivating it so it is removed from play and can never be re-scored.
     /// Used when WILDFIRE enters a SUPPRESSION UNIT or the EXTINGUISHER.
     pub fn contain_ball(&mut self, entity_id: &str) -> bool {
-        let Some(index) = entity_id
-            .strip_prefix("ball:")
-            .and_then(|v| v.parse::<usize>().ok())
-        else {
+        let Some(index) = entity_id.strip_prefix("ball:").and_then(|v| v.parse::<usize>().ok()) else {
             return false;
         };
         if let Some(ball) = self.balls.get_mut(index)
@@ -1671,90 +1856,6 @@ fn project_robot_field_colliders(
     (contacts, contact_normal)
 }
 
-/// Project every authored robot-local collider against the authored field
-/// volumes. Robot collider centers and axes are stored in the asset's
-/// floor-relative frame, whose forward direction is +Z; the match frame uses
-/// -Z, so the same yaw + PI conversion used by ball contacts is applied here.
-fn project_robot_local_colliders(
-    player: &mut PlayerBody,
-    robot_colliders: &[FieldCollider],
-    field_colliders: &[FieldCollider],
-    floor_y: f32,
-) -> (usize, Option<Vec3>) {
-    let mut contacts = 0;
-    let mut contact_normal = None;
-
-    for robot_collider in robot_colliders {
-        let (robot_center, robot_axes) = robot_collider_world_pose(player, robot_collider, floor_y);
-        for field_collider in field_colliders {
-            let Some((normal, penetration)) = obb_contact(
-                robot_center,
-                robot_axes,
-                robot_collider.half_extents,
-                field_collider.center,
-                field_collider_axes_and_half_extents(field_collider).0,
-                field_collider_axes_and_half_extents(field_collider).1,
-            ) else {
-                continue;
-            };
-
-            // The robot is carpet-supported and cannot be lifted by a field
-            // contact. Mechanism contacts still resolve in the playable X/Z
-            // plane, while a purely vertical overlap is left to the floor
-            // support and does not introduce artificial teleportation.
-            let planar_normal_sq = normal[0] * normal[0] + normal[2] * normal[2];
-            if planar_normal_sq <= 1.0e-8 {
-                continue;
-            }
-            let planar_normal = [normal[0], 0.0, normal[2]];
-            let planar_length = planar_normal_sq.sqrt();
-            let correction = mul(planar_normal, penetration / planar_length);
-            player.position = add(player.position, correction);
-            let into_surface = dot(player.velocity, planar_normal);
-            if into_surface < 0.0 {
-                player.velocity = sub(player.velocity, mul(planar_normal, into_surface));
-            }
-            contacts += 1;
-            contact_normal = Some(mul(planar_normal, 1.0 / planar_length));
-        }
-    }
-    (contacts, contact_normal)
-}
-
-fn robot_collider_world_pose(
-    player: &PlayerBody,
-    collider: &FieldCollider,
-    floor_y: f32,
-) -> (Vec3, [Vec3; 3]) {
-    let asset_yaw = player.yaw + std::f32::consts::PI;
-    (
-        add(
-            [player.position[0], floor_y, player.position[2]],
-            rotate_y(collider.center, asset_yaw),
-        ),
-        [
-            rotate_y(collider.axes[0], asset_yaw),
-            rotate_y(collider.axes[1], asset_yaw),
-            rotate_y(collider.axes[2], asset_yaw),
-        ],
-    )
-}
-
-fn field_collider_axes_and_half_extents(collider: &FieldCollider) -> ([Vec3; 3], Vec3) {
-    if collider.half_extents.iter().any(|extent| *extent > 1.0e-6) {
-        (collider.axes, collider.half_extents)
-    } else {
-        (
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [
-                (collider.max[0] - collider.min[0]).abs() * 0.5,
-                (collider.max[1] - collider.min[1]).abs() * 0.5,
-                (collider.max[2] - collider.min[2]).abs() * 0.5,
-            ],
-        )
-    }
-}
-
 /// Return the minimum-translation contact for the rotated robot box against
 /// one authored field OBB. The offline scene gets this rotation from Rapier's
 /// rigid body; using SAT here keeps the server's planar solver in the same
@@ -1768,37 +1869,20 @@ fn robot_field_obb_contact(
     let sin = robot_yaw.sin();
     let cos = robot_yaw.cos();
     let robot_axes = [[cos, 0.0, -sin], [0.0, 1.0, 0.0], [sin, 0.0, cos]];
-    let (collider_axes, collider_half) = field_collider_axes_and_half_extents(collider);
-    obb_contact(
-        robot_center,
-        robot_axes,
-        robot_half,
-        collider.center,
-        collider_axes,
-        collider_half,
-    )
-}
-
-/// Return the minimum-translation contact for two oriented boxes using the
-/// separating-axis theorem. The returned normal points from box B toward box
-/// A, so moving A by normal * penetration separates the boxes.
-fn obb_contact(
-    center_a: Vec3,
-    axes_a: [Vec3; 3],
-    half_a: Vec3,
-    center_b: Vec3,
-    axes_b: [Vec3; 3],
-    half_b: Vec3,
-) -> Option<(Vec3, f32)> {
+    let collider_axes = collider.axes;
     let mut axes = [[0.0; 3]; 15];
     let mut axis_count = 0;
-    for axis in axes_a.iter().copied().chain(axes_b.iter().copied()) {
+    for axis in robot_axes
+        .iter()
+        .copied()
+        .chain(collider_axes.iter().copied())
+    {
         axes[axis_count] = axis;
         axis_count += 1;
     }
-    for axis_a in axes_a.iter().copied() {
-        for axis_b in axes_b.iter().copied() {
-            let candidate = cross(axis_a, axis_b);
+    for robot_axis in robot_axes.iter().copied() {
+        for collider_axis in collider_axes.iter().copied() {
+            let candidate = cross(robot_axis, collider_axis);
             let length = length_sq(candidate).sqrt();
             if length <= 1.0e-5 {
                 continue;
@@ -1808,17 +1892,17 @@ fn obb_contact(
         }
     }
 
-    let center_delta = sub(center_a, center_b);
+    let center_delta = sub(robot_center, collider.center);
     let mut minimum_penetration = f32::INFINITY;
     let mut minimum_normal = [0.0, 1.0, 0.0];
     for axis in axes.into_iter().take(axis_count) {
-        let radius_a = (0..3)
-            .map(|index| half_a[index] * dot(axis, axes_a[index]).abs())
+        let robot_radius = (0..3)
+            .map(|index| robot_half[index] * dot(axis, robot_axes[index]).abs())
             .sum::<f32>();
-        let radius_b = (0..3)
-            .map(|index| half_b[index] * dot(axis, axes_b[index]).abs())
+        let collider_radius = (0..3)
+            .map(|index| collider.half_extents[index] * dot(axis, collider_axes[index]).abs())
             .sum::<f32>();
-        let penetration = radius_a + radius_b - dot(center_delta, axis).abs();
+        let penetration = robot_radius + collider_radius - dot(center_delta, axis).abs();
         if penetration <= 0.0 {
             return None;
         }
@@ -1991,49 +2075,11 @@ fn sphere_obb_contact(
 ) -> Option<(Vec3, f32)> {
     let sin = yaw.sin();
     let cos = yaw.cos();
-    sphere_obb_contact_axes(
-        sphere,
-        radius,
-        center,
-        [[cos, 0.0, -sin], [0.0, 1.0, 0.0], [sin, 0.0, cos]],
-        half,
-    )
-}
-
-fn sphere_robot_collider_contact(
-    sphere: Vec3,
-    radius: f32,
-    player: &PlayerBody,
-    collider: &FieldCollider,
-    floor_y: f32,
-) -> Option<(Vec3, f32)> {
-    // The authored StarterBot asset faces +Z while the match robot faces -Z
-    // at yaw zero, so the asset frame is rotated by yaw + pi.
-    let asset_yaw = player.yaw + std::f32::consts::PI;
-    let center = add(
-        [player.position[0], floor_y, player.position[2]],
-        rotate_y(collider.center, asset_yaw),
-    );
-    let axes = [
-        rotate_y(collider.axes[0], asset_yaw),
-        rotate_y(collider.axes[1], asset_yaw),
-        rotate_y(collider.axes[2], asset_yaw),
-    ];
-    sphere_obb_contact_axes(sphere, radius, center, axes, collider.half_extents)
-}
-
-fn sphere_obb_contact_axes(
-    sphere: Vec3,
-    radius: f32,
-    center: Vec3,
-    axes: [Vec3; 3],
-    half: Vec3,
-) -> Option<(Vec3, f32)> {
     let relative = sub(sphere, center);
     let local = [
-        dot(relative, axes[0]),
-        dot(relative, axes[1]),
-        dot(relative, axes[2]),
+        cos * relative[0] - sin * relative[2],
+        relative[1],
+        sin * relative[0] + cos * relative[2],
     ];
     let closest = [
         local[0].clamp(-half[0], half[0]),
@@ -2065,21 +2111,12 @@ fn sphere_obb_contact_axes(
         normal[axis] = if local[axis] >= 0.0 { 1.0 } else { -1.0 };
         (normal, radius + gaps[axis])
     };
-    let world_normal = add(
-        add(mul(axes[0], local_normal[0]), mul(axes[1], local_normal[1])),
-        mul(axes[2], local_normal[2]),
-    );
+    let world_normal = [
+        cos * local_normal[0] + sin * local_normal[2],
+        local_normal[1],
+        -sin * local_normal[0] + cos * local_normal[2],
+    ];
     Some((world_normal, penetration))
-}
-
-fn rotate_y(value: Vec3, yaw: f32) -> Vec3 {
-    let sin = yaw.sin();
-    let cos = yaw.cos();
-    [
-        cos * value[0] + sin * value[2],
-        value[1],
-        -sin * value[0] + cos * value[2],
-    ]
 }
 
 fn ramp_contact(position: Vec3, radius: f32, ramp: &RampPhysicsConfig) -> Option<(Vec3, f32)> {
@@ -2099,6 +2136,39 @@ fn ramp_contact(position: Vec3, radius: f32, ramp: &RampPhysicsConfig) -> Option
     } else {
         Some((normal, radius - signed_distance))
     }
+}
+
+fn roller_contact(
+    sphere: Vec3,
+    sphere_radius: f32,
+    robot_position: Vec3,
+    yaw: f32,
+    robot: &RobotPhysicsConfig,
+) -> Option<(Vec3, f32, Vec3, Vec3)> {
+    let forward = [-yaw.sin(), 0.0, -yaw.cos()];
+    let right = [-forward[2], 0.0, forward[0]];
+    let intake_world_y = (robot_position[1] - robot.height_m * 0.5) + robot.intake_center_height_m;
+    let center = [
+        robot_position[0] + forward[0] * robot.intake_forward_offset_m,
+        intake_world_y,
+        robot_position[2] + forward[2] * robot.intake_forward_offset_m,
+    ];
+    let along_axis = dot(sub(sphere, center), right)
+        .clamp(-robot.intake_width_m * 0.5, robot.intake_width_m * 0.5);
+    let closest = add(center, mul(right, along_axis));
+    let delta = sub(sphere, closest);
+    let distance_sq = length_sq(delta);
+    let combined_radius = sphere_radius + robot.intake_radius_m;
+    if distance_sq > combined_radius * combined_radius {
+        return None;
+    }
+    let (normal, distance) = if distance_sq > 1.0e-12 {
+        let distance = distance_sq.sqrt();
+        (mul(delta, 1.0 / distance), distance)
+    } else {
+        (forward, 0.0)
+    };
+    Some((normal, combined_radius - distance, closest, right))
 }
 
 #[cfg(test)]
@@ -2188,7 +2258,6 @@ mod tests {
         arena.ramp.enabled = false;
         let field = FieldDefinition {
             colliders: Vec::new(),
-            robot_colliders: Vec::new(),
             anchors: BTreeMap::new(),
             triggers: vec![FieldTrigger {
                 id: "blueSUscore".into(),
@@ -2309,50 +2378,6 @@ mod tests {
         let (x_extent, z_extent) = robot_planar_extents(&arena.robot, std::f32::consts::FRAC_PI_4);
         assert!((x_extent - 0.3535534).abs() < 1.0e-4);
         assert!((z_extent - 0.3535534).abs() < 1.0e-4);
-    }
-
-    #[test]
-    fn authored_robot_mechanism_collider_projects_from_field_geometry() {
-        let robot_collider = FieldCollider {
-            id: "ClimbWheel1".into(),
-            min: [-0.05, 0.35, 0.16],
-            max: [0.05, 0.45, 0.26],
-            center: [0.0, 0.4, 0.21],
-            half_extents: [0.05, 0.05, 0.05],
-            axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-        };
-        let field_collider = FieldCollider {
-            id: "climb-bar".into(),
-            min: [-0.2, 0.3, -0.28],
-            max: [0.2, 0.5, -0.2],
-            center: [0.0, 0.4, -0.24],
-            half_extents: [0.2, 0.1, 0.04],
-            axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-        };
-        let mut player = PlayerBody {
-            name: "Player".into(),
-            team_name: "Team".into(),
-            position: [0.0, 0.25, 0.0],
-            velocity: [0.0, 0.0, -1.0],
-            yaw: 0.0,
-            angular_velocity_y: 0.0,
-            move_x: 0.0,
-            move_z: 0.0,
-            sequence: 0,
-            color: "#fff",
-            wall_contact_normal: None,
-        };
-
-        let (contacts, normal) =
-            project_robot_local_colliders(&mut player, &[robot_collider], &[field_collider], 0.0);
-
-        assert_eq!(contacts, 1);
-        assert!(normal.is_some());
-        assert!(
-            player.position[2] > 0.0,
-            "climb wheel was not pushed off bar"
-        );
-        assert_eq!(player.velocity[2], 0.0, "inward velocity was not removed");
     }
 
     #[test]
@@ -2615,6 +2640,39 @@ mod tests {
     }
 
     #[test]
+    fn powered_intake_roller_drives_a_contacting_ball() {
+        fn roller_velocity(mut arena: ArenaConfig, power: f32) -> f32 {
+            arena.object_count = 1;
+            arena.ramp.enabled = false;
+            let mut runtime = SphereRuntime::new("intake".into(), "fgc-2026".into(), 0);
+            runtime.create_test_arena(&arena);
+            runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+            let player = runtime.players.get_mut("p").unwrap();
+            player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+            player.yaw = 0.0;
+            player.intake_power = power;
+            runtime.balls[0].position = [
+                0.0,
+                arena.ball.radius_m(),
+                -arena.robot.intake_forward_offset_m - 0.03,
+            ];
+            runtime.balls[0].velocity = [0.0; 3];
+            runtime.balls[0].pre_solve_velocity = [0.0; 3];
+            runtime.apply_contact_velocities(&arena, 1.0 / 60.0);
+            runtime.balls[0].velocity[2]
+        }
+
+        let arena = arena();
+        let idle = roller_velocity(arena.clone(), 0.0);
+        let powered = roller_velocity(arena, 1.0);
+        assert!(idle.abs() < 0.001);
+        assert!(
+            powered > 0.1,
+            "floor ball should be pulled into the hopper, powered velocity={powered:.3}"
+        );
+    }
+
+    #[test]
     fn ramp_contact_rolls_downhill() {
         let mut arena = arena();
         arena.object_count = 1;
@@ -2635,6 +2693,143 @@ mod tests {
             runtime.balls[0].position[2] < start_z - 0.05,
             "ball z={} did not roll down from {start_z}",
             runtime.balls[0].position[2]
+        );
+    }
+
+    #[test]
+    fn powered_intake_captures_a_ball_in_the_roller_mouth() {
+        let mut arena = arena();
+        arena.object_count = 1;
+        arena.ramp.enabled = false;
+        let mut runtime = SphereRuntime::new("capture".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+        let player = runtime.players.get_mut("p").unwrap();
+        player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+        player.yaw = 0.0;
+        player.intake_power = 1.0;
+        runtime.balls[0].position = [
+            0.0,
+            arena.ball.radius_m(),
+            -arena.robot.intake_forward_offset_m,
+        ];
+        runtime.balls[0].velocity = [0.0; 3];
+        runtime.balls[0].pre_solve_velocity = [0.0; 3];
+        for _ in 0..20 {
+            runtime.tick(1.0 / 60.0);
+        }
+        assert!(!runtime.balls[0].active, "ball should be captured into the hopper");
+        assert_eq!(runtime.players["p"].stored.len(), 1);
+        assert_eq!(runtime.players["p"].stored[0], 0);
+        assert!(
+            runtime
+                .drain_semantic_events()
+                .iter()
+                .any(|event| event.kind == "intake")
+        );
+    }
+
+    #[test]
+    fn driving_with_intake_captures_a_floor_ball() {
+        let mut arena = arena();
+        arena.object_count = 1;
+        arena.ramp.enabled = false;
+        let mut runtime = SphereRuntime::new("drive-intake".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+        runtime.set_player_input("p", 0.0, 1.0, 1.0, 0.0, 1);
+        let player = runtime.players.get_mut("p").unwrap();
+        player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+        player.yaw = 0.0;
+        runtime.balls[0].position = [0.0, arena.ball.radius_m(), -0.6];
+        runtime.balls[0].velocity = [0.0; 3];
+        runtime.balls[0].pre_solve_velocity = [0.0; 3];
+        for _ in 0..180 {
+            runtime.apply_player_drive(&arena, 1.0 / 60.0);
+            runtime.tick(1.0 / 60.0);
+            if runtime.players["p"].stored.len() == 1 {
+                break;
+            }
+        }
+        assert_eq!(runtime.players["p"].stored.len(), 1, "driving into a floor ball with intake should capture it");
+        assert_eq!(runtime.players["p"].stored[0], 0);
+        assert!(
+            runtime
+                .drain_semantic_events()
+                .iter()
+                .any(|event| event.kind == "intake")
+        );
+    }
+
+    #[test]
+    fn zero_capacity_mech_override_blocks_intake() {
+        let mut arena = arena();
+        arena.object_count = 1;
+        arena.ramp.enabled = false;
+        let mut runtime = SphereRuntime::new("blocked".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+        let player = runtime.players.get_mut("p").unwrap();
+        player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+        player.yaw = 0.0;
+        player.intake_power = 1.0;
+        player.mech = MechSpec {
+            capacity: Some(0),
+            ..MechSpec::default()
+        };
+        runtime.balls[0].position = [
+            0.0,
+            arena.ball.radius_m(),
+            -arena.robot.intake_forward_offset_m,
+        ];
+        runtime.balls[0].velocity = [0.0; 3];
+        runtime.balls[0].pre_solve_velocity = [0.0; 3];
+        for _ in 0..20 {
+            runtime.tick(1.0 / 60.0);
+        }
+        assert!(runtime.balls[0].active, "ball stays free when hopper capacity is zero");
+        assert!(runtime.players["p"].stored.is_empty());
+    }
+
+    #[test]
+    fn outtake_launches_a_stored_ball_through_the_wide_flywheel() {
+        let mut arena = arena();
+        arena.object_count = 1;
+        arena.ramp.enabled = false;
+        let mut runtime = SphereRuntime::new("launch".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+        let player = runtime.players.get_mut("p").unwrap();
+        player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+        player.yaw = 0.0;
+        player.outtake_power = 1.0;
+        player.stored.push_back(0);
+        for _ in 0..25 {
+            runtime.tick(1.0 / 60.0);
+        }
+        let ball = &runtime.balls[0];
+        assert!(ball.active, "launched ball should be active");
+        assert!(runtime.players["p"].stored.is_empty(), "hopper should drain");
+        assert!(
+            ball.velocity[1] > 0.5,
+            "upward launch velocity was {}",
+            ball.velocity[1]
+        );
+        assert!(
+            ball.velocity[2] < 0.0,
+            "forward launch at yaw 0 was {}",
+            ball.velocity[2]
+        );
+        assert!(
+            ball.position[1] > arena.robot.height_m + arena.ball.radius_m(),
+            "launch height was {}",
+            ball.position[1]
+        );
+        assert!(
+            runtime
+                .drain_semantic_events()
+                .iter()
+                .any(|event| event.kind == "outtake")
         );
     }
 
