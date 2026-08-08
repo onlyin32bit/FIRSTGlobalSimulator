@@ -4,7 +4,7 @@ import { jsonError, jsonSuccess } from '../responses'
 import type { Bindings } from '../types'
 
 const PACK_ID = 'fgc-2026'
-const ALLOWED_ASSETS = new Set(['field.glb', 'field.physics.json', 'field.semantics.json'])
+const ALLOWED_ASSETS = new Set(['field.glb', 'field.physics.json', 'field.semantics.json', 'scoreboard.html'])
 
 type Manifest = {
   id: string
@@ -202,7 +202,7 @@ app.get('/:id/assets', (c) => {
   // origin would leak an unresolvable hostname to the browser. Keep asset
   // URLs same-origin so the web Worker proxy can serve them publicly.
   const prefix = `/api/game-packs/${PACK_ID}/assets`
-  return jsonSuccess(c, { visual: `${prefix}/field.glb`, physics: `${prefix}/field.physics.json`, semantics: `${prefix}/field.semantics.json` })
+  return jsonSuccess(c, { visual: `${prefix}/field.glb`, physics: `${prefix}/field.physics.json`, semantics: `${prefix}/field.semantics.json`, ui: { scoreboard: `${prefix}/scoreboard.html` } })
 })
 
 app.get('/:id/assets/:asset', async (c) => {

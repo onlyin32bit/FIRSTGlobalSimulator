@@ -32,7 +32,7 @@
 			{error}
 		</p>{/if}
 	<div class="grid gap-4 md:grid-cols-2">
-		{#each packs as pack}<article class="rounded-xl border border-border bg-card p-6">
+		{#each packs as pack (pack.id)}<article class="rounded-xl border border-border bg-card p-6">
 				<div class="flex items-start justify-between">
 					<div>
 						<h2 class="text-xl font-semibold">{pack.name}</h2>
@@ -83,7 +83,7 @@
 				</div>
 			</div>
 			<div class="mt-5 divide-y divide-border rounded-lg border border-border">
-				{#each metadata.scripts as script}
+				{#each metadata.scripts as script (script.path)}
 					<div class="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
 						<div>
 							<p class="font-mono text-sm font-medium">{script.path.split('/').pop()}</p>

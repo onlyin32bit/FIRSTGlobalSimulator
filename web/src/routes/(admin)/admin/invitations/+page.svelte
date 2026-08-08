@@ -98,7 +98,7 @@
 			><tbody
 				>{#if loading}<tr
 						><td colspan="4" class="p-6 text-muted-foreground">Loading invitations…</td></tr
-					>{:else}{#each invitations as invitation}<tr class="border-b border-border last:border-0"
+					>					{:else}{#each invitations as invitation (invitation.code)}<tr class="border-b border-border last:border-0"
 							><td class="p-4"
 								><code class="font-semibold">{invitation.code}</code>
 								<p class="mt-1 text-xs text-muted-foreground">

@@ -1,0 +1,217 @@
+<style>
+  .w {
+    pointer-events: none;
+    position: fixed;
+    bottom: 12px;
+    left: 50%;
+    z-index: 20;
+    transform: translateX(-50%) scale(0.75);
+    transform-origin: bottom center;
+  }
+  @media (min-width: 640px) {
+    .w {
+      transform: translateX(-50%) scale(0.9);
+    }
+  }
+  @media (min-width: 768px) {
+    .w {
+      transform: translateX(-50%) scale(1);
+    }
+  }
+  .c {
+    position: relative;
+    width: 710px;
+    height: 304px;
+    user-select: none;
+    font-family: Arial, sans-serif;
+    filter: drop-shadow(0 15px 25px rgba(0, 0, 0, 0.5));
+  }
+  .fc {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .tr-r {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+  }
+  .tr-b {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+  }
+  .tc {
+    color: #fff;
+    font-size: 32px;
+    font-weight: 900;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+    line-height: 1;
+  }
+  .fb {
+    position: relative;
+    width: 52px;
+    height: 34px;
+    border-radius: 3px;
+    overflow: hidden;
+    border: 2px solid rgba(0, 0, 0, 0.5);
+    box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+    flex-shrink: 0;
+  }
+  .st {
+    font-size: 56px;
+    font-weight: 900;
+    color: #fff;
+    line-height: 1;
+  }
+</style>
+<div class="w" style="scale: 80%;">
+  <div class="c">
+    <svg xmlns="http://www.w3.org/2000/svg" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 0;" width="710" height="304" fill="none" viewBox="0 0 710 304"><path fill="#000" d="M236.671 105.241c.825-22.485-.018-45.166.252-67.728.125-10.455 2.07-20.351 10.259-28.01 3.983-3.726 9.439-7.93 15.1-9.018 7.685-.655 16.574-.458 24.324-.454L343.96.44c31.653.218 63.387-.717 95.052-.256 10.329.15 17.542 3.063 24.44 10.81 8.027 8.866 6.476 27.863 6.982 39.195.224 5.06.737 10.574.572 15.521-.414 12.417 1.463 27.248.495 39.654 17.719.416 36.421.087 54.231.125l95.639.056 46.336-.083c8.893.008 18.075-.176 26.931.364 2.295.14 5.768.863 7.323 2.549 2.148 2.326 5.35 6.191 5.969 9.348 1.06 5.423.767 12.245.76 17.828l-.026 22.861.018 83.358c-.018 4.525-.326 26.393.418 29.34.649 9.583.228 19.197.308 28.793a46 46 0 0 1-.106 3.895H1.29c-2.236-5.819-.794-24.66-1.212-32.574.929-11.871.456-29.147.45-41.374l-.112-74.126.072-23.669c.031-4.507-.073-9.445.526-13.837.924-6.78 8.513-12.527 15.132-12.777 8.481-.32 17.094-.176 25.605-.239a3927 3927 0 0 1 49.858-.041c7.603.067 15.078.435 22.688.406l82.296-.47 25.5-.04c3.936-.001 10.427-.185 14.186.146z"/><path fill="#d7fc8a" d="m471.897 271.26 155.653.001 51.287.001c9.882-.001 20.428.182 30.263-.152.649 9.583.228 19.196.308 28.793a46 46 0 0 1-.106 3.895H1.29c-2.236-5.82-.794-24.66-1.212-32.574l236.616.05c-.019 5.162-.195 11.24-.002 16.328l235.15-.078z"/><path fill="#5e85fc" d="m471.883 113.523 136.672-.076 53.15.014c9.853.002 19.732-.084 29.578.154 2.805-.018 8.217 1.179 8.771 4.563 1.133 6.951.712 15.005.708 22.051l.003 37.25-.029 48.109c.018 9.059.143 18.319-.088 27.375-.077 3.001-.557 5.615-2.156 8.196-1.933.793-4.613 1.66-6.663 1.725-8.405.269-17.033.165-25.442.166l-47.949-.005-146.515-.049c-.011-49.243 1.009-100.34-.04-149.473"/><path fill="#5e85fc" d="M607.715 132.079c1.049.897 2.457 6.243 2.219 7.737l-.598.393c-.994.036-1.588.103-2.574-.137-1.225-1.949.308-5.096.953-7.993"/><path fill="#cc3936" d="M18.614 113.566c10.182-.615 25.451-.08 36.112-.073h68.684l72.303.005c12.868-.003 28.469-.398 41.124.276l-.018 149.265-9.672.013-146.08-.01-43.675.012c-6.378.001-12.765.042-19.14-.067-2.275-.147-5.417.255-6.979-1.806-1.31-1.729-2.359-4.527-2.459-6.703-.345-7.52-.202-15.112-.194-22.647l.028-43.132-.06-45.687c-.006-6.69-.345-19.089.362-25.236 3.315-3.053 5.301-3.654 9.664-4.21"/><path fill="#fab14e" d="M244.874 73.804c8.592-.184 17.401-.131 26.01-.074 64.41.432 128.979-.661 193.371.074l.015 97.962-219.404-.028z"/><path fill="#5e85fc" d="M358.396 179.98c4.907-.072 9.905-.02 14.815.011 30.367.19 60.799-.325 91.154-.029-.359 32.817-.04 66.27-.036 99.131l-.184.203c-2.226.662-24.118.238-27.546.236l-78.177-.006z"/><path fill="#cc3936" d="M245.187 179.966c34.473-.562 70.804-.08 105.406-.059.041 32.909-.348 66.751.176 99.602-34.877.006-70.858.461-105.634-.103z"/></svg>
+    <div
+      style="
+        position: absolute;
+        left: 0;
+        top: 271px;
+        width: 710px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 16px;
+        box-sizing: border-box;
+        color: #000;
+        font-size: 22px;
+        font-weight: 900;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+        z-index: 1;
+      "
+    >
+      <span></span>
+      <span>FIRST Global 2026</span>
+    </div>
+    <div
+      style="
+        position: absolute;
+        left: 10px;
+        top: 114px;
+        width: 226px;
+        height: 149px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-around;
+        padding: 10px 15px 10px 0;
+        box-sizing: border-box;
+        z-index: 1;
+      "
+    >
+      <div class="tr-r">
+        <span class="tc">{{redTeam0Code}}</span>
+        <div class="fb">{{{redTeam0Flag}}}</div>
+      </div>
+      <div class="tr-r">
+        <span class="tc">{{redTeam1Code}}</span>
+        <div class="fb">{{{redTeam1Flag}}}</div>
+      </div>
+      <div class="tr-r">
+        <span class="tc">{{redTeam2Code}}</span>
+        <div class="fb">{{{redTeam2Flag}}}</div>
+      </div>
+    </div>
+    <div
+      style="
+        position: absolute;
+        left: 472px;
+        top: 114px;
+        width: 228px;
+        height: 149px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-around;
+        padding: 10px 0 10px 15px;
+        box-sizing: border-box;
+        z-index: 1;
+      "
+    >
+      <div class="tr-b">
+        <div class="fb">{{{blueTeam0Flag}}}</div>
+        <span class="tc">{{blueTeam0Code}}</span>
+      </div>
+      <div class="tr-b">
+        <div class="fb">{{{blueTeam1Flag}}}</div>
+        <span class="tc">{{blueTeam1Code}}</span>
+      </div>
+      <div class="tr-b">
+        <div class="fb">{{{blueTeam2Flag}}}</div>
+        <span class="tc">{{blueTeam2Code}}</span>
+      </div>
+    </div>
+    <div
+      class="fc"
+      style="
+        position: absolute;
+        left: 245px;
+        top: 74px;
+        width: 219px;
+        height: 98px;
+        z-index: 2;
+      "
+    >
+      <span
+        style="
+          font-size: 84px;
+          font-weight: 900;
+          color: #000;
+          letter-spacing: -0.02em;
+          line-height: 1;
+          transform: translateY(2px);
+        "
+        >{{matchClock}}</span
+      >
+    </div>
+    <div
+      class="fc"
+      style="
+        position: absolute;
+        left: 245px;
+        top: 180px;
+        width: 106px;
+        height: 100px;
+        z-index: 3;
+      "
+    >
+      <span class="st">{{redScore}}</span>
+    </div>
+    <div
+      class="fc"
+      style="
+        position: absolute;
+        left: 358px;
+        top: 180px;
+        width: 106px;
+        height: 100px;
+        z-index: 3;
+      "
+    >
+      <span class="st">{{blueScore}}</span>
+    </div>
+    <div
+      style="
+        position: absolute;
+        top: 16px;
+        left: 252px;
+        z-index: 4;
+      "
+    >
+      <img
+        src="/images/first-global.webp"
+        alt="FIRST Global"
+        style="height: 56px; width: auto; object-fit: contain"
+      />
+    </div>
+  </div>
+</div>

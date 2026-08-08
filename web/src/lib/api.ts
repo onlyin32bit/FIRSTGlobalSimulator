@@ -364,7 +364,7 @@ export class APIClient {
 	}
 
 	getGamePackAssets(id: 'fgc-2026') {
-		return this.request<{ visual: string; physics: string; semantics: string }>(
+		return this.request<{ visual: string; physics: string; semantics: string; ui?: { scoreboard: string } }>(
 			`/api/game-packs/${encodeURIComponent(id)}/assets`
 		);
 	}

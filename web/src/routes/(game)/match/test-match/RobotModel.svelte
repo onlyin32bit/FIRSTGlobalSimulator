@@ -161,7 +161,7 @@
 	{/if}
 
 	<!-- Hopper stored balls visual -->
-	{#each visibleBalls as pos}
+	{#each visibleBalls as pos, i (i)}
 		<T.Mesh position={pos}>
 			<T.SphereGeometry args={[0.045, 12, 12]} />
 			<T.MeshStandardMaterial color="#f97316" roughness={0.3} emissive="#ea580c" emissiveIntensity={0.2} />

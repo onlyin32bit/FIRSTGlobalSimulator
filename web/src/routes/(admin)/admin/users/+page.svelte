@@ -116,7 +116,7 @@
 				></thead
 			><tbody
 				>{#if loading}<tr><td class="p-6 text-muted-foreground" colspan="4">Loading users…</td></tr
-					>{:else}{#each users as user}<tr class="border-b border-border last:border-0"
+					>					{:else}{#each users as user (user.id)}<tr class="border-b border-border last:border-0"
 							><td class="p-4"
 								><p class="font-medium">{user.name}</p>
 								<p class="text-xs text-muted-foreground">

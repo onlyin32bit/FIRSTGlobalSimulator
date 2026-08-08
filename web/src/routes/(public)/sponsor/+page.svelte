@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { Button } from '$lib/components/ui/button';
+	import { resolve } from '$app/paths';
 </script>
 
 <svelte:head>
@@ -22,15 +23,15 @@
 		class="relative z-10 mx-auto flex w-full max-w-6xl items-center justify-between px-5 py-5 sm:px-8"
 		aria-label="Public navigation"
 	>
-		<a class="font-semibold text-primary" href="/">FIRST Global Simulator</a>
+		<a class="font-semibold text-primary" href={resolve('/')}>FIRST Global Simulator</a>
 		<div class="flex items-center gap-1">
 			<a
 				class="rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-				href="/">Home</a
+				href={resolve('/')}>Home</a
 			>
 			<a
 				class="rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-				href="/docs">Documentation</a
+				href={resolve('/docs')}>Documentation</a
 			>
 		</div>
 	</nav>
@@ -51,7 +52,7 @@
 				<Button
 					href="mailto:vietnamteamfgc@gmail.com?subject=FIRST%20Global%20Simulator%20project%20sponsorship"
 					>Discuss sponsorship</Button
-				><Button variant="outline" href="/docs">Read the project docs</Button>
+				><Button variant="outline" href={resolve('/docs')}>Read the project docs</Button>
 			</div>
 		</header>
 

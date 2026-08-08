@@ -566,7 +566,9 @@ impl MatchRegistry {
                 let mut next_process_sample = next_publish;
                 let mut process_sampler = ProcessSampler::default();
                 let mut process_metrics = ProcessMetrics::default();
+                let mut publish_count = 0u64;
                 while !publisher_shutdown.load(Ordering::Relaxed) {
+                    publish_count += 1;
                     let now = Instant::now();
                     if now < next_publish {
                         std::thread::sleep(next_publish - now);
@@ -584,8 +586,9 @@ impl MatchRegistry {
                         .ok()
                         .and_then(|state| state.as_ref().cloned());
                     if let Some(state) = state {
+                        let include_physics = publish_count % 10 == 1;
                         let _ =
-                            publisher_tx.send(Bytes::from(encode_state(&state, process_metrics)));
+                            publisher_tx.send(Bytes::from(encode_state(&state, process_metrics, include_physics)));
                     }
                 }
             })
@@ -800,7 +803,7 @@ impl MatchRegistry {
 // FGS1 is a little-endian, sectioned WebSocket protocol. Every section is
 // [tag:u16, flags:u16, byte_length:u32, payload]. Readers must skip unknown
 // tags, which makes compatible additions possible without changing old fields.
-fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
+fn encode_state(state: &MatchStateSync, process: ProcessMetrics, include_physics: bool) -> Vec<u8> {
     const METADATA: u16 = 1;
     const CLOCKS: u16 = 2;
     const METRICS: u16 = 3;
@@ -882,7 +885,8 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
             }
         }
     });
-    section(&mut output, PHYSICS, |bytes| {
+    if include_physics {
+        section(&mut output, PHYSICS, |bytes| {
         put_string(bytes, &state.physics.ball_material);
         put_string(bytes, &state.physics.floor_material);
         for value in [
@@ -945,6 +949,7 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
             put_f32(bytes, value);
         }
     });
+    }
     section(&mut output, SCORE, |bytes| {
         put_i32(bytes, state.score.blue_score);
         put_i32(bytes, state.score.red_score);
@@ -961,19 +966,21 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
             put_string(bytes, event);
         }
     });
-    section(&mut output, DRIVE, |bytes| {
-        for value in [
-            state.drive.max_acceleration_mps2,
-            state.drive.max_deceleration_mps2,
-            state.drive.max_turn_rate_radps,
-            state.drive.max_angular_acceleration_radps2,
-            state.drive.lateral_grip_mps2,
-            state.drive.traction_friction,
-            state.drive.track_width_m,
-        ] {
-            put_f32(bytes, value);
-        }
-    });
+    if include_physics {
+        section(&mut output, DRIVE, |bytes| {
+            for value in [
+                state.drive.max_acceleration_mps2,
+                state.drive.max_deceleration_mps2,
+                state.drive.max_turn_rate_radps,
+                state.drive.max_angular_acceleration_radps2,
+                state.drive.lateral_grip_mps2,
+                state.drive.traction_friction,
+                state.drive.track_width_m,
+            ] {
+                put_f32(bytes, value);
+            }
+        });
+    }
     let payload_len = (output.len() - 16) as u32;
     output[12..16].copy_from_slice(&payload_len.to_le_bytes());
     output

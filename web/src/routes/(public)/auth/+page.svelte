@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
+	import type { Pathname } from '$app/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
@@ -19,13 +21,13 @@
 	let isSubmitting = $state(false);
 	const session = useSession();
 
-	function safeNext() {
+	function safeNext(): Pathname {
 		const next = page.url.searchParams.get('next');
-		return next?.startsWith('/') && !next.startsWith('//') ? next : '/dashboard';
+		return (next?.startsWith('/') && !next.startsWith('//') ? next : '/dashboard') as Pathname;
 	}
 
 	$effect(() => {
-		if (!$session.isPending && $session.data) goto(safeNext());
+		if (!$session.isPending && $session.data) goto(resolve(safeNext()));
 	});
 
 	function messageFor(error: unknown) {
@@ -50,7 +52,7 @@
 				loginError = result.error.message || 'Unable to sign in with those credentials.';
 				return;
 			}
-			await goto(safeNext());
+			await goto(resolve(safeNext()));
 		} catch (error) {
 			loginError = messageFor(error);
 		} finally {
@@ -74,7 +76,7 @@
 				registrationError = result.error.message || 'Unable to create your account.';
 				return;
 			}
-			await goto(safeNext());
+			await goto(resolve(safeNext()));
 		} catch (error) {
 			registrationError = messageFor(error);
 		} finally {
@@ -104,7 +106,7 @@
 	<div class="flex items-center justify-center p-4 lg:p-8">
 		<div class="mx-auto flex w-full max-w-sm flex-col gap-6">
 			<div class="text-center">
-				<h1 class="text-2xl font-semibold tracking-tight">Welcome to FGC 2026</h1>
+				<h1 class="text-2xl font-semibold tracking-tight">Welcome to FGSimulator</h1>
 				<p class="mt-2 text-sm text-muted-foreground">Sign in or redeem an invitation code.</p>
 			</div>
 

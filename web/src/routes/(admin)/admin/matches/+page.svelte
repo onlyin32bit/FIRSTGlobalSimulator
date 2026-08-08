@@ -114,7 +114,7 @@
 						><td class="p-6 text-muted-foreground" colspan="5">Loading matches…</td></tr
 					>{:else if matches.length === 0}<tr
 						><td class="p-6 text-muted-foreground" colspan="5">No matches created.</td></tr
-					>{:else}{#each matches as match}<tr class="border-b border-border last:border-0"
+					>					{:else}{#each matches as match (match.id)}<tr class="border-b border-border last:border-0"
 							><td class="p-4"
 								><code>{match.id}</code>
 								<p class="mt-1 text-xs text-muted-foreground">
@@ -160,7 +160,7 @@
 					id="host"
 					class="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
 					bind:value={hostId}
-					>{#each hosts as host}<option value={host.id}>{host.name} · {host.email}</option
+					>{#each hosts as host (host.id)}<option value={host.id}>{host.name} · {host.email}</option
 						>{/each}</select
 				>
 			</div>
@@ -178,7 +178,7 @@
 					id="status"
 					class="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
 					bind:value={status}
-					>{#each statuses as option}<option value={option}>{option}</option>{/each}</select
+					>{#each statuses as option (option)}<option value={option}>{option}</option>{/each}</select
 				>
 			</div>
 			{#if status === 'CANCELLED'}<div>

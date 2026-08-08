@@ -145,6 +145,7 @@ pub struct SphereRuntime {
     field_triggers: Vec<FieldTrigger>,
     trigger_inside: Vec<bool>,
     semantic_events: Vec<SemanticEvent>,
+    intake_candidates: Vec<(f32, usize)>,
 }
 
 impl SphereRuntime {
@@ -180,6 +181,7 @@ impl SphereRuntime {
             field_triggers: Vec::new(),
             trigger_inside: Vec::new(),
             semantic_events: Vec::new(),
+            intake_candidates: Vec::with_capacity(16),
         }
     }
 
@@ -499,7 +501,7 @@ impl SphereRuntime {
                 player.intake_accumulator = (player.intake_accumulator
                     + robot.intake_rate_bps * player.intake_power * dt)
                     .min(120.0);
-                let mut candidates: Vec<(f32, usize)> = Vec::with_capacity(16);
+                self.intake_candidates.clear();
                 let intake_world_y = (player.position[1] - robot.height_m * 0.5) + robot.intake_center_height_m;
                 for (index, ball) in self.balls.iter().enumerate() {
                     if !ball.active {
@@ -520,10 +522,11 @@ impl SphereRuntime {
                     if vertical_dist > radius + robot.intake_radius_m + 0.10 {
                         continue;
                     }
-                    candidates.push((forward_dist.abs(), index));
+                    self.intake_candidates.push((forward_dist.abs(), index));
                 }
-                candidates.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
-                for (_, index) in candidates {
+                self.intake_candidates.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+                for i in 0..self.intake_candidates.len() {
+                    let (_, index) = self.intake_candidates[i];
                     if player.intake_accumulator < 1.0 {
                         break;
                     }

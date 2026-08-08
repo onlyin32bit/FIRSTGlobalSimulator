@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { page } from '$app/state';
 	import { Canvas, T } from '@threlte/core';
 	import { Grid, OrbitControls } from '@threlte/extras';
@@ -12,6 +13,7 @@
 	import FieldBoundsDebug from './FieldBoundsDebug.svelte';
 	import ScriptedObjects from './ScriptedObjects.svelte';
 	import TelemetrySparkline from './TelemetrySparkline.svelte';
+	import ScoreboardGraphic from './ScoreboardGraphic.svelte';
 	import {
 		decodeMatchSnapshot,
 		type MatchPhysics as PhysicsModel,
@@ -161,6 +163,7 @@
 	let gamepadName = $state('No gamepad');
 	let gamepadConnected = $state(false);
 	let controlSource = $state<'keyboard' | 'gamepad'>('keyboard');
+	let potatoMode = $state(false);
 	let inputDrive = $state(0);
 	let inputTurn = $state(0);
 	let inputIntake = $state(0);
@@ -228,8 +231,8 @@
 	let trackedPlayer = $derived(
 		renderedPlayers.find((player) => player.id === localId) ?? renderedPlayers[0]
 	);
-	const pendingPings = new Map<number, number>();
-	const pressed = new Set<string>();
+	const pendingPings = new SvelteMap<number, number>();
+	const pressed = new SvelteSet<string>();
 	const inputKeys = new Set([
 		'w',
 		' ',
@@ -771,7 +774,7 @@
 					positions: new Float32Array(targetPositions)
 				};
 			} else {
-				let changed =
+				let changedProperties =
 					objectFrame.objectId !== renderedObjectFrame.objectId ||
 					objectFrame.radius !== renderedObjectFrame.radius ||
 					objectFrame.color !== renderedObjectFrame.color;
@@ -782,7 +785,6 @@
 					const distance = Math.hypot(dx, dy, dz);
 					if (distance < 0.0001) continue;
 
-					changed = true;
 					if (distance > 0.75) {
 						renderedPositions[index] = targetPositions[index];
 						renderedPositions[index + 1] = targetPositions[index + 1];
@@ -793,7 +795,7 @@
 						renderedPositions[index + 2] += dz * blend;
 					}
 				}
-				if (changed) {
+				if (changedProperties) {
 					renderedObjectFrame = { ...objectFrame, positions: renderedPositions };
 				}
 			}
@@ -996,58 +998,16 @@
 </script>
 
 <div class="relative h-[calc(100vh-3.5rem)] overflow-hidden bg-slate-950">
-	<!-- Compact field scoreboard. SU containment and EXT extinguishing scores
-	     arrive in the SCORE protocol section and are summed live. -->
-	<section
-		class="pointer-events-none fixed bottom-0 left-1/2 z-20 w-[600px] -translate-x-1/2 rounded-t-2xl bg-black font-sans leading-none font-black text-white drop-shadow-[0_3px_5px_rgba(0,0,0,0.65)]"
-		aria-label="Match scoreboard"
-	>
-		<div
-			class="m-2 flex items-stretch overflow-hidden rounded-lg border-2 border-slate-950 bg-slate-950 shadow-2xl"
-		>
-			<div
-				class="flex min-h-[132px] flex-1 flex-col justify-center gap-2 bg-[#c82d31] px-4 text-right text-[clamp(1rem,2.3vw,1.65rem)]"
-			>
-				{#each Array(3) as _, index (index)}
-					<p class="truncate">{redRoster[index]?.name ?? '—'}</p>
-				{/each}
-			</div>
-			<div class="flex w-[clamp(152px,23vw,206px)] shrink-0 flex-col bg-slate-950 text-center">
-				<div
-					class="flex flex-1 items-center justify-center bg-[#f8bd4c] px-2 text-[clamp(2.65rem,6.2vw,5.3rem)] tracking-[-0.08em] text-slate-950 tabular-nums"
-				>
-					{formatMatchClock(matchClock)}
-				</div>
-				<div
-					class="grid h-14 grid-cols-2 border-t-2 border-slate-950 text-[clamp(2rem,4.2vw,3.7rem)] tabular-nums sm:h-20"
-				>
-					<div class="flex items-center justify-center bg-[#c82d31]">{redScore}</div>
-					<div class="flex items-center justify-center border-l-2 border-slate-950 bg-[#627fe9]">
-						{blueScore}
-					</div>
-				</div>
-				{#if globalScore > 0}
-					<div
-						class="flex items-center justify-center gap-1 border-t border-slate-700 bg-slate-900 py-0.5 text-[0.9rem] text-[#d7ff7b]"
-					>
-						EXT {globalScore}
-					</div>
-				{/if}
-			</div>
-			<div
-				class="flex min-h-[132px] flex-1 flex-col justify-center gap-2 bg-[#627fe9] px-4 text-[clamp(1rem,2.3vw,1.65rem)]"
-			>
-				{#each Array(3) as _, index (index)}
-					<p class="truncate">{blueRoster[index]?.name ?? '—'}</p>
-				{/each}
-			</div>
-		</div>
-		<div
-			class="grid grid-cols-2 overflow-hidden bg-[#d7ff7b] px-3 py-1 text-[0.6rem] tracking-normal text-slate-950 sm:text-xs"
-		>
-			<span class="text-right">FIRST Global 2026</span>
-		</div>
-	</section>
+	<ScoreboardGraphic
+		matchId={activeMatchId}
+		{matchClock}
+		{redScore}
+		{blueScore}
+		{globalScore}
+		{redRoster}
+		{blueRoster}
+		templateUrl={fieldAssets?.ui?.scoreboard}
+	/>
 
 	{#if !matchRunning && practiceRunning}
 		<div class="fixed bottom-40 left-1/2 z-20 -translate-x-1/2">
@@ -1168,6 +1128,15 @@
 			onclick={() => (robotSpecsOpen = !robotSpecsOpen)}
 		>
 			Robot specs
+		</Button>
+		<Button
+			variant="outline"
+			class={potatoMode
+				? 'border-fuchsia-300/60 bg-fuchsia-300/15 text-fuchsia-100 hover:bg-fuchsia-300/25'
+				: 'border-white/20 bg-black/40 text-white hover:bg-white/10'}
+			onclick={() => (potatoMode = !potatoMode)}
+		>
+			{potatoMode ? 'Potato mode' : 'High poly'}
 		</Button>
 		<Button
 			href="/dashboard"
@@ -1466,7 +1435,7 @@
 			</dl>
 			{#if players.length > 0}
 				<div class="mt-1 border-t border-white/15 pt-1 text-white/45">
-					{#each players as player}
+					{#each players as player (player.id)}
 						<p class="truncate">
 							<span class="text-white">{player.name}</span> h{(player.headingDeg ?? 0).toFixed(1)} p({player.x.toFixed(
 								2
@@ -1479,7 +1448,7 @@
 			{/if}
 			{#if semanticEvents.length > 0}
 				<div class="mt-1 border-t border-white/15 pt-1 text-emerald-200">
-					{#each semanticEvents.slice(-4) as event}<p class="truncate">{event}</p>{/each}
+					{#each semanticEvents.slice(-4) as event, i (i)}<p class="truncate">{event}</p>{/each}
 				</div>
 			{/if}
 		</aside>
@@ -1525,7 +1494,7 @@
 				{activeTriggerIds}
 			/>
 		{/if}
-		<ScriptedObjects frame={renderedObjectFrame} />
+		<ScriptedObjects frame={renderedObjectFrame} potatoMode={potatoMode} />
 		<T.Group>
 			{#each renderedPlayers as player (player.id)}
 				<RobotModel

@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
+import type { BatchItem } from 'drizzle-orm/batch'
 import { drizzle } from 'drizzle-orm/d1'
 import { verify } from 'hono/jwt'
 import * as schema from '../db/schema'
@@ -22,6 +23,17 @@ export async function authenticatedGameServer(c: GameServerContext) {
   return db.query.gameServers.findFirst({ where: eq(schema.gameServers.keyHash, await hashKey(key)) })
 }
 
+/**
+ * D1 batches every statement into a single round-trip and transaction. All
+ * heartbeat writes are pushed into one batch, and inserts are chunked to stay
+ * under D1's 100 bound-parameters-per-statement limit.
+ */
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
+
 app.post('/heartbeat', async (c) => {
   const body = await parseJson(c, gameServerHeartbeatSchema)
   if (isResponse(body)) return body
@@ -29,14 +41,30 @@ app.post('/heartbeat', async (c) => {
   if (!server || server.disabledAt) return jsonError(c, 401, 'AUTH_FAILED', 'The game server key is invalid or disabled.')
   const db = drizzle(c.env.DB, { schema })
   const now = new Date()
-  for (const result of body.commandResults ?? []) {
-    await db.update(schema.gameServerCommands).set({
-      status: result.ok ? 'completed' : 'failed',
-      error: result.ok ? null : (result.error ?? 'Host rejected the command.'),
+
+  const statements: BatchItem<'sqlite'>[] = []
+  let serverUpdateIndex = -1
+  let currentMatchesIndex = -1
+  let pendingIndex = -1
+
+  const results = body.commandResults ?? []
+  for (const group of chunk(results.filter((r) => r.ok), 40)) {
+    statements.push(db.update(schema.gameServerCommands).set({
+      status: 'completed',
+      error: null,
       completedAt: now
-    }).where(and(eq(schema.gameServerCommands.id, result.id), eq(schema.gameServerCommands.serverId, server.id)))
+    }).where(and(inArray(schema.gameServerCommands.id, group.map((r) => r.id)), eq(schema.gameServerCommands.serverId, server.id))))
   }
-  const updated = await db.update(schema.gameServers).set({
+  for (const result of results.filter((r) => !r.ok)) {
+    statements.push(db.update(schema.gameServerCommands).set({
+      status: 'failed',
+      error: result.error ?? 'Host rejected the command.',
+      completedAt: now
+    }).where(and(eq(schema.gameServerCommands.id, result.id), eq(schema.gameServerCommands.serverId, server.id))))
+  }
+
+  serverUpdateIndex = statements.length
+  statements.push(db.update(schema.gameServers).set({
     activeUsers: body.activeUsers,
     activeMatches: body.activeMatches,
     maxUsers: body.maxUsers,
@@ -46,10 +74,11 @@ app.post('/heartbeat', async (c) => {
     lastHeartbeatAt: now,
     updatedAt: now,
     runtimeJson: body.runtime ? JSON.stringify(body.runtime) : server.runtimeJson
-  }).where(eq(schema.gameServers.id, server.id)).returning({ id: schema.gameServers.id, status: schema.gameServers.status })
+  }).where(eq(schema.gameServers.id, server.id)).returning({ id: schema.gameServers.id, status: schema.gameServers.status }))
 
-  for (const instance of body.instances ?? []) {
-    await db.insert(schema.gameServerInstances).values({
+  const instances = body.instances ?? []
+  for (const group of chunk(instances, 12)) {
+    statements.push(db.insert(schema.gameServerInstances).values(group.map((instance) => ({
       id: `${server.id}:${instance.machineId}`,
       serverId: server.id,
       machineId: instance.machineId,
@@ -58,35 +87,76 @@ app.post('/heartbeat', async (c) => {
       privateIp: instance.privateIp ?? null,
       discoveredAt: now,
       lastSeenAt: now
-    }).onConflictDoUpdate({
+    }))).onConflictDoUpdate({
       target: [schema.gameServerInstances.serverId, schema.gameServerInstances.machineId],
-      set: { appName: instance.appName ?? null, region: instance.region ?? null, privateIp: instance.privateIp ?? null, lastSeenAt: now }
-    })
+      set: { appName: sql`excluded.appName`, region: sql`excluded.region`, privateIp: sql`excluded.privateIp`, lastSeenAt: now }
+    }))
   }
-  if (body.matches) {
-    await db.delete(schema.gameServerRuntimeMatches).where(eq(schema.gameServerRuntimeMatches.serverId, server.id))
-    if (body.matches.length) await db.insert(schema.gameServerRuntimeMatches).values(body.matches.map((match) => ({
-      id: `${server.id}:${match.id}`,
-      serverId: server.id,
-      matchId: match.id,
-      players: match.players,
-      objects: match.objects,
-      contacts: match.contacts,
-      tick: match.tick,
-      tps: match.tps,
-      physicsTickMs: match.physicsTickMs,
-      physicsLoadPercent: match.physicsLoadPercent,
-      clockDriftMs: match.clockDriftMs,
-      updatedAt: now
-    })))
+
+  const matches = body.matches
+  if (matches) {
+    currentMatchesIndex = statements.length
+    statements.push(db.select({ matchId: schema.gameServerRuntimeMatches.matchId })
+      .from(schema.gameServerRuntimeMatches)
+      .where(eq(schema.gameServerRuntimeMatches.serverId, server.id)))
+    for (const group of chunk(matches, 8)) {
+      statements.push(db.insert(schema.gameServerRuntimeMatches).values(group.map((match) => ({
+        id: `${server.id}:${match.id}`,
+        serverId: server.id,
+        matchId: match.id,
+        players: match.players,
+        objects: match.objects,
+        contacts: match.contacts,
+        tick: match.tick,
+        tps: match.tps,
+        physicsTickMs: match.physicsTickMs,
+        physicsLoadPercent: match.physicsLoadPercent,
+        clockDriftMs: match.clockDriftMs,
+        updatedAt: now
+      }))).onConflictDoUpdate({
+        target: [schema.gameServerRuntimeMatches.serverId, schema.gameServerRuntimeMatches.matchId],
+        set: {
+          players: sql`excluded.players`,
+          objects: sql`excluded.objects`,
+          contacts: sql`excluded.contacts`,
+          tick: sql`excluded.tick`,
+          tps: sql`excluded.tps`,
+          physicsTickMs: sql`excluded.physicsTickMs`,
+          physicsLoadPercent: sql`excluded.physicsLoadPercent`,
+          clockDriftMs: sql`excluded.clockDriftMs`,
+          updatedAt: now
+        }
+      }))
+    }
   }
-  const commands = await db.select().from(schema.gameServerCommands)
+
+  pendingIndex = statements.length
+  statements.push(db.select().from(schema.gameServerCommands)
     .where(and(eq(schema.gameServerCommands.serverId, server.id), eq(schema.gameServerCommands.status, 'pending')))
-    .limit(50)
-  for (const command of commands) {
-    await db.update(schema.gameServerCommands).set({ status: 'delivered', deliveredAt: now })
-      .where(and(eq(schema.gameServerCommands.id, command.id), eq(schema.gameServerCommands.status, 'pending')))
+    .limit(50))
+
+  const batchResults = await db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+
+  const updated = batchResults[serverUpdateIndex] as { id: string; status: string }[]
+  const commands = batchResults[pendingIndex] as typeof schema.gameServerCommands.$inferSelect[]
+
+  const postStatements: BatchItem<'sqlite'>[] = []
+  if (matches) {
+    const present = new Set(matches.map((match) => match.id))
+    const removed = (batchResults[currentMatchesIndex] as { matchId: string }[])
+      .map((row) => row.matchId)
+      .filter((id) => !present.has(id))
+    for (const group of chunk(removed, 90)) {
+      postStatements.push(db.delete(schema.gameServerRuntimeMatches)
+        .where(and(eq(schema.gameServerRuntimeMatches.serverId, server.id), inArray(schema.gameServerRuntimeMatches.matchId, group))))
+    }
   }
+  for (const group of chunk(commands, 50)) {
+    postStatements.push(db.update(schema.gameServerCommands).set({ status: 'delivered', deliveredAt: now })
+      .where(and(inArray(schema.gameServerCommands.id, group.map((command) => command.id)), eq(schema.gameServerCommands.status, 'pending'))))
+  }
+  if (postStatements.length > 0) await db.batch(postStatements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+
   return jsonSuccess(c, {
     server: updated[0],
     heartbeatAt: now,

@@ -1,1 +1,6 @@
-// place files you want to import through the `$lib` alias in this folder.
+export const LANGUAGES: Record<string, string > = {
+    en: "English",
+    vi: "Tiếng Việt",
+    de: "Deutsch",
+    fr: "Français",
+};

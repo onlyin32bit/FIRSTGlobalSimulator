@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { ApiError, api, type LobbySlotId, type MatchLobby, type Robot } from '$lib/api';
@@ -23,7 +24,7 @@
 	function accept(next: MatchLobby) {
 		lobby = next;
 		error = next.error || '';
-		if (next.status === 'IN_PROGRESS') void goto(`/match/${matchId}`);
+		if (next.status === 'IN_PROGRESS') void goto(resolve(`/match/${matchId}`));
 	}
 
 	async function claim(slotId: LobbySlotId) {
@@ -114,7 +115,7 @@
 			<label class="grid gap-1 text-sm font-medium">Robot
 				<select class="h-9 rounded-md border border-input bg-background px-3" bind:value={selectedRobotId} disabled={lobby?.status !== 'LOBBY'}>
 					{#if robots.length === 0}<option value="">No saved robot</option>{/if}
-					{#each robots as robot}<option value={robot.id}>{robot.name}</option>{/each}
+					{#each robots as robot (robot.id)}<option value={robot.id}>{robot.name}</option>{/each}
 				</select>
 			</label>
 		{/if}
@@ -125,11 +126,11 @@
 		<p class="mt-10 text-muted-foreground">Loading lobby…</p>
 	{:else}
 		<div class="mt-8 grid gap-5 lg:grid-cols-2">
-			{#each ['red', 'blue'] as alliance}
+			{#each ['red', 'blue'] as alliance (alliance)}
 				<section class={`rounded-xl border p-5 ${alliance === 'red' ? 'border-rose-500/40 bg-rose-500/5' : 'border-sky-500/40 bg-sky-500/5'}`}>
 					<h2 class="text-lg font-semibold capitalize">{alliance} alliance</h2>
 					<div class="mt-4 grid gap-3">
-						{#each lobby.slots.filter((slot) => slot.alliance === alliance) as station}
+						{#each lobby.slots.filter((slot) => slot.alliance === alliance) as station (station.id)}
 							<div class="flex min-h-20 items-center justify-between gap-3 rounded-lg border bg-background/80 p-3">
 								<div>
 									<p class="font-medium">{station.label}</p>

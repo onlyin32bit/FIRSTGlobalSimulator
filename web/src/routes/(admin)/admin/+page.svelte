@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { IconActivity, IconArrowRight, IconBell, IconBox, IconUsers } from '@tabler/icons-svelte';
+	import { resolve } from '$app/paths';
 	import { Button } from '$lib/components/ui/button';
 	import { ApiError, api } from '$lib/api';
 
@@ -61,14 +62,14 @@
 					Monitor accounts, invitations, game packs, and lobby activity from one operational
 					workspace.
 				</p>
-				<Button href="/admin/invitations" size="sm" class="mt-5"
+				<Button href={resolve('/admin/invitations')} size="sm" class="mt-5"
 					>Manage invitations <IconArrowRight class="ml-1 size-3.5" /></Button
 				>
 			</div>
 		</section>
 		<section class="overflow-hidden rounded-xl border border-border bg-card">
 			<div class="grid sm:grid-cols-2 xl:grid-cols-5">
-				{#each metrics as metric, index}
+				{#each metrics as metric, index (metric.label)}
 					{@const MetricIcon = metric.icon}
 					<div
 						class="min-h-31 border-b border-border p-5 sm:border-r xl:border-b-0 {index === 4
@@ -87,7 +88,7 @@
 			<section>
 				<div class="mb-4 flex items-center justify-between">
 					<h2 class="font-semibold">Recent activity</h2>
-					<a class="text-sm text-muted-foreground hover:text-foreground" href="/admin/audit-log"
+					<a class="text-sm text-muted-foreground hover:text-foreground" href={resolve('/admin/audit-log')}
 						>View all</a
 					>
 				</div>
@@ -95,7 +96,7 @@
 					{#if data.recentActivity.length === 0}<div class="p-6 text-sm text-muted-foreground">
 							Administrative activity will appear here.
 						</div>{:else}<ul class="divide-y divide-border">
-							{#each data.recentActivity as item}<li class="flex gap-3 p-4">
+							{#each data.recentActivity as item (item.id)}<li class="flex gap-3 p-4">
 									<span
 										class="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-muted"
 										><IconActivity class="size-3.5" /></span
@@ -113,7 +114,7 @@
 			<section>
 				<div class="mb-4 flex items-center justify-between">
 					<h2 class="font-semibold">Recent matches</h2>
-					<a class="text-sm text-muted-foreground hover:text-foreground" href="/admin/matches"
+					<a class="text-sm text-muted-foreground hover:text-foreground" href={resolve('/admin/matches')}
 						>View all</a
 					>
 				</div>
@@ -121,7 +122,7 @@
 					{#if data.recentMatches.length === 0}<div class="p-6 text-sm text-muted-foreground">
 							No matches created yet.
 						</div>{:else}<ul class="divide-y divide-border">
-							{#each data.recentMatches as match}<li class="p-4">
+							{#each data.recentMatches as match (match.id)}<li class="p-4">
 									<div class="flex items-center justify-between">
 										<p class="text-sm font-medium">{match.gamePackId}</p>
 										<span class="rounded-full bg-muted px-2 py-0.5 text-[11px]">{match.status}</span

@@ -325,7 +325,7 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 				snapshot.positions = positions;
 				break;
 			}
-			case 6:
+			case 6: {
 				const physics: MatchPhysics = {
 					ballMaterial: section.string(),
 					floorMaterial: section.string(),
@@ -427,6 +427,7 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 				}
 				snapshot.physics = physics;
 				break;
+			}
 			case 8: {
 				const drivePhysics = snapshot.physics;
 				if (drivePhysics && section.offset + 28 <= sectionEnd) {
