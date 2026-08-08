@@ -190,10 +190,10 @@ impl RuntimeBackend {
                 runtime.apply_player_drive(arena);
                 runtime.tick(dt);
             }
-            Self::Sphere(runtime) => {
-                runtime.apply_player_drive(arena, dt as f32);
-                runtime.tick(dt);
-            }
+            // apply_player_drive is now called inside SphereRuntime::tick()
+            // before integrate(), keeping drive forces, position integration,
+            // and collision resolution all within the same atomic step.
+            Self::Sphere(runtime) => runtime.tick(dt),
         }
     }
 
@@ -300,6 +300,7 @@ pub struct PhysicsSync {
     pub robot_height_m: f32,
     pub robot_length_m: f32,
     pub robot_max_speed_mps: f32,
+    pub robot_rolling_resistance_mps2: f32,
     pub ball_inertia_factor: f32,
     pub ball_drag_coefficient: f32,
     pub air_density_kg_m3: f32,
@@ -354,6 +355,7 @@ impl From<&ArenaConfig> for PhysicsSync {
             robot_height_m: arena.robot.height_m,
             robot_length_m: arena.robot.length_m,
             robot_max_speed_mps: arena.robot.max_speed_mps,
+            robot_rolling_resistance_mps2: arena.robot.rolling_resistance,
             ball_inertia_factor: arena.ball.inertia_factor,
             ball_drag_coefficient: arena.ball.drag_coefficient,
             air_density_kg_m3: arena.ball.air_density_kg_m3,
@@ -361,12 +363,12 @@ impl From<&ArenaConfig> for PhysicsSync {
             floor_static_friction: arena.floor.static_friction,
             floor_dynamic_friction: arena.floor.dynamic_friction,
             floor_rolling_resistance_mps2: arena.floor.rolling_resistance_mps2,
-            intake_enabled: arena.robot.intake_enabled,
-            intake_width_m: arena.robot.intake_width_m,
-            intake_radius_m: arena.robot.intake_radius_m,
-            intake_forward_offset_m: arena.robot.intake_forward_offset_m,
-            intake_center_height_m: arena.robot.intake_center_height_m,
-            intake_surface_speed_mps: arena.robot.intake_surface_speed_mps,
+            intake_enabled: false,
+            intake_width_m: 0.0,
+            intake_radius_m: 0.0,
+            intake_forward_offset_m: 0.0,
+            intake_center_height_m: 0.0,
+            intake_surface_speed_mps: 0.0,
             ramp_enabled: arena.ramp.enabled,
             ramp_center_x: arena.ramp.center_x,
             ramp_start_z: arena.ramp.start_z,
@@ -381,14 +383,14 @@ impl From<&ArenaConfig> for PhysicsSync {
             max_drive_force_n: arena.robot.max_drive_force_n,
             max_drive_power_w: arena.robot.max_drive_power_w,
             max_brake_force_n: arena.robot.max_brake_force_n,
-            storage_capacity: arena.robot.storage_capacity as f32,
-            intake_rate_bps: arena.robot.intake_rate_bps,
-            outtake_rate_bps: arena.robot.outtake_rate_bps,
-            outtake_velocity_mps: arena.robot.outtake_velocity_mps,
-            outtake_angle_deg: arena.robot.outtake_angle_deg,
-            flywheel_width_m: arena.robot.flywheel_width_m,
-            outtake_forward_offset_m: arena.robot.outtake_forward_offset_m,
-            outtake_height_m: arena.robot.outtake_height_m,
+            storage_capacity: 0.0,
+            intake_rate_bps: 0.0,
+            outtake_rate_bps: 0.0,
+            outtake_velocity_mps: 0.0,
+            outtake_angle_deg: 0.0,
+            flywheel_width_m: 0.0,
+            outtake_forward_offset_m: 0.0,
+            outtake_height_m: 0.0,
         }
     }
 }
@@ -607,35 +609,57 @@ impl MatchRegistry {
                     }
                 }
                 let physics = PhysicsSync::from(&pack.arena);
-                let tick_duration = Duration::from_secs_f64(1.0 / 60.0);
+                let tick_dt = 1.0_f64 / 60.0;
+                let tick_duration = Duration::from_secs_f64(tick_dt);
                 let tick_budget_ms = tick_duration.as_secs_f64() * 1_000.0;
-                let mut next_tick = Instant::now();
+                // Semi-fixed timestep accumulator. Real elapsed time is
+                // accumulated each wakeup and drained in fixed-dt physics
+                // steps. This keeps simulation_clock locked to wall-clock
+                // time even when individual steps take longer than 1/60 s
+                // due to heavy physics or OS scheduler jitter, without
+                // ever changing the physics dt or its properties.
+                //
+                // A cap of 4 steps per wakeup prevents the spiral of death
+                // when the server is severely overloaded: excess time is
+                // discarded rather than causing ever-growing catch-up bursts
+                // that starve I/O.
+                const MAX_STEPS_PER_WAKEUP: u32 = 4;
+                let mut last_wakeup = Instant::now();
+                let mut accumulator = 0.0_f64;
                 // A short, server-owned staging phase gives every redirected
                 // client the same 5→1 presentation and prevents movement or
                 // game-piece release before the match actually starts.
                 const PRE_MATCH_COUNTDOWN: Duration = Duration::from_secs(5);
                 const MATCH_DURATION: Duration = Duration::from_secs(150);
-                let match_created = next_tick;
+                let match_created = last_wakeup;
                 let match_started = match_created + PRE_MATCH_COUNTDOWN;
                 let match_ends = match_started + MATCH_DURATION;
                 let mut live_phase_entered = false;
                 let mut practice_continue = false;
-                let mut tps_window_started = next_tick;
+                let mut tps_window_started = last_wakeup;
                 let mut ticks_in_tps_window = 0_u64;
                 let mut ticks_per_second = 60.0;
                 let mut tick = 0_u64;
                 let mut recent_semantic_events = VecDeque::<String>::with_capacity(16);
 
                 while !simulation_shutdown.load(Ordering::Relaxed) {
+                    // Sleep until the next expected wakeup (one tick_duration
+                    // from the last). If we woke up late, the extra elapsed
+                    // time will be captured in the accumulator below rather
+                    // than being silently dropped.
+                    let next_wakeup = last_wakeup + tick_duration;
                     let now = Instant::now();
-                    if now < next_tick {
-                        std::thread::sleep(next_tick - now);
-                    } else if now.duration_since(next_tick) > tick_duration {
-                        // Do not burst through missed physics ticks. Catch-up bursts
-                        // starve websocket I/O precisely when the simulation is busy.
-                        next_tick = now;
+                    if now < next_wakeup {
+                        std::thread::sleep(next_wakeup - now);
                     }
-                    next_tick += tick_duration;
+                    let now = Instant::now();
+
+                    // Accumulate the true elapsed wall-clock time.
+                    let elapsed = now.duration_since(last_wakeup).as_secs_f64();
+                    last_wakeup = now;
+                    // Cap accumulation to MAX_STEPS_PER_WAKEUP ticks so a
+                    // slow tick never causes an unbounded catch-up burst.
+                    accumulator = (accumulator + elapsed).min(tick_dt * MAX_STEPS_PER_WAKEUP as f64);
 
                     while let Ok(input) = input_rx.try_recv() {
                         match input {
@@ -677,43 +701,49 @@ impl MatchRegistry {
                         }
                     }
 
-                    let clock_now = Instant::now();
+                    let clock_now = now;
                     if !live_phase_entered && clock_now >= match_started {
                         runtime.begin_match();
                         live_phase_entered = true;
                     }
                     let match_running = live_phase_entered && clock_now < match_ends;
+
+                    // Drain the accumulator with fixed-dt physics steps.
                     let physics_started = Instant::now();
-                    if match_running || practice_continue {
-                        runtime.step(&pack.arena, 1.0 / 60.0);
-                    }
-                    for event in runtime.drain_semantic_events() {
-                        let mut label = format!("{} {} ← {}", event.kind, event.target_id, event.entity_id);
-                        if match_running {
-                            let outcomes = rules.on_trigger_enter(&event.target_id, &event.entity_id);
-                            for outcome in outcomes {
-                                label.push_str(&format!(" · {} {}/{} +{}", outcome.kind, outcome.team, outcome.category, outcome.points));
-                                // Native scoring: the authored rule's outcome
-                                // is the source of truth for team, category and
-                                // points, so tweaking scoring.rhai rebalances a
-                                // match without a rebuild.
-                                runtime.apply_score(&outcome.team, &outcome.category, outcome.points as i32);
-                                // SU containment and EXT extinguishing remove the
-                                // piece from the field entirely (never re-scored).
-                                if outcome.category == "SU" || outcome.category == "EXT" {
-                                    runtime.contain_ball(&event.entity_id);
+                    while accumulator >= tick_dt {
+                        accumulator -= tick_dt;
+                        if match_running || practice_continue {
+                            runtime.step(&pack.arena, tick_dt);
+                        }
+                        for event in runtime.drain_semantic_events() {
+                            let mut label = format!("{} {} ← {}", event.kind, event.target_id, event.entity_id);
+                            if match_running {
+                                let outcomes = rules.on_trigger_enter(&event.target_id, &event.entity_id);
+                                for outcome in outcomes {
+                                    label.push_str(&format!(" · {} {}/{} +{}", outcome.kind, outcome.team, outcome.category, outcome.points));
+                                    // Native scoring: the authored rule's outcome
+                                    // is the source of truth for team, category and
+                                    // points, so tweaking scoring.rhai rebalances a
+                                    // match without a rebuild.
+                                    runtime.apply_score(&outcome.team, &outcome.category, outcome.points as i32);
+                                    // SU containment and EXT extinguishing remove the
+                                    // piece from the field entirely (never re-scored).
+                                    if outcome.category == "SU" || outcome.category == "EXT" {
+                                        runtime.contain_ball(&event.entity_id);
+                                    }
                                 }
                             }
+                            recent_semantic_events.push_back(label);
+                            while recent_semantic_events.len() > 16 {
+                                recent_semantic_events.pop_front();
+                            }
                         }
-                        recent_semantic_events.push_back(label);
-                        while recent_semantic_events.len() > 16 {
-                            recent_semantic_events.pop_front();
-                        }
+                        tick += 1;
+                        ticks_in_tps_window += 1;
                     }
+
                     let physics_tick_ms = physics_started.elapsed().as_secs_f64() * 1_000.0;
                     let physics_load_percent = physics_tick_ms / tick_budget_ms * 100.0;
-                    tick += 1;
-                    ticks_in_tps_window += 1;
                     let tps_elapsed = physics_started.duration_since(tps_window_started);
                     if tps_elapsed >= Duration::from_secs(1) {
                         ticks_per_second = ticks_in_tps_window as f64 / tps_elapsed.as_secs_f64();
@@ -798,6 +828,7 @@ impl MatchRegistry {
                         }
                     }
                 }
+
             })
             .expect("failed to start match physics thread");
 
@@ -952,6 +983,10 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
         ] {
             put_f32(bytes, value);
         }
+        // Appended fields keep older clients compatible with the sectioned
+        // protocol while allowing prediction to use the same chassis drag as
+        // the authoritative server.
+        put_f32(bytes, state.physics.robot_rolling_resistance_mps2);
     });
     section(&mut output, SCORE, |bytes| {
         put_i32(bytes, state.score.blue_score);

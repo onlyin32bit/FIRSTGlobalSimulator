@@ -19,7 +19,7 @@
 	} = $props();
 
 	let cameraRef: PerspectiveCamera | undefined = $state();
-	const clampedDistance = $derived(Math.min(18, Math.max(2.5, distance)));
+	const clampedDistance = $derived(Math.min(18, Math.max(1, distance)));
 	const target = new Vector3();
 
 	useTask(() => {

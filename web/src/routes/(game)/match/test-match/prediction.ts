@@ -22,9 +22,14 @@ export type FieldCollider = {
 };
 
 export type DriveParams = {
+	massKg: number;
 	maxSpeedMps: number;
 	maxAccelerationMps2: number;
 	maxDecelerationMps2: number;
+	maxDriveForceN: number;
+	maxDrivePowerW: number;
+	maxBrakeForceN: number;
+	rollingResistanceMps2: number;
 	maxTurnRateRadps: number;
 	maxAngularAccelerationRadps2: number;
 	lateralGripMps2: number;
@@ -207,6 +212,7 @@ const projectFieldColliders = (p: RobotPose, params: DriveParams) => {
  */
 export class DrivePredictor {
 	private readonly params: DriveParams;
+	private accumulatedTime = 0;
 	pose: RobotPose;
 
 	constructor(params: DriveParams, initial: RobotPose) {
@@ -219,10 +225,27 @@ export class DrivePredictor {
 	}
 
 	step(input: DriveInput, dt: number) {
+		// The authoritative server advances the robot at a fixed 60 Hz. Keep
+		// prediction on the same lattice so variable browser frame rates do not
+		// create a second, slightly different physics clock.
+		const fixedDt = 1 / 60;
+		this.accumulatedTime = Math.min(this.accumulatedTime + clamp(dt, 0, 0.05), 0.25);
+		while (this.accumulatedTime >= fixedDt) {
+			this.stepFixed(input, fixedDt);
+			this.accumulatedTime -= fixedDt;
+		}
+	}
+
+	private stepFixed(input: DriveInput, stepDt: number) {
 		const {
+			massKg,
 			maxSpeedMps,
 			maxAccelerationMps2,
 			maxDecelerationMps2,
+			maxDriveForceN,
+			maxDrivePowerW,
+			maxBrakeForceN,
+			rollingResistanceMps2,
 			maxTurnRateRadps,
 			maxAngularAccelerationRadps2,
 			lateralGripMps2,
@@ -230,8 +253,6 @@ export class DrivePredictor {
 			trackWidthM
 		} = this.params;
 		const p = this.pose;
-		const stepDt = clamp(dt, 0, 0.05);
-
 		// Robot is constrained to yaw only; forward/right follow the same
 		// quaternion expansion the server derives from Rapier's rotation.
 		const forwardX = -Math.sin(p.yaw);
@@ -253,21 +274,29 @@ export class DrivePredictor {
 		const targetSpeed = (leftPower + rightPower) * 0.5 * maxSpeedMps;
 		const braking =
 			Math.abs(targetSpeed) < Math.abs(forwardSpeed) ||
-			Math.sign(targetSpeed) !== Math.sign(forwardSpeed);
-		const accelLimit = Math.min(
-			braking ? maxDecelerationMps2 : maxAccelerationMps2,
-			tractionFriction * GRAVITY
+			Math.sign(targetSpeed) !== Math.sign(forwardSpeed) ||
+			Math.abs(targetSpeed) < 1.0e-4;
+		const tractionLimit = Math.max(tractionFriction, 0) * massKg * GRAVITY;
+		const forceLimit = Math.min(
+			braking
+				? maxBrakeForceN
+					: Math.min(
+							maxDriveForceN,
+							massKg * maxAccelerationMps2,
+							maxDrivePowerW /
+								Math.max(Math.abs(forwardSpeed), maxSpeedMps * 0.08, 0.1)
+						),
+				braking ? massKg * maxDecelerationMps2 : tractionLimit,
+			tractionLimit
 		);
-		const forwardDelta = clamp(
-			targetSpeed - forwardSpeed,
-			-accelLimit * stepDt,
-			accelLimit * stepDt
-		);
-		const lateralAcceleration = Math.min(lateralGripMps2, tractionFriction * GRAVITY);
+		const requestedForce =
+			((targetSpeed - forwardSpeed) * massKg) / Math.max(stepDt, 1.0e-5);
+		const forwardDelta =
+			(clamp(requestedForce, -forceLimit, forceLimit) / Math.max(massKg, 1.0)) * stepDt;
 		const lateralDelta = clamp(
 			-lateralSpeed,
-			-lateralAcceleration * stepDt,
-			lateralAcceleration * stepDt
+			-lateralGripMps2 * stepDt,
+			lateralGripMps2 * stepDt
 		);
 
 		// Impulse over mass equals the velocity delta; the server applies
@@ -318,5 +347,9 @@ export class DrivePredictor {
 		}
 
 		projectFieldColliders(p, this.params);
+
+		const drag = Math.exp(-Math.max(rollingResistanceMps2, 0) * stepDt);
+		p.vx *= drag;
+		p.vz *= drag;
 	}
 }

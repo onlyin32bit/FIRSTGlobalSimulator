@@ -20,6 +20,8 @@ pub struct GamePackManifest {
     pub phases: Vec<serde_json::Value>,
     #[serde(default)]
     pub scripts: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub robots: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -44,6 +46,7 @@ pub struct GamePackRuntimeSnapshot {
     pub manifest: GamePackManifest,
     pub field_physics: serde_json::Value,
     pub field_semantics: serde_json::Value,
+    pub robot_physics: serde_json::Value,
     pub scripts: BTreeMap<String, String>,
 }
 
@@ -61,6 +64,11 @@ pub struct FieldDefinition {
     /// The playable X/Z envelope, derived from the riser's inner footprint.
     /// The guard rail stays visual geometry rather than a giant solid AABB.
     pub boundary: FieldBoundary,
+    /// Robot-local collision volumes authored in bot.physics.json. This is
+    /// kept with the loaded field definition because the runtime already
+    /// receives both sets of authored geometry together.
+    #[serde(skip)]
+    pub robot_colliders: Vec<FieldCollider>,
 }
 
 /// Axis-aligned playable footprint of a game-pack field. The server uses this
@@ -347,6 +355,8 @@ impl PackLoader {
         })?;
         let field_definition =
             load_field_definition(&snapshot.field_physics, &snapshot.field_semantics)?;
+        let mut field_definition = field_definition;
+        field_definition.robot_colliders = load_robot_colliders(&snapshot.robot_physics)?;
         Ok(GamePackMetadata {
             manifest: snapshot.manifest,
             scripts,
@@ -389,6 +399,22 @@ impl PackLoader {
                 .map_err(|error| GameError::ManifestParseError(error.to_string()))?,
         )
         .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
+        let robot_physics_path = manifest
+            .robots
+            .get("StarterBot")
+            .and_then(|robot| robot.get("physics"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| GameError::ManifestParseError("StarterBot physics is missing".into()))?;
+        let robot_physics = serde_json::from_str(
+            &std::fs::read_to_string(
+                root.parent()
+                    .and_then(std::path::Path::parent)
+                    .unwrap_or(root)
+                    .join(robot_physics_path),
+            )
+            .map_err(|error| GameError::ManifestParseError(error.to_string()))?,
+        )
+        .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
         let scripts = manifest
             .scripts
             .values()
@@ -410,9 +436,39 @@ impl PackLoader {
             manifest,
             field_physics,
             field_semantics,
+            robot_physics,
             scripts,
         })
     }
+}
+
+fn load_robot_colliders(physics: &serde_json::Value) -> Result<Vec<FieldCollider>, GameError> {
+    const MIN_THICKNESS_M: f32 = 0.01;
+    Ok(assimp_colliders(physics)
+        .into_iter()
+        .map(|(id, _min, _max, center, mut half_extents, axes)| {
+            for extent in &mut half_extents {
+                *extent = extent.max(MIN_THICKNESS_M * 0.5);
+            }
+            let mut min = center;
+            let mut max = center;
+            for world_axis in 0..3 {
+                let radius = (0..3)
+                    .map(|local_axis| axes[local_axis][world_axis].abs() * half_extents[local_axis])
+                    .sum::<f32>();
+                min[world_axis] -= radius;
+                max[world_axis] += radius;
+            }
+            FieldCollider {
+                id,
+                min,
+                max,
+                center,
+                half_extents,
+                axes,
+            }
+        })
+        .collect())
 }
 
 fn load_field_definition(
@@ -675,6 +731,10 @@ mod tests {
             &std::fs::read_to_string(root.join("field.semantics.json")).unwrap(),
         )
         .unwrap();
+        let robot_physics = serde_json::from_str(
+            &std::fs::read_to_string("../pkgs/robots/StarterBot/bot.physics.json").unwrap(),
+        )
+        .unwrap();
         let scripts = [
             "rules/arena.rhai",
             "rules/penalties.rhai",
@@ -700,6 +760,7 @@ mod tests {
                 manifest,
                 field_physics,
                 field_semantics,
+                robot_physics,
                 scripts,
             })
             .unwrap();
@@ -712,13 +773,14 @@ mod tests {
         assert_eq!(metadata.arena.ball.drag_coefficient, 0.47);
         assert_eq!(metadata.arena.floor.material, "low-pile carpet");
         assert!(metadata.arena.floor.rolling_resistance_mps2 > 0.0);
-        assert!(metadata.arena.robot.intake_enabled);
+        assert!(!metadata.arena.robot.intake_enabled);
         assert_eq!(metadata.arena.robot.mass_kg, 18.0);
         assert_eq!(metadata.arena.robot.width_m, 0.50);
         assert_eq!(metadata.arena.robot.height_m, 0.50);
         assert_eq!(metadata.arena.robot.length_m, 0.50);
         assert!(metadata.arena.ramp.enabled);
         assert!(metadata.field_definition.colliders.len() >= 70);
+        assert_eq!(metadata.field_definition.robot_colliders.len(), 32);
         let front_wall = metadata
             .field_definition
             .colliders
