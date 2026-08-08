@@ -83,7 +83,58 @@
 		<T.Group position={[0, -physics.robotHeightM * 0.5 + floorOffset, 0]} rotation={[0, Math.PI, 0]}>
 			<T is={configureRobotVisual(gltf.scene)} />
 		</T.Group>
-	{/await}
+	{/if}
+
+	{#if physics.outtakeHeightM > 0}
+		<T.Group
+			position={[
+				0,
+				physics.outtakeHeightM - physics.robotHeightM * 0.5,
+				-physics.outtakeForwardOffsetM
+			]}
+		>
+			<T.Mesh
+				castShadow
+				receiveShadow
+				rotation={[flywheelRotation, 0, Math.PI * 0.5]}
+			>
+				<T.CylinderGeometry args={[0.06, 0.06, physics.flywheelWidthM, 12]} />
+				<T.MeshStandardMaterial
+					color={isOuttaking ? '#84cc16' : '#a3e635'}
+					emissive={isOuttaking ? '#a3e635' : '#000000'}
+					emissiveIntensity={isOuttaking ? 1.0 : 0}
+					roughness={0.2}
+					metalness={0.6}
+				/>
+			</T.Mesh>
+			<T.Mesh
+				castShadow
+				receiveShadow
+				position={[physics.flywheelWidthM * 0.5 + 0.025, 0, 0]}
+				rotation={[0, 0, Math.PI * 0.5]}
+			>
+				<T.CylinderGeometry args={[0.035, 0.035, 0.05, 8]} />
+				<T.MeshStandardMaterial color="#4d7c0f" />
+			</T.Mesh>
+			<T.Mesh
+				castShadow
+				receiveShadow
+				position={[-physics.flywheelWidthM * 0.5 - 0.025, 0, 0]}
+				rotation={[0, 0, Math.PI * 0.5]}
+			>
+				<T.CylinderGeometry args={[0.035, 0.035, 0.05, 8]} />
+				<T.MeshStandardMaterial color="#4d7c0f" />
+			</T.Mesh>
+		</T.Group>
+	{/if}
+
+	<!-- Hopper stored balls visual -->
+	{#each visibleBalls as pos, i (i)}
+		<T.Mesh position={pos}>
+			<T.SphereGeometry args={[0.045, 12, 12]} />
+			<T.MeshStandardMaterial color="#f97316" roughness={0.3} emissive="#ea580c" emissiveIntensity={0.2} />
+		</T.Mesh>
+	{/each}
 
 	<HTML position={[0, physics.robotHeightM * 0.5 + 0.55, 0]} center>
 		<div

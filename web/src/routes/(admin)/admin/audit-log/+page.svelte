@@ -39,7 +39,7 @@
 						><td class="p-5 text-muted-foreground" colspan="4"
 							>No administrative actions have been recorded yet.</td
 						></tr
-					>{:else}{#each entries as entry}<tr class="border-b border-border last:border-0"
+					>					{:else}{#each entries as entry (entry.id)}<tr class="border-b border-border last:border-0"
 							><td class="p-4"
 								><p class="font-medium">{entry.action}</p>
 								{#if entry.metadata}<p class="mt-1 font-mono text-xs text-muted-foreground">

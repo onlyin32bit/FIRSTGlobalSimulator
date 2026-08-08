@@ -4,7 +4,6 @@
 		IconArrowRight,
 		IconBox,
 		IconBrandTelegram,
-		IconCpu,
 		IconFlame,
 		IconHash,
 		IconLayersIntersect,
@@ -12,17 +11,16 @@
 		IconPlus,
 		IconRobot,
 		IconSettings,
-		IconShield,
 		IconSparkles,
 		IconWorld
 	} from '@tabler/icons-svelte';
 	import { Button } from '$lib/components/ui/button';
-	import * as Card from '$lib/components/ui/card';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { ApiError, api } from '$lib/api';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 
 	let matchId = $state('');
 	let showCreateMatch = $state(false);
@@ -32,7 +30,7 @@
 	function joinMatch() {
 		const normalizedMatchId = matchId.trim();
 		if (!normalizedMatchId) return;
-		void goto(normalizedMatchId === 'test-match' ? '/match/test-match' : `/match/${encodeURIComponent(normalizedMatchId)}/lobby`);
+		void goto(resolve(normalizedMatchId === 'test-match' ? '/match/test-match' : `/match/${encodeURIComponent(normalizedMatchId)}/lobby`));
 	}
 
 	async function submitCreateMatch() {
@@ -41,7 +39,7 @@
 		try {
 			const { match_id } = await api.createMatch({ gamePackId: 'fgc-2026' });
 			showCreateMatch = false;
-			await goto(`/match/${match_id}/lobby`);
+			await goto(resolve(`/match/${match_id}/lobby`));
 		} catch (error) {
 			errorMessage =
 				error instanceof ApiError ? error.message : 'Unable to create a match. Please try again.';
@@ -243,7 +241,7 @@
 		<section class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
 			<!-- Robot Hangar Card -->
 			<a
-				href="/robot"
+				href={resolve('/robot')}
 				class="group relative overflow-hidden rounded-2xl border border-border/80 bg-card/40 p-6 backdrop-blur-xl transition-all duration-300 hover:border-primary/60 hover:bg-card/80 hover:shadow-[0_0_25px_rgba(234,88,12,0.15)] hover:-translate-y-1"
 			>
 				<div class="flex items-center justify-between">
@@ -263,7 +261,7 @@
 
 			<!-- Offline Field Sandbox Card -->
 			<a
-				href="/scene"
+				href={resolve('/scene')}
 				class="group relative overflow-hidden rounded-2xl border border-border/80 bg-card/40 p-6 backdrop-blur-xl transition-all duration-300 hover:border-cyan-500/60 hover:bg-card/80 hover:shadow-[0_0_25px_rgba(6,182,212,0.15)] hover:-translate-y-1"
 			>
 				<div class="flex items-center justify-between">

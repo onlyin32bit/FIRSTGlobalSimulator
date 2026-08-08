@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { T, useThrelte } from '@threlte/core';
+	import { T, useTask, useThrelte } from '@threlte/core';
 	import { DynamicDrawUsage, Sphere, Vector3, type InstancedMesh } from 'three';
 
 	type ObjectFrame = {
@@ -8,24 +8,33 @@
 		color: string;
 	};
 
-	let { frame }: { frame: ObjectFrame } = $props();
+	let { frame, potatoMode = false }: { frame: ObjectFrame; potatoMode?: boolean } = $props();
 	let meshRef: InstancedMesh | undefined = $state();
 	const MAX_INSTANCES = 1024;
 	const BASE_RADIUS = 0.05;
 	const MESH_ARGS: [undefined, undefined, number] = [undefined, undefined, MAX_INSTANCES];
 	const SPHERE_ARGS: [number, number, number] = [BASE_RADIUS, 8, 6];
+	const POTATO_ARGS: [number, number] = [BASE_RADIUS, 1];
 	const { invalidate } = useThrelte();
 
-	$effect(() => {
+	let initialized = false;
+
+	useTask(() => {
 		const mesh = meshRef;
 		const snapshot = frame;
 		if (!mesh) return;
 
-		mesh.instanceMatrix.setUsage(DynamicDrawUsage);
-		// The default InstancedMesh bounds only cover the source sphere. Give the
-		// renderer one conservative field-sized bound so frustum culling can skip
-		// the entire ball draw when the camera is turned away from the field.
-		mesh.geometry.boundingSphere = new Sphere(new Vector3(0, 0, 0), 12);
+		if (!initialized) {
+			mesh.instanceMatrix.setUsage(DynamicDrawUsage);
+			// The default InstancedMesh bounds are computed once from the first frame's
+			// instance matrices and cached, so as balls spread across the field the
+			// stale sphere no longer covers them and the whole mesh gets frustum-culled
+			// (notably under the close follow camera). Override the mesh's own
+			// boundingSphere with one conservative field-sized bound so culling only
+			// skips the ball draw when the camera turns away from the entire field.
+			mesh.boundingSphere = new Sphere(new Vector3(0, 0, 0), 12);
+			initialized = true;
+		}
 		const matrices = mesh.instanceMatrix.array as Float32Array;
 		const count = Math.min(snapshot.positions.length / 3, MAX_INSTANCES);
 		const scale = snapshot.radius / BASE_RADIUS;
@@ -67,7 +76,11 @@
 	castShadow={false}
 	receiveShadow={false}
 >
-	<T.SphereGeometry args={SPHERE_ARGS} />
+	{#if potatoMode}
+		<T.IcosahedronGeometry args={POTATO_ARGS} />
+	{:else}
+		<T.SphereGeometry args={SPHERE_ARGS} />
+	{/if}
 	<!-- A low-poly instanced Lambert material keeps 1,000 balls inexpensive;
 	     robot and field shadows provide the useful depth cues. -->
 	<T.MeshLambertMaterial color={frame.color} />

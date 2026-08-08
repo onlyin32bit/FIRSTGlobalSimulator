@@ -6,6 +6,7 @@
 	import * as Tabs from '$lib/components/ui/tabs';
 	import { Label } from '$lib/components/ui/label';
 	import { ApiError, api, type Robot } from '$lib/api';
+	import { resolve } from '$app/paths';
 
 	let robotName = $state('My Custom Bot');
 	let driveType = $state('Mecanum');
@@ -71,7 +72,7 @@
 				><Tabs.Trigger value="shooter">Scoring</Tabs.Trigger></Tabs.List
 			>
 			<Tabs.Content value="drive" class="flex flex-col gap-3 pt-4"
-				>{#each driveTypes as option}<button
+				>{#each driveTypes as option (option)}<button
 						class="w-full rounded-lg border p-3 text-left transition-colors {driveType === option
 							? 'border-primary bg-primary/10 text-primary'
 							: 'border-border bg-card hover:bg-accent'}"
@@ -82,7 +83,7 @@
 					>{/each}</Tabs.Content
 			>
 			<Tabs.Content value="intake" class="flex flex-col gap-3 pt-4"
-				>{#each intakes as option}<button
+				>{#each intakes as option (option)}<button
 						class="w-full rounded-lg border p-3 text-left transition-colors {selectedIntake ===
 						option
 							? 'border-primary bg-primary/10 text-primary'
@@ -94,7 +95,7 @@
 					>{/each}</Tabs.Content
 			>
 			<Tabs.Content value="shooter" class="flex flex-col gap-3 pt-4"
-				>{#each shooters as option}<button
+				>{#each shooters as option (option)}<button
 						class="w-full rounded-lg border p-3 text-left transition-colors {selectedShooter ===
 						option
 							? 'border-primary bg-primary/10 text-primary'
@@ -112,7 +113,7 @@
 		<div class="mt-auto pt-6">
 			<Button class="w-full" disabled={isSaving} onclick={saveRobot}
 				>{isSaving ? 'Saving…' : 'Save build'}</Button
-			><Button variant="ghost" class="mt-2 w-full" href="/dashboard">Back to dashboard</Button>
+			><Button variant="ghost" class="mt-2 w-full" href={resolve('/dashboard')}>Back to dashboard</Button>
 		</div>
 	</aside>
 	<main class="relative flex flex-1 flex-col items-center justify-center bg-background/50 p-6">
@@ -134,7 +135,7 @@
 						</p>{:else if savedRobots.length === 0}<p class="text-sm text-muted-foreground">
 							Save your first robot build to use it in future matches.
 						</p>{:else}<ul class="space-y-2 text-left">
-							{#each savedRobots as robot}<li
+							{#each savedRobots as robot (robot.id)}<li
 									class="flex items-center justify-between rounded-md border border-border p-3"
 								>
 									<span class="font-medium">{robot.name}</span><span

@@ -9,7 +9,9 @@
 		Matrix4,
 		Mesh,
 		MeshBasicMaterial,
-		Vector3
+		Vector3,
+		InstancedMesh,
+		Object3D
 	} from 'three';
 
 	type Bounds = {
@@ -154,6 +156,25 @@
 		const euler = new Euler().setFromRotationMatrix(matrix);
 		return [euler.x, euler.y, euler.z];
 	}
+
+	let instancedMeshRef = $state<InstancedMesh | undefined>();
+	const dummyObj = new Object3D();
+
+	$effect(() => {
+		if (instancedMeshRef && showColliderAabbs && colliders.length > 0) {
+			colliders.forEach((collider, i) => {
+				const [x, y, z] = center(collider);
+				const [rx, ry, rz] = rotation(collider);
+				const [sx, sy, sz] = size(collider);
+				dummyObj.position.set(x, y, z);
+				dummyObj.rotation.set(rx, ry, rz);
+				dummyObj.scale.set(sx, sy, sz);
+				dummyObj.updateMatrix();
+				instancedMeshRef!.setMatrixAt(i, dummyObj.matrix);
+			});
+			instancedMeshRef.instanceMatrix.needsUpdate = true;
+		}
+	});
 </script>
 
 <!-- Exact authored collision meshes, matching the offline scene. -->
@@ -167,18 +188,18 @@
 		<T.BoxGeometry args={[1, 1, 1]} />
 		<T.MeshBasicMaterial color="#22c55e" wireframe transparent opacity={0.9} depthWrite={false} />
 	</T.Mesh>
-	{#if showColliderAabbs}{#each colliders as collider (collider.id)}
-			<T.Mesh position={center(collider)} rotation={rotation(collider)} scale={size(collider)} renderOrder={20}>
-				<T.BoxGeometry args={[1, 1, 1]} />
-				<T.MeshBasicMaterial
-					color="#facc15"
-					wireframe
-					transparent
-					opacity={0.72}
-					depthWrite={false}
-				/>
-			</T.Mesh>
-		{/each}{/if}
+	{#if showColliderAabbs}
+		<T.InstancedMesh bind:ref={instancedMeshRef} args={[undefined, undefined, colliders.length]} renderOrder={20}>
+			<T.BoxGeometry args={[1, 1, 1]} />
+			<T.MeshBasicMaterial
+				color="#facc15"
+				wireframe
+				transparent
+				opacity={0.72}
+				depthWrite={false}
+			/>
+		</T.InstancedMesh>
+	{/if}
 	{#each triggers as trigger (trigger.id)}
 		{@const active = activeTriggerIds.has(trigger.id)}
 		<T.Mesh position={center(trigger)} scale={size(trigger)} renderOrder={21}>

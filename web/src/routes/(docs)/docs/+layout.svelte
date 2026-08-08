@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { resolve } from '$app/paths';
 	import { IconMenu2 } from '@tabler/icons-svelte';
 	import { Button } from '$lib/components/ui/button';
 	import * as Sheet from '$lib/components/ui/sheet';
@@ -31,24 +32,24 @@
 					<div class="border-b border-border px-5 py-4">
 						<a
 							class="font-semibold text-primary"
-							href="/docs"
+							href={resolve('/docs')}
 							onclick={() => (mobileNavigationOpen = false)}>FIRST Global Simulator</a
 						>
 					</div>
 					<nav class="p-4" aria-label="Documentation navigation">
-						{#each docsNav as section}
+						{#each docsNav as section (section.title)}
 							<p
 								class="px-2 pt-4 pb-2 text-xs font-semibold tracking-wider text-muted-foreground uppercase"
 							>
 								{section.title}
 							</p>
-							{#each section.items as item}
+							{#each section.items as item (item.href)}
 								<a
 									class="block rounded-md px-2 py-2 text-sm transition-colors {page.url.pathname ===
 									item.href
 										? 'bg-primary/15 font-medium text-primary'
 										: 'text-muted-foreground hover:bg-muted hover:text-foreground'}"
-									href={item.href}
+									href={resolve(item.href)}
 									onclick={() => (mobileNavigationOpen = false)}>{item.title}</a
 								>
 							{/each}
@@ -57,19 +58,23 @@
 				</Sheet.Content>
 			</Sheet.Root>
 
-			<a class="text-sm font-semibold text-primary sm:text-base" href="/">FIRST Global Simulator</a>
+			<a class="text-sm font-semibold text-primary sm:text-base" href={resolve('/')}
+				>FIRST Global Simulator</a
+			>
 			<span class="hidden h-5 border-l border-border sm:block"></span>
 			<span class="hidden text-sm text-muted-foreground sm:block">Documentation</span>
 			<nav class="ml-auto flex items-center gap-1" aria-label="Site navigation">
 				<a
 					class="rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-					href="/">Home</a
+					href={resolve('/')}>Home</a
 				>
 				<a
 					class="rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-					href="/sponsor">Sponsor</a
+					href={resolve('/sponsor')}>Sponsor</a
 				>
-				<Button href="/dashboard" size="sm" class="hidden sm:inline-flex">Enter simulator</Button>
+				<Button href={resolve('/dashboard')} size="sm" class="hidden sm:inline-flex"
+					>Enter simulator</Button
+				>
 			</nav>
 		</div>
 	</header>
@@ -79,19 +84,19 @@
 			class="sticky top-14 hidden h-[calc(100vh-3.5rem)] overflow-y-auto border-r border-border px-4 py-6 lg:block"
 		>
 			<nav aria-label="Documentation navigation">
-				{#each docsNav as section}
+				{#each docsNav as section (section.title)}
 					<p
 						class="px-2 pt-4 pb-2 text-xs font-semibold tracking-wider text-muted-foreground uppercase"
 					>
 						{section.title}
 					</p>
-					{#each section.items as item}
+					{#each section.items as item (item.href)}
 						<a
 							class="block rounded-md px-2 py-2 text-sm transition-colors {page.url.pathname ===
 							item.href
 								? 'bg-primary/15 font-medium text-primary'
 								: 'text-muted-foreground hover:bg-muted hover:text-foreground'}"
-							href={item.href}>{item.title}</a
+							href={resolve(item.href)}>{item.title}</a
 						>
 					{/each}
 				{/each}
@@ -111,7 +116,7 @@
 				On this page
 			</p>
 			<nav class="mt-3 border-l border-border" aria-label="On this page">
-				{#each activeItem.headings as heading}
+				{#each activeItem.headings as heading (heading.id)}
 					<a
 						class="-ml-px block border-l px-3 py-1 text-sm text-muted-foreground transition-colors hover:border-primary hover:text-foreground"
 						href={`#${heading.id}`}>{heading.title}</a

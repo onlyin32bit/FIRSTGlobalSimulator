@@ -14,6 +14,7 @@
 		Raycaster
 	} from 'three';
 	import { onMount } from 'svelte';
+	import { SvelteMap } from 'svelte/reactivity';
 	import { get } from 'svelte/store';
 	import type { ZoneAABB } from '$lib/scoreStore';
 	import { handleLiftActive } from '../../routes/(test)/scene/stores';
@@ -58,10 +59,16 @@
 	};
 
 	let {
+		// Bindable props are written here and read by the parent via two-way binding;
+		// ESLint's no-useless-assignment cannot see those external reads.
+		// eslint-disable-next-line no-useless-assignment
 		anchors = $bindable({}),
+		// eslint-disable-next-line no-useless-assignment
 		zones = $bindable<ZoneAABB[]>([]),
 		humanPlayerAlliance = 'red',
+		// eslint-disable-next-line no-useless-assignment
 		humanPlayerPosition = $bindable<[number, number, number]>([-4.41658, 1.8, 2.99308]),
+		// eslint-disable-next-line no-useless-assignment
 		humanPlayerBounds = $bindable<HumanPlayerBounds>({
 			minX: -5.196519,
 			maxX: -3.636641,
@@ -118,9 +125,7 @@
 	let isBluePulling = false;
 
 	let pulseTimer = 0;
-	let auraScale = $state(1.0);
 	let auraOpacity = $state(0.5);
-	let targetedHandlePos = $state<[number, number, number] | null>(null);
 	let targetedHandleMesh = $state<Object3D | null>(null);
 	let crosshairTextPos = $state<[number, number, number] | null>(null);
 
@@ -448,11 +453,9 @@
 
 	useTask((delta) => {
 		pulseTimer += delta;
-		auraScale = 1.0 + Math.sin(pulseTimer * 6.0) * 0.08;
 		auraOpacity = 0.45 + Math.sin(pulseTimer * 6.0) * 0.2;
 
 		const cam = camera.current;
-		let newTargetedPos: [number, number, number] | null = null;
 		let newTargetedMesh: Object3D | null = null;
 
 		if (cam) {
@@ -492,21 +495,10 @@
 
 			if (hitRed && redHandleMesh) {
 				newTargetedMesh = redHandleMesh;
-				const pos = new Vector3();
-				redHandleMesh.getWorldPosition(pos);
-				pos.y += 0.05;
-				pos.z += 0.1;
-				newTargetedPos = [pos.x, pos.y, pos.z];
 			} else if (hitBlue && blueHandleMesh) {
 				newTargetedMesh = blueHandleMesh;
-				const pos = new Vector3();
-				blueHandleMesh.getWorldPosition(pos);
-				pos.y += 0.05;
-				pos.z += 0.1;
-				newTargetedPos = [pos.x, pos.y, pos.z];
 			}
 		}
-		targetedHandlePos = newTargetedPos;
 		targetedHandleMesh = newTargetedMesh;
 
 		const isLiftPressed = get(handleLiftActive);
@@ -582,7 +574,7 @@
 	function configureFieldVisual(scene: Object3D): Object3D {
 		if (configuredScenes.has(scene)) return scene;
 
-		const transparentMaterials = new Map<MeshStandardMaterial, MeshStandardMaterial>();
+		const transparentMaterials = new SvelteMap<MeshStandardMaterial, MeshStandardMaterial>();
 
 		scene.traverse((object) => {
 			if (object.name === 'RedHandle') {
@@ -673,8 +665,10 @@
 
 <T.Group>
 	<!-- Field Visual Model (field.glb) -->
-	{#await visualGltf then gltf}
-		<T is={configureFieldVisual(gltf.scene)} />
+	{#await $visualGltf then gltf}
+		{#if gltf}
+			<T is={configureFieldVisual(gltf.scene)} />
+		{/if}
 	{/await}
 
 	<!-- Browser collisions are only used by the isolated prototype scene. -->

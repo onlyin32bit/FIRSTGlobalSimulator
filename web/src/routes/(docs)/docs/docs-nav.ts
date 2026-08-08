@@ -1,6 +1,8 @@
+import type { Pathname } from '$app/types';
+
 export type DocsNavItem = {
 	title: string;
-	href: string;
+	href: Pathname;
 	description: string;
 	headings: Array<{ id: string; title: string }>;
 };

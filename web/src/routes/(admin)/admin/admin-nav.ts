@@ -1,3 +1,5 @@
+import type { Pathname } from '$app/types';
+import type { Icon } from '@tabler/icons-svelte';
 import {
 	IconActivityHeartbeat,
 	IconBox,
@@ -8,7 +10,13 @@ import {
 	IconUsers
 } from '@tabler/icons-svelte';
 
-export const adminNav = [
+export type AdminNavItem = {
+	title: string;
+	href: Pathname;
+	icon: Icon;
+};
+
+export const adminNav: AdminNavItem[] = [
 	{ title: 'Home', href: '/admin', icon: IconHome },
 	{ title: 'Users', href: '/admin/users', icon: IconUsers },
 	{ title: 'Invitations', href: '/admin/invitations', icon: IconKey },

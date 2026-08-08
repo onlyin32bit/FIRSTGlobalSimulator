@@ -1,7 +1,10 @@
 <script lang="ts">
+	import { LANGUAGES } from '$lib';
 	import { Button } from '$lib/components/ui/button';
+	import * as Select from '$lib/components/ui/select';
 	import RequestForm from './request-form.svelte';
 	import { resolve } from '$app/paths';
+	import { locales, getLocale } from '$lib/paraglide/runtime';
 
 	let isInviteDialogOpen = $state(false);
 </script>
@@ -24,19 +27,36 @@
 		class="absolute top-0 right-0 left-0 z-20 flex items-center justify-end gap-1 p-4 sm:gap-2 sm:p-6"
 		aria-label="Public navigation"
 	>
-		<a
-			class="rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
-			href={resolve('/docs')}>Documentation</a
-		>
-		<a
-			class="rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
-			href={resolve('/sponsor')}>Sponsor</a
-		>
+		<Button variant="ghost" href={resolve('/docs')}>Documentation</Button>
+		<Button variant="ghost" href={resolve('/sponsor')}>Sponsor</Button>
+		<Select.Root type="single" onValueChange={() => {}}>
+			<Select.Trigger>
+				{@const locale = getLocale()}
+				<img src={`/flags/${locale}.svg`} alt={LANGUAGES[locale]} class="mr-0.5 h-3 rounded-xs" />
+
+				{LANGUAGES[locale]}
+			</Select.Trigger>
+			<Select.Content>
+				<Select.Group>
+					<Select.Label>Languages</Select.Label>
+					{#each locales as locale (locale)}
+						<Select.Item value={locale}>
+							<img
+								src={`/flags/${locale}.svg`}
+								alt={LANGUAGES[locale]}
+								class="mr-0.5 h-3 rounded-xs"
+							/>
+							{LANGUAGES[locale]}
+						</Select.Item>
+					{/each}
+				</Select.Group>
+			</Select.Content>
+		</Select.Root>
 	</nav>
 
-	<div class="z-10 flex max-w-2xl flex-col items-center gap-6 px-4">
+	<div class="z-10 flex max-w-3xl flex-col items-center gap-6 px-4">
 		<h1 class="font-daybreaker text-6xl font-black tracking-wide text-primary">
-			FIRST Global Simulator by Team Vietnam
+			FGSimulator by Team Vietnam
 		</h1>
 		<p class="text-xl leading-relaxed font-medium text-muted-foreground">
 			Join Team Vietnam and the global robotics community to design, build, and simulate your 2026

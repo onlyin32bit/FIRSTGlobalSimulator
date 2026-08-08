@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import type { Pathname } from '$app/types';
 	import { onMount } from 'svelte';
 	import {
 		IconChevronDown,
@@ -35,7 +37,7 @@
 				errorMessage = 'Your account does not have administrator access.';
 		} catch (error) {
 			if (error instanceof ApiError && error.status === 401) {
-				await goto(`/auth?next=${encodeURIComponent(page.url.pathname)}`);
+				await goto(resolve('/auth?next=' + encodeURIComponent(page.url.pathname) as Pathname));
 				return;
 			}
 			errorMessage =
@@ -49,7 +51,7 @@
 		isSigningOut = true;
 		try {
 			await signOut();
-			await goto('/');
+			await goto(resolve('/'));
 		} finally {
 			isSigningOut = false;
 		}
@@ -77,13 +79,13 @@
 			</div>
 		</div>
 		<nav class="mt-3 flex-1 px-3" aria-label="Admin navigation">
-			{#each visibleNav as item}
+			{#each visibleNav as item (item.href)}
 				<a
 					class="mb-0.5 flex h-9 items-center gap-3 rounded-md px-2.5 text-sm transition-colors {page
 						.url.pathname === item.href
 						? 'bg-muted font-medium text-foreground'
 						: 'text-foreground/80 hover:bg-muted'}"
-					href={item.href}
+					href={resolve(item.href)}
 					onclick={() => (mobileNavOpen = false)}
 				>
 					<item.icon class="size-4 shrink-0" />
@@ -94,7 +96,7 @@
 		<div class="border-t border-border p-3">
 			<a
 				class="flex items-center gap-3 rounded-md px-2.5 py-2 text-sm text-foreground/80 hover:bg-muted"
-				href="/dashboard"><IconX class="size-4" /> Simulator</a
+				href={resolve('/dashboard')}><IconX class="size-4" /> Simulator</a
 			>
 			<div class="mt-2 flex items-center gap-2 px-2.5 py-2">
 				<span
@@ -128,7 +130,7 @@
 		<div class="mx-auto flex min-h-screen max-w-xl flex-col items-start justify-center gap-5 p-6">
 			<h1 class="text-3xl font-semibold">Access denied</h1>
 			<p class="text-muted-foreground">{errorMessage}</p>
-			<Button href="/dashboard">Return to simulator</Button>
+			<Button href={resolve('/dashboard')}>Return to simulator</Button>
 		</div>
 	{:else if currentUser?.role === 'admin'}
 		<div class="min-h-screen lg:grid lg:grid-cols-[16rem_minmax(0,1fr)]">
