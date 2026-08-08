@@ -8,6 +8,7 @@
 	import { ApiError, api } from '$lib/api';
 	import RobotFollowCamera from './RobotFollowCamera.svelte';
 	import RobotModel from './RobotModel.svelte';
+	import RobotCollisionDebug from './RobotCollisionDebug.svelte';
 	import PackField from './PackField.svelte';
 	import FieldBoundsDebug from './FieldBoundsDebug.svelte';
 	import ScriptedObjects from './ScriptedObjects.svelte';
@@ -146,6 +147,7 @@
 	};
 	let fieldDefinition = $state<FieldDefinition | null>(null);
 	let fieldDebugOpen = $state(false);
+	let robotCollisionDebugOpen = $state(false);
 	let semanticEvents = $state<string[]>([]);
 	let activeTriggerIds = $derived(
 		new Set(
@@ -430,8 +432,9 @@
 		return {
 			drive: keyboardActive ? keyboardDrive : gamepadDrive,
 			turn: keyboardActive ? keyboardTurn : gamepadTurn,
-			intake: pressed.has(' ') ? 1 : gamepadIntake,
-			outtake: pressed.has('e') ? 1 : gamepadOuttake,
+			// Mechanisms are not part of match simulation yet.
+			intake: 0,
+			outtake: 0,
 			source: (keyboardActive ? 'keyboard' : gamepad ? 'gamepad' : 'keyboard') as
 				'keyboard' | 'gamepad'
 		};
@@ -670,40 +673,6 @@
 			if (input.source !== controlSource) controlSource = input.source;
 			sendInputFrom(input);
 
-			let localPose: RobotPose | null = null;
-			if (matchRunning && localId) {
-				const pred = predictor;
-				const serverLocal = players.find((player) => player.id === localId);
-				if (pred && serverLocal) {
-					pred.step({ turn: input.turn, drive: input.drive }, dt);
-					localPose = pred.pose;
-					// Balls still render at their server positions, which lag
-					// the predicted robot by roughly one round-trip. Where the
-					// predicted footprint would sink into a ball, blend the
-					// rendered pose back toward the last server pose so the
-					// robot visibly nudges balls instead of clipping through
-					// them. The factor ramps continuously with proximity.
-					const robotRadius = Math.hypot(physics.robotWidthM, physics.robotLengthM) * 0.5;
-					const reach = robotRadius + objectFrame.radius;
-					const renderedPositions = renderedObjectFrame.positions;
-					let nearestBall = Infinity;
-					for (let index = 0; index < renderedPositions.length; index += 3) {
-						const dx = renderedPositions[index] - localPose.x;
-						const dz = renderedPositions[index + 2] - localPose.z;
-						const distance = Math.hypot(dx, dz);
-						if (distance < nearestBall) nearestBall = distance;
-					}
-					if (nearestBall < reach) {
-						const blendToServer = ((reach - nearestBall) / reach) * 0.55;
-						localPose = {
-							...localPose,
-							x: localPose.x + (serverLocal.x - localPose.x) * blendToServer,
-							z: localPose.z + (serverLocal.z - localPose.z) * blendToServer
-						};
-					}
-				}
-			}
-
 			const currentById = new Map(renderedPlayers.map((player) => [player.id, player]));
 			const blend = 1 - Math.exp(-24 * dt);
 
@@ -712,24 +681,6 @@
 			} else {
 				let changed = players.length !== renderedPlayers.length;
 				const nextPlayers = players.map((target) => {
-					// The local robot renders its predicted pose directly with
-					// no smoothing; prediction already eliminates perceived lag.
-					if (localPose && target.id === localId) {
-						changed = true;
-						return {
-							...target,
-							x: localPose.x,
-							y: localPose.y,
-							z: localPose.z,
-							yaw: localPose.yaw,
-							headingDeg: (localPose.yaw * 180) / Math.PI,
-							velocityX: localPose.vx,
-							velocityY: target.velocityY ?? 0,
-							velocityZ: localPose.vz,
-							angularVelocityY: localPose.angularVelocityY
-						};
-					}
-
 					const current = currentById.get(target.id);
 					if (!current) {
 						changed = true;
@@ -1100,10 +1051,7 @@
 				: `${Math.round(pingMs)} ms`}
 		</p>
 		<p class="mt-1 text-xs text-white/60">Pack: {packVersion}</p>
-		<p class="mt-2 text-xs text-white/60">
-			W/S drive · A/D turn · Space intake · E flywheel outtake · Gamepad: LS-Y + RS-X, left side
-			intakes · right side outtakes
-		</p>
+		<p class="mt-2 text-xs text-white/60">W/S drive · A/D turn · Gamepad: LS-Y + RS-X</p>
 		<p class="mt-1 max-w-72 truncate text-xs text-white/50" title={gamepadName}>
 			<span class={gamepadConnected ? 'text-cyan-300' : 'text-white/35'}>●</span>
 			{gamepadConnected ? gamepadName : 'Connect a gamepad and press a button'}
@@ -1122,6 +1070,15 @@
 		>
 			{cameraMode === 'robot' ? 'Overview camera' : 'Follow robot'}
 		</Button>
+		<Button
+			variant="outline"
+			class={robotCollisionDebugOpen
+				? 'border-red-300/60 bg-red-300/15 text-red-100 hover:bg-red-300/25'
+				: 'border-red-300/30 bg-black/40 text-red-100 hover:bg-red-300/10'}
+			onclick={() => (robotCollisionDebugOpen = !robotCollisionDebugOpen)}
+		>
+			{robotCollisionDebugOpen ? 'Hide robot collisions' : 'Robot collisions'}
+		</Button>
 		{#if cameraMode === 'robot'}
 			<Button
 				variant="outline"
@@ -1138,7 +1095,7 @@
 				<input
 					id="robot-camera-distance"
 					type="range"
-					min="2.5"
+					min="1"
 					max="18"
 					step="0.5"
 					bind:value={robotCameraDistance}
@@ -1528,6 +1485,15 @@
 				{activeTriggerIds}
 			/>
 		{/if}
+		<RobotCollisionDebug
+			players={players}
+			frame={objectFrame}
+			width={physics.robotWidthM}
+			height={physics.robotHeightM}
+			length={physics.robotLengthM}
+			physicsUrl={robotAssets?.physics}
+			visible={robotCollisionDebugOpen}
+		/>
 		<ScriptedObjects frame={renderedObjectFrame} />
 		<T.Group>
 			{#each renderedPlayers as player (player.id)}
@@ -1537,8 +1503,6 @@
 						{physics}
 						{robotAssets}
 						local={player.id === localId}
-						isIntaking={player.id === localId ? inputIntake > 0 : false}
-						isOuttaking={player.id === localId ? inputOuttake > 0 : false}
 					/>
 				{/if}
 			{/each}

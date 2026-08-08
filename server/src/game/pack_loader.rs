@@ -29,6 +29,7 @@ pub struct GamePackMetadata {
     pub scripts: Vec<RuleScriptMetadata>,
     pub arena: ArenaConfig,
     pub field_definition: FieldDefinition,
+    pub robot_colliders: Vec<FieldCollider>,
     /// Raw Rhai source belongs to the API pack snapshot, not the filesystem.
     /// It stays process-local and is never sent to connected clients.
     #[serde(skip)]
@@ -44,6 +45,7 @@ pub struct GamePackRuntimeSnapshot {
     pub manifest: GamePackManifest,
     pub field_physics: serde_json::Value,
     pub field_semantics: serde_json::Value,
+    pub robot_physics: serde_json::Value,
     pub scripts: BTreeMap<String, String>,
 }
 
@@ -347,11 +349,20 @@ impl PackLoader {
         })?;
         let field_definition =
             load_field_definition(&snapshot.field_physics, &snapshot.field_semantics)?;
+        let robot_colliders = load_robot_colliders(&snapshot.robot_physics, &arena.robot);
+        if robot_colliders.is_empty() {
+            return Err(GameError::ManifestParseError(
+                "The pack robot physics asset contains no collision volumes".into(),
+            ));
+        } else {
+            info!(colliders = robot_colliders.len(), "Loaded authored robot collision volumes");
+        }
         Ok(GamePackMetadata {
             manifest: snapshot.manifest,
             scripts,
             arena,
             field_definition,
+            robot_colliders,
             script_sources: snapshot.scripts,
         })
     }
@@ -406,10 +417,19 @@ impl PackLoader {
                     .map_err(|error| GameError::ManifestParseError(error.to_string()))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let robot_physics = std::fs::read_to_string(
+            root.parent()
+                .and_then(std::path::Path::parent)
+                .unwrap_or(root)
+                .join("robots/StarterBot/bot.physics.json"),
+        )
+        .ok()
+        .and_then(|source| serde_json::from_str(&source).ok());
         self.load_runtime_snapshot(GamePackRuntimeSnapshot {
             manifest,
             field_physics,
             field_semantics,
+            robot_physics: robot_physics.unwrap_or_else(|| serde_json::json!({})),
             scripts,
         })
     }
@@ -496,6 +516,36 @@ fn load_field_definition(
         "Loaded field physics and semantics"
     );
     Ok(definition)
+}
+
+fn load_robot_colliders(
+    physics: &serde_json::Value,
+    robot: &RobotPhysicsConfig,
+) -> Vec<FieldCollider> {
+    let authored = assimp_colliders(physics);
+    let floor_y = authored
+        .iter()
+        .map(|(_, min, _, _, _, _)| min[1])
+        .fold(f32::INFINITY, f32::min);
+    if !floor_y.is_finite() {
+        return Vec::new();
+    }
+    authored
+        .into_iter()
+        .map(|(id, _min, _max, mut center, half_extents, axes)| {
+            center[1] -= floor_y + robot.height_m * 0.5;
+            let mut min = center;
+            let mut max = center;
+            for world_axis in 0..3 {
+                let extent = (0..3)
+                    .map(|local_axis| axes[local_axis][world_axis].abs() * half_extents[local_axis])
+                    .sum::<f32>();
+                min[world_axis] -= extent;
+                max[world_axis] += extent;
+            }
+            FieldCollider { id, min, max, center, half_extents, axes }
+        })
+        .collect()
 }
 
 fn assimp_children(scene: &serde_json::Value) -> Vec<&serde_json::Value> {
@@ -700,6 +750,16 @@ mod tests {
                 manifest,
                 field_physics,
                 field_semantics,
+                robot_physics: serde_json::from_str(
+                    &std::fs::read_to_string(
+                        root.parent()
+                            .and_then(std::path::Path::parent)
+                            .unwrap()
+                            .join("robots/StarterBot/bot.physics.json"),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
                 scripts,
             })
             .unwrap();
@@ -719,6 +779,7 @@ mod tests {
         assert_eq!(metadata.arena.robot.length_m, 0.50);
         assert!(metadata.arena.ramp.enabled);
         assert!(metadata.field_definition.colliders.len() >= 70);
+        assert!(!metadata.robot_colliders.is_empty());
         let front_wall = metadata
             .field_definition
             .colliders

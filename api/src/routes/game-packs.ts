@@ -189,10 +189,11 @@ app.get('/:id/runtime', async (c) => {
   if (!server || server.disabledAt) return jsonError(c, 401, 'AUTH_FAILED', 'A valid game server key is required for runtime pack data.')
   try {
     const { manifest, fieldPhysics, fieldSemantics } = await loadPack(c)
+    const robotPhysics = await readPackJson<unknown>(c, 'robots/StarterBot/bot.physics.json')
     const scripts = Object.fromEntries(await Promise.all(
       Object.entries(manifest.scripts).map(async ([name, path]) => [path, await readPackText(c, path)] as const)
     ))
-    return jsonSuccess(c, { manifest, fieldPhysics, fieldSemantics, scripts })
+    return jsonSuccess(c, { manifest, fieldPhysics, fieldSemantics, robotPhysics, scripts })
   } catch (error) {
     return jsonError(c, 503, 'INTERNAL_ERROR', error instanceof Error ? error.message : 'Game pack runtime snapshot is unavailable.')
   }

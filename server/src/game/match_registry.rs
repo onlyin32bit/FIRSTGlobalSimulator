@@ -137,6 +137,7 @@ impl RuntimeBackend {
             let mut runtime = SphereRuntime::new(match_id, pack.manifest.id.clone(), 0);
             runtime.context.game_pack_version = pack.manifest.version.clone();
             runtime.create_field_arena(&pack.arena, &pack.field_definition);
+            runtime.set_robot_colliders(&pack.robot_colliders);
             Self::Sphere(Box::new(runtime))
         } else {
             let mut runtime = MatchRuntime::new(match_id, pack.manifest.id.clone(), 0);
