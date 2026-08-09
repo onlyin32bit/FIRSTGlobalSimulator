@@ -999,7 +999,7 @@
 <div class="relative h-[calc(100vh-3.5rem)] overflow-hidden bg-slate-950">
 	<ScoreboardGraphic
 		matchId={activeMatchId}
-		{matchClock}
+		matchClock={Math.min(matchClock, matchDurationSeconds)}
 		{redScore}
 		{blueScore}
 		{globalScore}

@@ -63,9 +63,6 @@
 				class="size-8 animate-spin rounded-full border-2 border-primary border-t-transparent"
 			></div>
 		</div>
-		<p class="font-mono text-xs tracking-widest text-primary/80 uppercase">
-			INITIALIZING HUD SYSTEM...
-		</p>
 	</div>
 {:else if $session.data}
 	<div
@@ -85,10 +82,6 @@
 						<IconCpu class="size-5 text-primary" />
 					</span>
 					<span>FGSimulator</span>
-					<span
-						class="hidden rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] tracking-normal text-emerald-400 sm:inline-block"
-						>LIVE HUD</span
-					>
 				</a>
 
 				<nav class="hidden items-center gap-1 font-mono text-xs md:flex">
@@ -139,7 +132,7 @@
 						href={resolve('/admin')}
 						class="border-amber-500/40 text-amber-400 hover:bg-amber-500/10"
 					>
-						<IconShieldCheck class="size-4" /> Admin
+						Admin
 					</Button>
 				{/if}
 
