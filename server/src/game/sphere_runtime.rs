@@ -681,12 +681,18 @@ impl SphereRuntime {
             // normal for one drive step gives stable wall sliding without
             // constraining a robot that has already driven away.
             player.wall_contact_normal = None;
-            // The robot is a carpet-supported planar body. Ball contacts may
-            // transfer X/Z momentum and yaw, but must never integrate lift.
-            player.velocity[1] = 0.0;
+            if player.position[1] > robot_center_y {
+                player.velocity[1] -= 9.81 * dt;
+            } else {
+                player.velocity[1] = player.velocity[1].max(0.0);
+            }
             player.position[0] += player.velocity[0] * dt;
+            player.position[1] += player.velocity[1] * dt;
             player.position[2] += player.velocity[2] * dt;
-            player.position[1] = robot_center_y;
+            if player.position[1] < robot_center_y {
+                player.position[1] = robot_center_y;
+                player.velocity[1] = 0.0;
+            }
             player.yaw = wrap_angle(player.yaw + player.angular_velocity_y * dt);
             let (robot_x_extent, robot_z_extent) = robot_planar_extents(&arena.robot, player.yaw);
             let min_x = field_boundary.min[0] + robot_x_extent;
@@ -912,7 +918,7 @@ impl SphereRuntime {
                         max_correction,
                         &self.field_boundary,
                     );
-                    player.position[1] = robot_center_y;
+                    player.position[1] = player.position[1].max(robot_center_y);
                     ball.sleeping = false;
                     ball.quiet_ticks = 0;
                 }
@@ -1405,8 +1411,10 @@ impl SphereRuntime {
                         cross(robot_arm, tangent_impulse)[1] / robot_inertia;
                 }
             }
-            player.position[1] = robot_center_y;
-            player.velocity[1] = 0.0;
+            if player.position[1] < robot_center_y {
+                player.position[1] = robot_center_y;
+                player.velocity[1] = 0.0;
+            }
         }
     }
 
@@ -1459,6 +1467,8 @@ impl SphereRuntime {
                 color: player.color.into(),
                 stored_balls: player.stored.len(),
                 capacity: player.mech.capacity_with(base_capacity),
+                brace_zone: None,
+                brace_multiplier: 1.0,
             })
             .collect()
     }
@@ -1816,8 +1826,10 @@ fn project_robot_field_colliders(
 ) -> (usize, Option<Vec3>) {
     let half_x = robot.width_m * 0.5;
     let half_z = robot.length_m * 0.5;
+    let top_y_offset = (robot.height_m * 0.5)
+        .max(robot.outtake_height_m + 0.06 - robot.height_m * 0.5);
     let robot_min_y = player.position[1] - robot.height_m * 0.5;
-    let robot_max_y = player.position[1] + robot.height_m * 0.5;
+    let robot_max_y = player.position[1] + top_y_offset;
     let mut contacts = 0;
     let mut contact_normal = None;
 
@@ -1826,12 +1838,29 @@ fn project_robot_field_colliders(
             continue;
         }
         if collider.half_extents.iter().any(|extent| *extent > 1.0e-6) {
-            if let Some((normal, penetration)) = robot_field_obb_contact(
+            let mut contact = robot_field_obb_contact(
                 player.position,
                 player.yaw,
                 [half_x, robot.height_m * 0.5, half_z],
                 collider,
-            ) {
+            );
+            if contact.is_none() && robot.outtake_height_m > 0.0 {
+                let sin = player.yaw.sin();
+                let cos = player.yaw.cos();
+                let top_center = [
+                    player.position[0] + sin * robot.outtake_forward_offset_m,
+                    player.position[1] + (robot.outtake_height_m - robot.height_m * 0.5),
+                    player.position[2] + cos * robot.outtake_forward_offset_m,
+                ];
+                let top_half_x = (robot.flywheel_width_m * 0.5).max(0.06);
+                contact = robot_field_obb_contact(
+                    top_center,
+                    player.yaw,
+                    [top_half_x, 0.06, 0.06],
+                    collider,
+                );
+            }
+            if let Some((normal, penetration)) = contact {
                 player.position = add(player.position, mul(normal, penetration));
                 let into_surface = dot(player.velocity, normal);
                 if into_surface < 0.0 {
@@ -2218,14 +2247,14 @@ mod tests {
         let positions = runtime.field_object_positions();
         assert_eq!(positions.len(), arena.object_count);
         assert!(
-            positions
+            runtime.balls
                 .iter()
-                .all(|p| p[1] >= arena.ball.radius_m() - 0.001)
+                .all(|b| b.position[1] >= arena.ball.radius_m() - 0.001)
         );
         assert!(
-            positions
+            runtime.balls
                 .iter()
-                .all(|p| p[0].abs() <= 8.0 && p[2].abs() <= 8.0)
+                .all(|b| b.position[0].abs() <= 8.0 && b.position[2].abs() <= 8.0)
         );
     }
 
@@ -2399,6 +2428,68 @@ mod tests {
         let (normal, penetration) = contact.unwrap();
         assert!(normal[0] > 0.9);
         assert!(penetration > 0.0);
+    }
+
+    #[test]
+    fn top_cylinder_collides_with_elevated_field_colliders() {
+        let arena = arena();
+        let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
+            .load_pack("../pkgs/games/fgc-2026/manifest.json")
+            .unwrap();
+        let mut player = PlayerBody {
+            name: "p".into(),
+            team_name: "t".into(),
+            position: [1.95, pack.field_definition.floor_height_m + arena.robot.height_m * 0.5, 2.13],
+            velocity: [0.0, 0.0, 1.0],
+            yaw: 0.0,
+            angular_velocity_y: 0.0,
+            move_x: 0.0,
+            move_z: 1.0,
+            intake_power: 0.0,
+            outtake_power: 0.0,
+            sequence: 1,
+            color: "#ff0000",
+            wall_contact_normal: None,
+            stored: Default::default(),
+            outtake_accumulator: 0.0,
+            intake_accumulator: 0.0,
+            mech: Default::default(),
+        };
+        let (contacts, _normal) = project_robot_field_colliders(
+            &mut player,
+            &arena.robot,
+            &pack.field_definition.colliders,
+        );
+        assert!(contacts > 0, "the top cylinder on the robot must collide with elevated field braces");
+    }
+
+    #[test]
+    fn climbing_elevates_robot_position_without_ground_warp() {
+        let arena = arena();
+        let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
+            .load_pack("../pkgs/games/fgc-2026/manifest.json")
+            .unwrap();
+        let mut runtime = SphereRuntime::new("test".into(), "fgc-2026".into(), 0);
+        runtime.create_test_arena(&arena);
+        runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+
+        let initial_y = pack.field_definition.floor_height_m + arena.robot.height_m * 0.5;
+        let p = runtime.players.get_mut("p").unwrap();
+        p.position = [1.95, initial_y + 0.65, 2.13];
+        let (contacts, normal) = project_robot_field_colliders(p, &arena.robot, &pack.field_definition.colliders);
+        assert!(contacts > 0);
+        let elevated_y = p.position[1];
+        eprintln!("contact normal: {:?}, elevated_y: {}, initial_y: {}", normal, elevated_y, initial_y);
+        assert!(elevated_y > initial_y, "climbing contact must push robot Y position up");
+
+        runtime.apply_player_drive(&arena, 1.0 / 60.0);
+        let player_snap = &runtime.player_snapshots()[0];
+        assert!(player_snap.y > initial_y, "elevated Y position must persist across drive ticks");
+    }
+
+    #[test]
+    fn rotated_robot_planar_extents_test() {
+        let arena = arena();
         let (x_extent, z_extent) = robot_planar_extents(&arena.robot, std::f32::consts::FRAC_PI_4);
         assert!((x_extent - 0.3535534).abs() < 1.0e-4);
         assert!((z_extent - 0.3535534).abs() < 1.0e-4);

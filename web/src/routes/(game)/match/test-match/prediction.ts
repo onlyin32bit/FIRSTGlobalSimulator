@@ -134,20 +134,42 @@ const robotFieldObbContact = (
 const projectFieldColliders = (p: RobotPose, params: DriveParams) => {
 	const halfX = params.widthM * 0.5;
 	const halfZ = params.lengthM * 0.5;
-	const halfY = params.heightM * 0.5;
-	const robotMinY = p.y - halfY;
-	const robotMaxY = p.y + halfY;
+	const outtakeHeight = params.outtakeHeightM ?? 0.55;
+	const outtakeOffset = params.outtakeForwardOffsetM ?? 0.0;
+	const flywheelWidth = params.flywheelWidthM ?? 0.35;
+	const topYOffset = Math.max(
+		params.heightM * 0.5,
+		outtakeHeight + 0.06 - params.heightM * 0.5
+	);
+	const robotMinY = p.y - params.heightM * 0.5;
+	const robotMaxY = p.y + topYOffset;
 
 	for (const collider of params.colliders) {
 		if (robotMaxY <= collider.min[1] || robotMinY >= collider.max[1]) continue;
 
 		if (collider.halfExtents.some((extent) => extent > 1.0e-6)) {
-			const contact = robotFieldObbContact(
+			let contact = robotFieldObbContact(
 				[p.x, p.y, p.z],
 				p.yaw,
-				[halfX, halfY, halfZ],
+				[halfX, params.heightM * 0.5, halfZ],
 				collider
 			);
+			if (!contact && outtakeHeight > 0) {
+				const sin = Math.sin(p.yaw);
+				const cos = Math.cos(p.yaw);
+				const topCenter: [number, number, number] = [
+					p.x + sin * outtakeOffset,
+					p.y + (outtakeHeight - params.heightM * 0.5),
+					p.z + cos * outtakeOffset
+				];
+				const topHalfX = Math.max(flywheelWidth * 0.5, 0.06);
+				contact = robotFieldObbContact(
+					topCenter,
+					p.yaw,
+					[topHalfX, 0.06, 0.06],
+					collider
+				);
+			}
 			if (!contact) continue;
 			p.x += contact.normal[0] * contact.penetration;
 			p.y += contact.normal[1] * contact.penetration;

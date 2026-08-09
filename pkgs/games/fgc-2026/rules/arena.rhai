@@ -88,7 +88,7 @@ fn arena_config() {
         robot: #{
             mass_kg: 18.0,
             width_m: 0.50,
-            height_m: 0.50,
+            height_m: 0.30,
             length_m: 0.50,
             track_width_m: 0.42,
             traction_friction: 1.05,

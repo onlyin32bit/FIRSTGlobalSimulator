@@ -429,9 +429,10 @@ fn load_field_definition(
             // The guard rail and riser provide the boundary/floor. Their
             // visual bounds must not become solid cuboids. Likewise, broad
             // cross-field assemblies are render geometry, not local blocks.
+            let id_lower = id.to_lowercase();
             !matches!(id.as_str(), "GUARD_RAIL.001" | "RISER.001")
-                && max[0] - min[0] <= 2.5
-                && max[2] - min[2] <= 2.5
+                && (id_lower.starts_with("cylinder")
+                    || (max[0] - min[0] <= 2.5 && max[2] - min[2] <= 2.5))
         })
         .map(|(id, _min, _max, center, mut half_extents, axes)| {
             // Rapier can contact a zero-thickness triangle mesh, but the
@@ -701,7 +702,7 @@ mod tests {
         assert!(metadata.arena.robot.intake_enabled);
         assert_eq!(metadata.arena.robot.mass_kg, 18.0);
         assert_eq!(metadata.arena.robot.width_m, 0.50);
-        assert_eq!(metadata.arena.robot.height_m, 0.50);
+        assert_eq!(metadata.arena.robot.height_m, 0.30);
         assert_eq!(metadata.arena.robot.length_m, 0.50);
         assert!(metadata.arena.ramp.enabled);
         assert!(metadata.field_definition.colliders.len() >= 70);
@@ -717,6 +718,20 @@ mod tests {
                 .half_extents
                 .iter()
                 .any(|extent| *extent >= 0.025)
+        );
+        assert!(
+            metadata
+                .field_definition
+                .colliders
+                .iter()
+                .any(|collider| collider.id == "Cylinder.002")
+        );
+        assert!(
+            metadata
+                .field_definition
+                .colliders
+                .iter()
+                .any(|collider| collider.id == "Cylinder.003")
         );
         assert!(metadata.field_definition.anchors.contains_key("redSpawn1"));
         assert!(metadata.field_definition.anchors.contains_key("blueSpawn3"));

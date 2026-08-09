@@ -443,18 +443,29 @@
 		oncontact={handleContact}
 	>
 		<!-- Rounded, low-friction edges act more like wheels and do not catch on field seams. -->
-		<T.Group position={[0, 0.15, 0]}>
+		<T.Group position={[0, 0.10, 0]}>
 			<Collider
 				shape="roundCuboid"
-				args={[0.275, 0.14, 0.325, 0.05]}
+				args={[0.275, 0.09, 0.325, 0.05]}
 				friction={0.25}
 				restitution={0.02}
 				mass={18.0}
 			/>
 		</T.Group>
 
-		<T.Mesh castShadow receiveShadow position={[0, 0.15, 0]}>
-			<T.BoxGeometry args={[0.5, 0.3, 0.6]} />
+		<!-- Top Outtake/Climber Cylinder Collider -->
+		<T.Group position={[0, 0.30, 0]}>
+			<Collider
+				shape="cylinder"
+				args={[0.06, 0.175]}
+				rotation={[0, 0, Math.PI / 2]}
+				friction={0.25}
+				restitution={0.05}
+			/>
+		</T.Group>
+
+		<T.Mesh castShadow receiveShadow position={[0, 0.10, 0]}>
+			<T.BoxGeometry args={[0.5, 0.2, 0.6]} />
 			<T.MeshStandardMaterial
 				color={color || (alliance === 'red' ? '#dc2626' : '#2563eb')}
 				roughness={0.4}

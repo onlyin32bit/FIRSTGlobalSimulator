@@ -2,7 +2,7 @@ use rapier3d::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
 
-use super::pack_loader::ArenaConfig;
+use super::pack_loader::{ArenaConfig, FieldTrigger, RobotPhysicsConfig};
 use super::match_registry::ObjectPositionsSync;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +30,99 @@ pub struct ScoreState {
     pub blue_score: i32,
     pub red_score: i32,
     pub global_score: i32,
+    pub blue_su_score: i32,
+    pub red_su_score: i32,
     pub breakdown: HashMap<String, i32>,
+}
+
+/// Returns the brace zone occupied by a robot at the supplied position.
+///
+/// The field pack's `redZone1`/`blueZone1` (and so on) semantic volumes are
+/// authoritative.  Keeping this lookup here means both physics backends use
+/// exactly the same end-game rule instead of duplicating field coordinates.
+pub fn brace_zone_for_position(
+    team: &str,
+    position: [f32; 3],
+    triggers: &[FieldTrigger],
+) -> Option<u8> {
+    let alliance = team.to_ascii_lowercase();
+    let prefix = if alliance.starts_with("blue") {
+        "blueZone"
+    } else if alliance.starts_with("red") {
+        "redZone"
+    } else {
+        return None;
+    };
+
+    (1_u8..=3).find(|zone| {
+        let id = format!("{prefix}{zone}");
+        triggers.iter().any(|trigger| {
+            trigger.id == id
+                && position
+                    .iter()
+                    .enumerate()
+                    .all(|(axis, value)| *value >= trigger.min[axis] && *value <= trigger.max[axis])
+        })
+    })
+}
+
+pub fn brace_zone_multiplier(zone: Option<u8>) -> f32 {
+    match zone {
+        Some(1) => 1.1,
+        Some(2) => 1.2,
+        Some(3) => 1.3,
+        _ => 1.0,
+    }
+}
+
+/// Tests the robot's elevated top mechanism against the authored brace-zone
+/// volumes.  This mirrors the physics backends' top collider: a thin,
+/// yaw-oriented box centered at the configured outtake height.  Zone entry is
+/// therefore based on contact/overlap with the top mechanism, not the chassis
+/// center.
+pub fn brace_zone_for_top_cylinder(
+    team: &str,
+    position: [f32; 3],
+    yaw: f32,
+    robot: &RobotPhysicsConfig,
+    triggers: &[FieldTrigger],
+) -> Option<u8> {
+    let alliance = team.to_ascii_lowercase();
+    let prefix = if alliance.starts_with("blue") {
+        "blueZone"
+    } else if alliance.starts_with("red") {
+        "redZone"
+    } else {
+        return None;
+    };
+
+    let top_center = [
+        position[0] + yaw.sin() * robot.outtake_forward_offset_m,
+        position[1] + robot.outtake_height_m - robot.height_m * 0.5,
+        position[2] + yaw.cos() * robot.outtake_forward_offset_m,
+    ];
+    let half_width = (robot.flywheel_width_m * 0.5).max(0.06);
+    let half_depth = 0.06;
+    let world_half_x = yaw.cos().abs() * half_width + yaw.sin().abs() * half_depth;
+    let world_half_z = yaw.sin().abs() * half_width + yaw.cos().abs() * half_depth;
+    let top_min = [
+        top_center[0] - world_half_x,
+        top_center[1] - half_depth,
+        top_center[2] - world_half_z,
+    ];
+    let top_max = [
+        top_center[0] + world_half_x,
+        top_center[1] + half_depth,
+        top_center[2] + world_half_z,
+    ];
+
+    (1_u8..=3).find(|zone| {
+        let id = format!("{prefix}{zone}");
+        triggers.iter().any(|trigger| {
+            trigger.id == id
+                && (0..3).all(|axis| top_min[axis] <= trigger.max[axis] && top_max[axis] >= trigger.min[axis])
+        })
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +149,10 @@ pub struct PlayerSnapshot {
     #[serde(rename = "storedBalls")]
     pub stored_balls: usize,
     pub capacity: usize,
+    #[serde(rename = "braceZone")]
+    pub brace_zone: Option<u8>,
+    #[serde(rename = "braceMultiplier")]
+    pub brace_multiplier: f32,
 }
 
 struct PlayerBody {
@@ -289,6 +385,26 @@ impl MatchRuntime {
             body_handle,
             &mut self.rigid_body_set,
         );
+        if arena.robot.outtake_height_m > 0.0 {
+            let y_offset = arena.robot.outtake_height_m - arena.robot.height_m * 0.5;
+            let z_offset = -arena.robot.outtake_forward_offset_m;
+            let top_half_x = (arena.robot.flywheel_width_m * 0.5).max(0.06);
+            self.collider_set.insert_with_parent(
+                ColliderBuilder::cuboid(top_half_x, 0.06, 0.06)
+                    .translation(vector![0.0, y_offset, z_offset].into())
+                    .mass(0.0)
+                    .friction(arena.robot.surface_friction.max(0.0))
+                    .restitution(arena.robot.restitution.clamp(0.0, 1.0))
+                    .collision_groups(InteractionGroups::new(
+                        Group::GROUP_3,
+                        Group::GROUP_2 | Group::GROUP_4,
+                        InteractionTestMode::And,
+                    ))
+                    .build(),
+                body_handle,
+                &mut self.rigid_body_set,
+            );
+        }
         // A massless support shape handles only floor contact. Its zero
         // friction leaves forward traction and lateral wheel scrub to the
         // drivetrain model instead of an isotropic box contact.
@@ -453,6 +569,8 @@ impl MatchRuntime {
                         color: player.color.to_string(),
                         stored_balls: 0,
                         capacity: self.storage_capacity,
+                        brace_zone: None,
+                        brace_multiplier: 1.0,
                     }
                 })
             })
@@ -623,6 +741,46 @@ mod performance_tests {
             arena.object_count,
             milliseconds_per_tick,
             1_000.0 / milliseconds_per_tick
+        );
+    }
+
+    #[test]
+    fn brace_zone_lookup_uses_all_three_authored_volumes() {
+        let triggers = (1..=3)
+            .map(|zone| FieldTrigger {
+                id: format!("redZone{zone}"),
+                min: [zone as f32 * 2.0, 0.0, -1.0],
+                max: [zone as f32 * 2.0 + 1.0, 2.0, 1.0],
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(brace_zone_for_position("red", [2.5, 1.0, 0.0], &triggers), Some(1));
+        assert_eq!(brace_zone_for_position("red", [4.5, 1.0, 0.0], &triggers), Some(2));
+        assert_eq!(brace_zone_for_position("red", [6.5, 1.0, 0.0], &triggers), Some(3));
+        assert_eq!(brace_zone_for_position("blue", [2.5, 1.0, 0.0], &triggers), None);
+        assert_eq!(brace_zone_multiplier(Some(1)), 1.1);
+        assert_eq!(brace_zone_multiplier(Some(2)), 1.2);
+        assert_eq!(brace_zone_multiplier(Some(3)), 1.3);
+        assert_eq!(brace_zone_multiplier(None), 1.0);
+    }
+
+    #[test]
+    fn brace_zone_uses_top_mechanism_overlap_not_robot_center() {
+        let mut robot = arena().robot;
+        robot.outtake_height_m = 1.0;
+        robot.outtake_forward_offset_m = 0.0;
+        robot.flywheel_width_m = 0.2;
+        let triggers = vec![FieldTrigger {
+            id: "redZone1".into(),
+            min: [-0.2, 0.95, -0.2],
+            max: [0.2, 1.05, 0.2],
+        }];
+
+        // Chassis center is below the zone, but the elevated top mechanism
+        // overlaps it and must therefore count as a brace-zone entry.
+        assert_eq!(
+            brace_zone_for_top_cylinder("red", [0.0, 0.10, 0.0], 0.0, &robot, &triggers),
+            Some(1)
         );
     }
 }

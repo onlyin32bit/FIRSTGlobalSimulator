@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::info;
 
-use super::match_runtime::{MatchRuntime, PlayerSnapshot, ScoreState};
+use super::match_runtime::{
+    brace_zone_for_top_cylinder, brace_zone_multiplier, MatchRuntime, PlayerSnapshot, ScoreState,
+};
 use super::pack_loader::{ArenaConfig, GamePackMetadata};
 use super::rhai_engine::RhaiEngine;
 use super::sphere_runtime::{MechSpec, SphereRuntime, StepMetrics};
@@ -68,12 +70,22 @@ pub enum MatchInput {
     EndPractice,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObjectPositionsSync {
     pub count: u32,
     pub active_mask: Vec<u8>,
     pub moving_mask: Vec<u8>,
     pub quantized_positions: Vec<u16>,
+}
+
+impl ObjectPositionsSync {
+    pub fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -227,11 +239,71 @@ impl RuntimeBackend {
             Self::Sphere(runtime) => &mut runtime.score_state,
         };
         match team {
-            "blue" => score.blue_score += points,
-            "red" => score.red_score += points,
+            "blue" => {
+                score.blue_score += points;
+                if category == "SU" {
+                    score.blue_su_score += points;
+                }
+            }
+            "red" => {
+                score.red_score += points;
+                if category == "SU" {
+                    score.red_su_score += points;
+                }
+            }
             _ => score.global_score += points,
         }
         *score.breakdown.entry(category.to_string()).or_insert(0) += points;
+    }
+
+    /// Apply each robot's final brace-zone multiplier to that alliance's SU
+    /// score.  The authored brace volumes are checked against the robot
+    /// center, and the result is rounded once because the public score ledger
+    /// is integer-valued.
+    fn apply_endgame_multipliers(
+        &mut self,
+        robot: &super::pack_loader::RobotPhysicsConfig,
+        triggers: &[super::pack_loader::FieldTrigger],
+    ) {
+        let mut blue_multiplier = 1.0_f32;
+        let mut red_multiplier = 1.0_f32;
+        for player in self.players() {
+            let zone = brace_zone_for_top_cylinder(
+                &player.team_name,
+                [player.x, player.y, player.z],
+                player.yaw,
+                robot,
+                triggers,
+            );
+            let multiplier = brace_zone_multiplier(zone);
+            if player.team_name.to_ascii_lowercase().starts_with("blue") {
+                blue_multiplier += multiplier - 1.0;
+            } else if player.team_name.to_ascii_lowercase().starts_with("red") {
+                red_multiplier += multiplier - 1.0;
+            }
+        }
+
+        let score = match self {
+            Self::Rapier(runtime) => &mut runtime.score_state,
+            Self::Sphere(runtime) => &mut runtime.score_state,
+        };
+        for (team, multiplier) in [("blue", blue_multiplier), ("red", red_multiplier)] {
+            let alliance_su = if team == "blue" {
+                score.blue_su_score
+            } else {
+                score.red_su_score
+            };
+            let adjusted = (alliance_su as f32 * multiplier).round() as i32;
+            let delta = adjusted - alliance_su;
+            if team == "blue" {
+                score.blue_score += delta;
+                score.blue_su_score = adjusted;
+            } else {
+                score.red_score += delta;
+                score.red_su_score = adjusted;
+            }
+            *score.breakdown.entry(format!("{team}_SU_multiplier")).or_insert(0) += delta;
+        }
     }
 
     fn score_state(&self) -> ScoreState {
@@ -260,6 +332,27 @@ impl RuntimeBackend {
             Self::Rapier(runtime) => runtime.player_snapshots(),
             Self::Sphere(runtime) => runtime.player_snapshots(),
         }
+    }
+
+    fn players_with_brace_zones(
+        &self,
+        robot: &super::pack_loader::RobotPhysicsConfig,
+        triggers: &[super::pack_loader::FieldTrigger],
+    ) -> Vec<PlayerSnapshot> {
+        self.players()
+            .into_iter()
+            .map(|mut player| {
+                player.brace_zone = brace_zone_for_top_cylinder(
+                    &player.team_name,
+                    [player.x, player.y, player.z],
+                    player.yaw,
+                    robot,
+                    triggers,
+                );
+                player.brace_multiplier = brace_zone_multiplier(player.brace_zone);
+                player
+            })
+            .collect()
     }
 
     fn positions(&self) -> ObjectPositionsSync {
@@ -630,12 +723,14 @@ impl MatchRegistry {
                 let match_started = match_created + PRE_MATCH_COUNTDOWN;
                 let match_ends = match_started + MATCH_DURATION;
                 let mut live_phase_entered = false;
+                let mut endgame_scored = false;
                 let mut practice_continue = false;
                 let mut tps_window_started = next_tick;
                 let mut ticks_in_tps_window = 0_u64;
                 let mut ticks_per_second = 60.0;
                 let mut tick = 0_u64;
                 let mut recent_semantic_events = VecDeque::<String>::with_capacity(16);
+                let mut scored_category_entities = std::collections::HashSet::<(String, String)>::new();
 
                 while !simulation_shutdown.load(Ordering::Relaxed) {
                     let now = Instant::now();
@@ -684,6 +779,7 @@ impl MatchRegistry {
                     if !live_phase_entered && clock_now >= match_started {
                         runtime.begin_match();
                         live_phase_entered = true;
+                        scored_category_entities.clear();
                     }
                     let match_running = live_phase_entered && clock_now < match_ends;
                     let physics_started = Instant::now();
@@ -695,20 +791,33 @@ impl MatchRegistry {
                         if match_running {
                             let outcomes = rules.on_trigger_enter(&event.target_id, &event.entity_id);
                             for outcome in outcomes {
-                                label.push_str(&format!(" · {} {}/{} +{}", outcome.kind, outcome.team, outcome.category, outcome.points));
-                                // Native scoring: the authored rule's outcome
-                                // is the source of truth for team, category and
-                                // points, so tweaking scoring.rhai rebalances a
-                                // match without a rebuild.
-                                runtime.apply_score(&outcome.team, &outcome.category, outcome.points as i32);
-                                // SU containment and EXT extinguishing remove the
-                                // piece from the field entirely (never re-scored).
-                                if outcome.category == "SU" || outcome.category == "EXT" {
-                                    runtime.contain_ball(&event.entity_id);
+                                let key = (outcome.category.clone(), event.entity_id.clone());
+                                if scored_category_entities.insert(key) {
+                                    label.push_str(&format!(" · {} {}/{} +{}", outcome.kind, outcome.team, outcome.category, outcome.points));
+                                    // Native scoring: the authored rule's outcome
+                                    // is the source of truth for team, category and
+                                    // points, so tweaking scoring.rhai rebalances a
+                                    // match without a rebuild.
+                                    runtime.apply_score(&outcome.team, &outcome.category, outcome.points as i32);
+                                    // EXT extinguishing removes the piece from the field entirely (never re-scored).
+                                    if outcome.category == "EXT" {
+                                        runtime.contain_ball(&event.entity_id);
+                                    }
                                 }
                             }
                         }
                         recent_semantic_events.push_back(label);
+                        while recent_semantic_events.len() > 16 {
+                            recent_semantic_events.pop_front();
+                        }
+                    }
+                    if live_phase_entered && !match_running && !endgame_scored {
+                        runtime.apply_endgame_multipliers(
+                            &pack.arena.robot,
+                            &pack.field_definition.triggers,
+                        );
+                        endgame_scored = true;
+                        recent_semantic_events.push_back("match_end · brace-zone multipliers applied".into());
                         while recent_semantic_events.len() > 16 {
                             recent_semantic_events.pop_front();
                         }
@@ -762,7 +871,10 @@ impl MatchRegistry {
                             tick,
                             game_pack_id: pack.manifest.id.clone(),
                             game_pack_version: pack.manifest.version.clone(),
-                            players: runtime.players(),
+                            players: runtime.players_with_brace_zones(
+                                &pack.arena.robot,
+                                &pack.field_definition.triggers,
+                            ),
                             object_id: pack.arena.object_id.clone(),
                             object_radius: pack.arena.ball.radius_m(),
                             object_color: pack.arena.color.clone(),
@@ -883,6 +995,8 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics, include_physics
             }
             put_u32(bytes, player.stored_balls as u32);
             put_u32(bytes, player.capacity as u32);
+            put_u8(bytes, player.brace_zone.unwrap_or(0));
+            put_f32(bytes, player.brace_multiplier);
         }
     });
     section(&mut output, OBJECTS, |bytes| {
@@ -1137,7 +1251,7 @@ mod protocol_tests {
             score: ScoreState::default(),
             practice_running: false,
         };
-        let encoded = encode_state(&state, ProcessMetrics::default());
+        let encoded = encode_state(&state, ProcessMetrics::default(), true);
         assert_eq!(&encoded[..4], b"FGS1");
         assert_eq!(u16::from_le_bytes(encoded[4..6].try_into().unwrap()), 1);
         assert_eq!(u16::from_le_bytes(encoded[6..8].try_into().unwrap()), 4);

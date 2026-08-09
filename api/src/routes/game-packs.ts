@@ -128,7 +128,12 @@ function buildPublicFieldDefinition(physics: any, semantics: any) {
   const authored = physicsNodes.map((node: any) => orientedBoundsForNode(node, physics)).filter(Boolean) as OrientedBounds[]
   const riser = authored.find((bounds) => bounds.id === 'RISER.001')
   const colliders = authored
-    .filter(({ id, min, max }) => id !== 'GUARD_RAIL.001' && id !== 'RISER.001' && max[0] - min[0] <= 2.5 && max[2] - min[2] <= 2.5)
+    .filter(
+      ({ id, min, max }) =>
+        id !== 'GUARD_RAIL.001' &&
+        id !== 'RISER.001' &&
+        (id.toLowerCase().startsWith('cylinder') || (max[0] - min[0] <= 2.5 && max[2] - min[2] <= 2.5))
+    )
     .map(extrudeThinBounds)
   const anchors: Record<string, [number, number, number]> = {}
   const triggers: Bounds[] = []

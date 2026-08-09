@@ -14,6 +14,8 @@ export type MatchPlayer = {
 	angularVelocityY: number;
 	storedBalls: number;
 	capacity: number;
+	braceZone: number | null;
+	braceMultiplier: number;
 };
 
 export type MatchPhysics = {
@@ -307,7 +309,9 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 						velocityZ: section.f32(),
 						angularVelocityY: section.f32(),
 						storedBalls: section.u32(),
-						capacity: section.u32()
+						capacity: section.u32(),
+						braceZone: section.u8() || null,
+						braceMultiplier: section.f32()
 					});
 				}
 				snapshot.players = players;

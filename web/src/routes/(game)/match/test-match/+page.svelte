@@ -231,6 +231,7 @@
 	let trackedPlayer = $derived(
 		renderedPlayers.find((player) => player.id === localId) ?? renderedPlayers[0]
 	);
+	let localServerPlayer = $derived(players.find((player) => player.id === localId));
 	const pendingPings = new SvelteMap<number, number>();
 	const pressed = new SvelteSet<string>();
 	const inputKeys = new Set([
@@ -1055,6 +1056,22 @@
 				? '—'
 				: `${Math.round(pingMs)} ms`}
 		</p>
+		<div class="mt-2 rounded border border-amber-300/35 bg-amber-300/10 px-2 py-1.5 font-mono text-xs">
+			<p class="font-semibold tracking-wide text-amber-200">BRACE ZONE DEBUG</p>
+			{#if localServerPlayer}
+				<p class="mt-0.5 text-white">
+					{localServerPlayer.braceZone === null
+						? 'ZONE: NONE'
+						: `ZONE: ${localServerPlayer.braceZone}`}
+					<span class="text-amber-200"> ×{localServerPlayer.braceMultiplier.toFixed(1)}</span>
+				</p>
+				<p class="text-[10px] text-white/55">
+					server center {localServerPlayer.x.toFixed(2)}, {localServerPlayer.y.toFixed(2)}, {localServerPlayer.z.toFixed(2)}
+				</p>
+			{:else}
+				<p class="text-white/55">Waiting for local robot snapshot</p>
+			{/if}
+		</div>
 		<p class="mt-1 text-xs text-white/60">Pack: {packVersion}</p>
 		<p class="mt-2 text-xs text-white/60">
 			W/S drive · A/D turn · Space intake · E flywheel outtake · Gamepad: LS-Y + RS-X, left side
@@ -1440,7 +1457,7 @@
 								2
 							)},{player.y.toFixed(2)},{player.z.toFixed(2)}) v({(player.velocityX ?? 0).toFixed(
 								2
-							)},{(player.velocityY ?? 0).toFixed(2)},{(player.velocityZ ?? 0).toFixed(2)})
+							)},{(player.velocityY ?? 0).toFixed(2)},{(player.velocityZ ?? 0).toFixed(2)}) zone {player.braceZone ?? '-'} ×{player.braceMultiplier.toFixed(1)}
 						</p>
 					{/each}
 				</div>
