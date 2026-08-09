@@ -38,6 +38,7 @@ export type DriveParams = {
 	boundaryMinZ: number;
 	boundaryMaxZ: number;
 	colliders: FieldCollider[];
+	robotColliders?: FieldCollider[];
 };
 
 type V3 = [number, number, number];
@@ -61,9 +62,7 @@ const GRAVITY = 9.81;
 
 /**
  * Projected planar half-extents of the rotated chassis, mirroring the
- * server's `robot_planar_extents`. The perimeter clearance shrinks along one
- * axis and grows along the other as the robot turns, so a plain AABB would
- * let the corner swing through the wall.
+ * server's `robot_planar_extents`.
  */
 const robotPlanarExtents = (widthM: number, lengthM: number, yaw: number): [number, number] => {
 	const halfX = widthM * 0.5;
@@ -74,48 +73,40 @@ const robotPlanarExtents = (widthM: number, lengthM: number, yaw: number): [numb
 };
 
 /**
- * Minimum-translation SAT contact between the rotated robot box and one
- * authored field OBB. Mirrors the server's `robot_field_obb_contact` exactly
- * so the predictor resolves interior obstacles (ramp, riser) the same way the
- * authoritative solver does.
+ * Minimum-translation SAT contact between two OBBs.
+ * Mirrors the server's `obb_obb_contact` exactly.
  */
-const robotFieldObbContact = (
-	robotCenter: V3,
-	robotYaw: number,
-	robotHalf: V3,
-	collider: FieldCollider
+export const obbObbContact = (
+	centerA: V3,
+	axesA: [V3, V3, V3],
+	halfA: V3,
+	centerB: V3,
+	axesB: [V3, V3, V3],
+	halfB: V3
 ): { normal: V3; penetration: number } | null => {
-	const sin = Math.sin(robotYaw);
-	const cos = Math.cos(robotYaw);
-	const robotAxes: V3[] = [
-		[cos, 0, -sin],
-		[0, 1, 0],
-		[sin, 0, cos]
-	];
-	const colliderAxes = collider.axes;
-	const axes: V3[] = [...robotAxes, ...colliderAxes];
-	for (const robotAxis of robotAxes) {
-		for (const colliderAxis of colliderAxes) {
-			const candidate = cross3(robotAxis, colliderAxis);
+	const axes: V3[] = [...axesA, ...axesB];
+	for (const axisA of axesA) {
+		for (const axisB of axesB) {
+			const candidate = cross3(axisA, axisB);
 			const length = Math.hypot(candidate[0], candidate[1], candidate[2]);
 			if (length <= 1.0e-5) continue;
 			axes.push(mul3(candidate, 1 / length));
 		}
 	}
 
-	const centerDelta = sub3(robotCenter, collider.center);
+	const centerDelta = sub3(centerA, centerB);
 	let minimumPenetration = Infinity;
 	let minimumNormal: V3 = [0, 1, 0];
 	for (const axis of axes) {
-		const robotRadius =
-			robotHalf[0] * Math.abs(dot3(axis, robotAxes[0])) +
-			robotHalf[1] * Math.abs(dot3(axis, robotAxes[1])) +
-			robotHalf[2] * Math.abs(dot3(axis, robotAxes[2]));
-		const colliderRadius =
-			collider.halfExtents[0] * Math.abs(dot3(axis, colliderAxes[0])) +
-			collider.halfExtents[1] * Math.abs(dot3(axis, colliderAxes[1])) +
-			collider.halfExtents[2] * Math.abs(dot3(axis, colliderAxes[2]));
-		const penetration = robotRadius + colliderRadius - Math.abs(dot3(centerDelta, axis));
+		const radiusA =
+			halfA[0] * Math.abs(dot3(axis, axesA[0])) +
+			halfA[1] * Math.abs(dot3(axis, axesA[1])) +
+			halfA[2] * Math.abs(dot3(axis, axesA[2]));
+		const radiusB =
+			halfB[0] * Math.abs(dot3(axis, axesB[0])) +
+			halfB[1] * Math.abs(dot3(axis, axesB[1])) +
+			halfB[2] * Math.abs(dot3(axis, axesB[2]));
+		const penetration = radiusA + radiusB - Math.abs(dot3(centerDelta, axis));
 		if (penetration <= 0) return null;
 		if (penetration < minimumPenetration) {
 			minimumPenetration = penetration;
@@ -127,83 +118,106 @@ const robotFieldObbContact = (
 
 /**
  * Push the robot out of any interior field collider it overlaps and zero the
- * velocity component driving into the surface. Mirrors the server's
- * `project_robot_field_colliders`: OBBs use SAT, the authored guard rails are
- * treated as AABBs pushed out along the smallest penetration.
+ * velocity component driving into the surface.
+ * Mirrors the server's `project_robot_field_colliders` exactly.
  */
 const projectFieldColliders = (p: RobotPose, params: DriveParams) => {
-	const halfX = params.widthM * 0.5;
-	const halfZ = params.lengthM * 0.5;
-	const halfY = params.heightM * 0.5;
-	const robotMinY = p.y - halfY;
-	const robotMaxY = p.y + halfY;
+	const yaw = p.yaw + Math.PI;
+	const sin = Math.sin(yaw);
+	const cos = Math.cos(yaw);
+	const rotate = (v: V3): V3 => [cos * v[0] + sin * v[2], v[1], -sin * v[0] + cos * v[2]];
 
-	for (const collider of params.colliders) {
-		if (robotMaxY <= collider.min[1] || robotMinY >= collider.max[1]) continue;
+	const fallbackCollider: FieldCollider = {
+		min: [-params.widthM * 0.5, -params.heightM * 0.5, -params.lengthM * 0.5],
+		max: [params.widthM * 0.5, params.heightM * 0.5, params.lengthM * 0.5],
+		center: [0, 0, 0],
+		halfExtents: [params.widthM * 0.5, params.heightM * 0.5, params.lengthM * 0.5],
+		axes: [
+			[1, 0, 0],
+			[0, 1, 0],
+			[0, 0, 1]
+		]
+	};
 
-		if (collider.halfExtents.some((extent) => extent > 1.0e-6)) {
-			const contact = robotFieldObbContact(
-				[p.x, p.y, p.z],
-				p.yaw,
-				[halfX, halfY, halfZ],
-				collider
+	const subColliders =
+		params.robotColliders && params.robotColliders.length > 0
+			? params.robotColliders
+			: [fallbackCollider];
+
+	for (const subColl of subColliders) {
+		const subCenter: V3 = [
+			p.x + cos * subColl.center[0] + sin * subColl.center[2],
+			p.y + subColl.center[1],
+			p.z - sin * subColl.center[0] + cos * subColl.center[2]
+		];
+		const subAxes: [V3, V3, V3] = [
+			rotate(subColl.axes[0]),
+			rotate(subColl.axes[1]),
+			rotate(subColl.axes[2])
+		];
+		const subHalf = subColl.halfExtents;
+
+		const subExtentY =
+			Math.abs(subAxes[0][1]) * subHalf[0] +
+			Math.abs(subAxes[1][1]) * subHalf[1] +
+			Math.abs(subAxes[2][1]) * subHalf[2];
+		const subMinY = subCenter[1] - subExtentY;
+		const subMaxY = subCenter[1] + subExtentY;
+
+		for (const collider of params.colliders) {
+			if (subMaxY <= collider.min[1] || subMinY >= collider.max[1]) continue;
+
+			let fieldCenter: V3;
+			let fieldAxes: [V3, V3, V3];
+			let fieldHalf: V3;
+
+			if (collider.halfExtents.some((extent) => extent > 1.0e-6)) {
+				fieldCenter = collider.center;
+				fieldAxes = collider.axes;
+				fieldHalf = collider.halfExtents;
+			} else {
+				fieldCenter = [
+					(collider.min[0] + collider.max[0]) * 0.5,
+					(collider.min[1] + collider.max[1]) * 0.5,
+					(collider.min[2] + collider.max[2]) * 0.5
+				];
+				fieldHalf = [
+					(collider.max[0] - collider.min[0]) * 0.5,
+					(collider.max[1] - collider.min[1]) * 0.5,
+					(collider.max[2] - collider.min[2]) * 0.5
+				];
+				fieldAxes = [
+					[1, 0, 0],
+					[0, 1, 0],
+					[0, 0, 1]
+				];
+			}
+
+			const contact = obbObbContact(
+				subCenter,
+				subAxes,
+				subHalf,
+				fieldCenter,
+				fieldAxes,
+				fieldHalf
 			);
 			if (!contact) continue;
+
 			p.x += contact.normal[0] * contact.penetration;
 			p.y += contact.normal[1] * contact.penetration;
 			p.z += contact.normal[2] * contact.penetration;
+
 			const intoSurface = p.vx * contact.normal[0] + p.vz * contact.normal[2];
 			if (intoSurface < 0) {
 				p.vx -= contact.normal[0] * intoSurface;
 				p.vz -= contact.normal[2] * intoSurface;
 			}
-			continue;
-		}
-
-		const robotMinX = p.x - halfX;
-		const robotMaxX = p.x + halfX;
-		const robotMinZ = p.z - halfZ;
-		const robotMaxZ = p.z + halfZ;
-		if (
-			robotMaxX <= collider.min[0] ||
-			robotMinX >= collider.max[0] ||
-			robotMaxZ <= collider.min[2] ||
-			robotMinZ >= collider.max[2]
-		) {
-			continue;
-		}
-
-		const pushLeft = robotMaxX - collider.min[0];
-		const pushRight = collider.max[0] - robotMinX;
-		const pushBack = robotMaxZ - collider.min[2];
-		const pushFront = collider.max[2] - robotMinZ;
-		const candidates: Array<[number, V3]> = [
-			[pushLeft, [-1, 0, 0]],
-			[pushRight, [1, 0, 0]],
-			[pushBack, [0, 0, -1]],
-			[pushFront, [0, 0, 1]]
-		];
-		const [distance, normal] = candidates.reduce((least, candidate) =>
-			candidate[0] < least[0] ? candidate : least
-		);
-		p.x += normal[0] * Math.max(distance, 0);
-		p.z += normal[2] * Math.max(distance, 0);
-		const intoSurface = p.vx * normal[0] + p.vz * normal[2];
-		if (intoSurface < 0) {
-			p.vx -= normal[0] * intoSurface;
-			p.vz -= normal[2] * intoSurface;
 		}
 	}
 };
 
 /**
  * Local reproduction of the server's `apply_player_drive` drivetrain model.
- * The server integrates the same impulse/turn logic on its authoritative
- * physics step, then clamps the robot to the playable perimeter and projects
- * it out of interior field colliders. The predictor mirrors all three so the
- * rendered robot never drifts outside the arena — eliminating the through-wall
- * pass-through that previously ended in a hard snap-back. The server snapshot
- * reconciles any remaining divergence (e.g. ball contacts).
  */
 export class DrivePredictor {
 	private readonly params: DriveParams;
@@ -212,6 +226,10 @@ export class DrivePredictor {
 	constructor(params: DriveParams, initial: RobotPose) {
 		this.params = params;
 		this.pose = { ...initial };
+	}
+
+	updateRobotColliders(robotColliders: FieldCollider[]) {
+		this.params.robotColliders = robotColliders;
 	}
 
 	setPose(pose: RobotPose) {
@@ -232,8 +250,6 @@ export class DrivePredictor {
 		const p = this.pose;
 		const stepDt = clamp(dt, 0, 0.05);
 
-		// Robot is constrained to yaw only; forward/right follow the same
-		// quaternion expansion the server derives from Rapier's rotation.
 		const forwardX = -Math.sin(p.yaw);
 		const forwardZ = -Math.cos(p.yaw);
 		const rightX = Math.cos(p.yaw);
@@ -242,8 +258,6 @@ export class DrivePredictor {
 		const forwardSpeed = p.vx * forwardX + p.vz * forwardZ;
 		const lateralSpeed = p.vx * rightX + p.vz * rightZ;
 
-		// Arcade input → differential wheel power, peak-normalised so hard
-		// steering scrubs forward drive exactly like the real drivetrain.
 		let leftPower = input.drive + input.turn;
 		let rightPower = input.drive - input.turn;
 		const peakPower = Math.max(Math.abs(leftPower), Math.abs(rightPower), 1);
@@ -270,8 +284,6 @@ export class DrivePredictor {
 			lateralAcceleration * stepDt
 		);
 
-		// Impulse over mass equals the velocity delta; the server applies
-		// impulse = Δv · mass, so these are directly comparable.
 		p.vx += forwardX * forwardDelta + rightX * lateralDelta;
 		p.vz += forwardZ * forwardDelta + rightZ * lateralDelta;
 
@@ -292,9 +304,6 @@ export class DrivePredictor {
 		p.z += p.vz * stepDt;
 		p.yaw += p.angularVelocityY * stepDt;
 
-		// The server never lets the chassis cross the perimeter: clamp to the
-		// rotated-footprint clearance and cancel the velocity into the wall so
-		// the predicted pose stays on the playable carpet and slides along it.
 		const [robotXExtent, robotZExtent] = robotPlanarExtents(
 			this.params.widthM,
 			this.params.lengthM,

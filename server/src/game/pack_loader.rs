@@ -453,13 +453,16 @@ fn load_field_definition(
     }
     definition.colliders = assimp_colliders(physics)
         .into_iter()
-        .filter(|(id, min, max, _, _, _)| {
+        .filter(|(id, _min, _max, _center, half_extents, _axes)| {
             // The guard rail and riser provide the boundary/floor. Their
             // visual bounds must not become solid cuboids. Likewise, broad
             // cross-field assemblies are render geometry, not local blocks.
-            !matches!(id.as_str(), "GUARD_RAIL.001" | "RISER.001")
-                && max[0] - min[0] <= 2.5
-                && max[2] - min[2] <= 2.5
+            if matches!(id.as_str(), "GUARD_RAIL.001" | "RISER.001") {
+                return false;
+            }
+            let mut sorted = *half_extents;
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            sorted[0] <= 1.25 && sorted[1] <= 1.25
         })
         .map(|(id, _min, _max, center, mut half_extents, axes)| {
             // Rapier can contact a zero-thickness triangle mesh, but the
@@ -525,7 +528,12 @@ fn load_robot_colliders(
     let authored = assimp_colliders(physics);
     let floor_y = authored
         .iter()
-        .map(|(_, min, _, _, _, _)| min[1])
+        .map(|(_, _, _, center, half_extents, axes)| {
+            let extent_y = (0..3)
+                .map(|axis| axes[axis][1].abs() * half_extents[axis])
+                .sum::<f32>();
+            center[1] - extent_y
+        })
         .fold(f32::INFINITY, f32::min);
     if !floor_y.is_finite() {
         return Vec::new();
