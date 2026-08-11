@@ -7,10 +7,10 @@ Wheel5
 Wheel6
 
 Intake:
-IntakeRoller: Roller for intake (Rotate along local X-axis)
+IntakeRoller: Roller for intake (Rotate along local Y-axis)
 
 Outtake:
-OuttakeRoller: Shooter Roller (Rotate along local X-axis)
+OuttakeRoller: Shooter Roller (Rotate along local Y-axis)
 
 Transfer: 
 Transfer Flap: Flap to transfer balls into Shooter (Rotate along local X-axis)

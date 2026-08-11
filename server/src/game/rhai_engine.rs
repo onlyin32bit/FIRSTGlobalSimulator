@@ -592,16 +592,20 @@ impl RhaiEngine {
         for (name, value) in [
             ("robot.intake_width_m", arena.robot.intake_width_m),
             ("robot.intake_radius_m", arena.robot.intake_radius_m),
-            (
-                "robot.intake_surface_speed_mps",
-                arena.robot.intake_surface_speed_mps,
-            ),
             ("ramp.width_m", arena.ramp.width_m),
             ("ramp.length_m", arena.ramp.length_m),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("arena_config.{name} must be positive and finite"));
             }
+        }
+        if !arena.robot.intake_surface_speed_mps.is_finite()
+            || arena.robot.intake_surface_speed_mps == 0.0
+        {
+            return Err(
+                "arena_config.robot.intake_surface_speed_mps must be a non-zero finite value"
+                    .into(),
+            );
         }
         if !arena.ramp.angle_deg.is_finite() || !(0.0..=60.0).contains(&arena.ramp.angle_deg) {
             return Err("arena_config.ramp.angle_deg must be between 0 and 60".into());

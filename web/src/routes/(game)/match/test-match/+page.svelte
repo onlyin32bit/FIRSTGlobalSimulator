@@ -171,6 +171,7 @@
 	let inputTurn = $state(0);
 	let inputIntake = $state(0);
 	let inputOuttake = $state(0);
+	let inputClimb = $state(0);
 	let cameraMode = $state<'overview' | 'robot'>('overview');
 	let cameraDirection = $state<'north' | 'south'>('north');
 	let robotCameraDistance = $state(8);
@@ -243,6 +244,11 @@
 		's',
 		'd',
 		'e',
+		'q',
+		'f',
+		'c',
+		'v',
+		'shift',
 		'arrowup',
 		'arrowdown',
 		'arrowleft',
@@ -261,6 +267,7 @@
 	let lastSentTurn = Number.NaN;
 	let lastSentIntake = Number.NaN;
 	let lastSentOuttake = Number.NaN;
+	let lastSentClimb = Number.NaN;
 	let lastInputSentAt = 0;
 	const highIsBadTone = (value: number, warning: number, critical: number) =>
 		value >= critical ? 'text-fuchsia-300' : value >= warning ? 'text-amber-300' : 'text-cyan-300';
@@ -408,12 +415,16 @@
 		const keyboardDrive =
 			Number(pressed.has('w') || pressed.has('arrowup')) -
 			Number(pressed.has('s') || pressed.has('arrowdown'));
+		const keyboardIntake = Number(pressed.has(' ') || pressed.has('e'));
+		const keyboardOuttake = Number(pressed.has('q') || pressed.has('f'));
+		const keyboardClimb = Number(pressed.has('c') || pressed.has('v') || pressed.has('shift'));
 
 		const gamepad = activeGamepad();
 		let gamepadDrive = 0;
 		let gamepadTurn = 0;
 		let gamepadIntake = 0;
 		let gamepadOuttake = 0;
+		let gamepadClimb = 0;
 		if (gamepad) {
 			gamepadDrive = applyDeadzone(-(gamepad.axes[1] ?? 0));
 			gamepadTurn = applyDeadzone(gamepad.axes[2] ?? gamepad.axes[0] ?? 0);
@@ -423,6 +434,7 @@
 			const right = Math.max(gamepad.buttons[5]?.value ?? 0, gamepad.buttons[7]?.value ?? 0);
 			gamepadIntake = left;
 			gamepadOuttake = right;
+			gamepadClimb = gamepad.buttons[3]?.value ?? gamepad.buttons[2]?.value ?? 0;
 			// The A button commands neutral input, allowing the server-side
 			// brake limit to act.
 			if (gamepad.buttons[0]?.pressed) {
@@ -435,9 +447,9 @@
 		return {
 			drive: keyboardActive ? keyboardDrive : gamepadDrive,
 			turn: keyboardActive ? keyboardTurn : gamepadTurn,
-			// Mechanisms are not part of match simulation yet.
-			intake: 0,
-			outtake: 0,
+			intake: Math.max(keyboardIntake, gamepadIntake),
+			outtake: Math.max(keyboardOuttake, gamepadOuttake),
+			climb: Math.max(keyboardClimb, gamepadClimb),
 			source: (keyboardActive ? 'keyboard' : gamepad ? 'gamepad' : 'keyboard') as
 				'keyboard' | 'gamepad'
 		};
@@ -450,7 +462,8 @@
 			Math.abs(input.drive - lastSentDrive) > 0.005 ||
 			Math.abs(input.turn - lastSentTurn) > 0.005 ||
 			Math.abs(input.intake - lastSentIntake) > 0.005 ||
-			Math.abs(input.outtake - lastSentOuttake) > 0.005;
+			Math.abs(input.outtake - lastSentOuttake) > 0.005 ||
+			Math.abs(input.climb - lastSentClimb) > 0.005;
 		if (!force && !changed && now - lastInputSentAt < 250) return;
 
 		controlSource = input.source;
@@ -458,10 +471,12 @@
 		inputTurn = input.turn;
 		inputIntake = input.intake;
 		inputOuttake = input.outtake;
+		inputClimb = input.climb;
 		lastSentDrive = input.drive;
 		lastSentTurn = input.turn;
 		lastSentIntake = input.intake;
 		lastSentOuttake = input.outtake;
+		lastSentClimb = input.climb;
 		lastInputSentAt = now;
 		socket.send(
 			JSON.stringify({
@@ -470,7 +485,8 @@
 				move_x: input.turn,
 				move_z: input.drive,
 				intake_power: input.intake,
-				outtake_power: input.outtake
+				outtake_power: input.outtake,
+				climb_power: input.climb
 			})
 		);
 	}
@@ -673,6 +689,7 @@
 			if (input.turn !== inputTurn) inputTurn = input.turn;
 			if (input.intake !== inputIntake) inputIntake = input.intake;
 			if (input.outtake !== inputOuttake) inputOuttake = input.outtake;
+			if (input.climb !== inputClimb) inputClimb = input.climb;
 			if (input.source !== controlSource) controlSource = input.source;
 			sendInputFrom(input);
 
@@ -762,12 +779,12 @@
 				event.preventDefault();
 				return;
 			}
-			if (!event.repeat && event.key.toLowerCase() === 'c') {
+			if (!event.repeat && event.key.toLowerCase() === 'o') {
 				cameraMode = cameraMode === 'overview' ? 'robot' : 'overview';
 				event.preventDefault();
 				return;
 			}
-			if (!event.repeat && event.key.toLowerCase() === 'f' && cameraMode === 'robot') {
+			if (!event.repeat && event.key.toLowerCase() === 'x' && cameraMode === 'robot') {
 				cameraDirection = cameraDirection === 'north' ? 'south' : 'north';
 				event.preventDefault();
 				return;
@@ -1114,7 +1131,7 @@
 				<span class="text-xs text-white/40">apply live</span>
 			</div>
 			<p class="mb-2 text-xs leading-relaxed text-white/55">
-				Space/E intake, E/LB outtake the wide flywheel. Values rebalance your robot without
+				Space/E: Intake | Q/F: Transfer + Outtake | C/Shift: Climb. Values rebalance your robot without
 				restarting the match.
 			</p>
 			<div class="space-y-2 text-xs">
@@ -1467,11 +1484,15 @@
 		<T.Group>
 			{#each renderedPlayers as player (player.id)}
 				{#if robotAssets}
+					{@const isLocal = !localId || player.id === localId || renderedPlayers.length === 1}
 					<RobotModel
 						{player}
 						{physics}
 						{robotAssets}
-						local={player.id === localId}
+						local={isLocal}
+						intake={isLocal ? inputIntake : 0}
+						outtake={isLocal ? inputOuttake : 0}
+						climb={isLocal ? inputClimb : 0}
 					/>
 				{/if}
 			{/each}

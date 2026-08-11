@@ -84,6 +84,52 @@ impl Default for FieldBoundary {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActuatorConfig {
+    #[serde(default = "default_spin_axis")]
+    pub spin_axis: [f32; 3],
+    #[serde(default = "default_input_channel")]
+    pub input_channel: String,
+    #[serde(default = "default_target_surface_speed")]
+    pub target_surface_speed_mps: f32,
+    #[serde(default = "default_max_torque")]
+    pub max_torque: f32,
+    #[serde(default = "default_actuator_mass")]
+    pub mass_kg: f32,
+    #[serde(default = "default_actuator_friction")]
+    pub friction: f32,
+    /// Rigid wheel core with a bounded compliant tread/contact layer.
+    #[serde(default = "default_contact_stiffness")]
+    pub contact_stiffness_n_per_m: f32,
+    #[serde(default = "default_contact_damping")]
+    pub contact_damping_n_s_per_m: f32,
+    #[serde(default = "default_max_compression")]
+    pub max_compression_m: f32,
+}
+
+fn default_spin_axis() -> [f32; 3] {
+    [1.0, 0.0, 0.0]
+}
+fn default_input_channel() -> String {
+    "intake".into()
+}
+fn default_target_surface_speed() -> f32 {
+    6.0
+}
+fn default_max_torque() -> f32 {
+    15.0
+}
+fn default_actuator_mass() -> f32 {
+    0.8
+}
+fn default_actuator_friction() -> f32 {
+    0.9
+}
+fn default_contact_stiffness() -> f32 { 500.0 }
+fn default_contact_damping() -> f32 { 5.0 }
+fn default_max_compression() -> f32 { 0.010 }
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldCollider {
@@ -96,6 +142,8 @@ pub struct FieldCollider {
     pub half_extents: [f32; 3],
     #[serde(default = "default_axes")]
     pub axes: [[f32; 3]; 3],
+    #[serde(default)]
+    pub actuator: Option<ActuatorConfig>,
 }
 
 fn default_axes() -> [[f32; 3]; 3] {
@@ -490,6 +538,7 @@ fn load_field_definition(
                 center,
                 half_extents,
                 axes,
+                actuator: None,
             }
         })
         .collect();
@@ -551,9 +600,52 @@ fn load_robot_colliders(
                 min[world_axis] -= extent;
                 max[world_axis] += extent;
             }
-            FieldCollider { id, min, max, center, half_extents, axes }
+            let actuator = infer_actuator_config(&id, robot);
+            FieldCollider {
+                id,
+                min,
+                max,
+                center,
+                half_extents,
+                axes,
+                actuator,
+            }
         })
         .collect()
+}
+
+fn infer_actuator_config(id: &str, robot: &RobotPhysicsConfig) -> Option<ActuatorConfig> {
+    let is_intake = id == "IntakeRoller";
+    let is_outtake = id == "OuttakeRoller" || id == "TransferFlap" || id == "Transfer Flap";
+    let is_climb = id == "ClimbWheel1" || id == "ClimbWheel2";
+
+    if !is_intake && !is_outtake && !is_climb {
+        return None;
+    }
+
+    let (channel, speed, spin_axis, friction) = if is_intake {
+        ("intake".to_string(), robot.intake_surface_speed_mps, [0.0, 1.0, 0.0], robot.intake_friction)
+    } else if is_outtake {
+        if id == "OuttakeRoller" {
+            ("outtake".to_string(), robot.outtake_velocity_mps, [0.0, 1.0, 0.0], robot.surface_friction)
+        } else {
+            ("outtake".to_string(), robot.outtake_velocity_mps, [0.0, 1.0, 0.0], robot.surface_friction)
+        }
+    } else {
+        ("climb".to_string(), 3.0, [1.0, 0.0, 0.0], robot.surface_friction)
+    };
+
+    Some(ActuatorConfig {
+        spin_axis,
+        input_channel: channel,
+        target_surface_speed_mps: speed,
+        max_torque: 15.0,
+        mass_kg: 0.8,
+        friction,
+        contact_stiffness_n_per_m: default_contact_stiffness(),
+        contact_damping_n_s_per_m: default_contact_damping(),
+        max_compression_m: default_max_compression(),
+    })
 }
 
 fn assimp_children(scene: &serde_json::Value) -> Vec<&serde_json::Value> {
@@ -572,6 +664,159 @@ fn assimp_bounds(scene: &serde_json::Value, solid_only: bool) -> Vec<(String, [f
         .collect()
 }
 
+fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    for row in 0..4 {
+        for col in 0..4 {
+            out[row * 4 + col] = (0..4)
+                .map(|k| a[row * 4 + k] * b[k * 4 + col])
+                .sum();
+        }
+    }
+    out
+}
+
+fn identity_mat4() -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ]
+}
+
+fn get_mechanism_id(name: &str) -> Option<&str> {
+    if name == "IntakeRoller" || name.starts_with("IntakeRoller") {
+        Some("IntakeRoller")
+    } else if name == "OuttakeRoller" || name.starts_with("OuttakeRoller") {
+        Some("OuttakeRoller")
+    } else if name == "TransferFlap" || name.starts_with("TransferFlap") || name == "Transfer Flap" {
+        Some("TransferFlap")
+    } else if name == "ClimbWheel1" || name.starts_with("ClimbWheel1") {
+        Some("ClimbWheel1")
+    } else if name == "ClimbWheel2" || name.starts_with("ClimbWheel2") {
+        Some("ClimbWheel2")
+    } else {
+        None
+    }
+}
+
+/// Recursively walk a scene node tree, yielding one OBB entry per mesh found.
+/// `inherited_id` is the nearest ancestor name — so child cylinders of an
+/// empty "IntakeRoller" parent all get the id "IntakeRoller".
+/// `parent_mat` is the accumulated world transform of all ancestors.
+fn collect_colliders(
+    node: &serde_json::Value,
+    scene: &serde_json::Value,
+    parent_mat: &[f32; 16],
+    inherited_id: Option<&str>,
+    out: &mut Vec<(String, [f32; 3], [f32; 3], [f32; 3], [f32; 3], [[f32; 3]; 3])>,
+) {
+    let node_name = node.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    // Compose this node's local transform with the parent's.
+    let local_mat = assimp_matrix(node).unwrap_or_else(identity_mat4);
+    let world_mat = mat4_mul(parent_mat, &local_mat);
+
+    let direct_mech = get_mechanism_id(node_name);
+    let inherited_mech = inherited_id.and_then(get_mechanism_id);
+    let effective_mech = direct_mech.or(inherited_mech);
+
+    // The ID to use for any mesh found at or below this node.
+    let effective_id: &str = if let Some(mech) = effective_mech {
+        mech
+    } else if !node_name.is_empty() {
+        node_name
+    } else if let Some(id) = inherited_id {
+        id
+    } else {
+        return; // no name anywhere — skip
+    };
+
+    // If this node has a mesh, emit a collider for it.
+    if let Some(mesh_index) = node
+        .get("meshes")
+        .and_then(|m| m.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_u64())
+    {
+        let vertices_opt = scene
+            .get("meshes")
+            .and_then(|m| m.as_array())
+            .and_then(|a| a.get(mesh_index as usize))
+            .and_then(|mesh| mesh.get("vertices"))
+            .and_then(|v| v.as_array());
+
+        if let Some(vertices) = vertices_opt {
+            let mut local_min = [f32::INFINITY; 3];
+            let mut local_max = [f32::NEG_INFINITY; 3];
+            let mut ok = true;
+            for xyz in vertices.chunks_exact(3) {
+                for axis in 0..3 {
+                    if let Some(v) = xyz[axis].as_f64() {
+                        let val = v as f32;
+                        local_min[axis] = local_min[axis].min(val);
+                        local_max[axis] = local_max[axis].max(val);
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok { break; }
+            }
+            if ok && local_min.iter().all(|v| v.is_finite()) {
+                let local_center = [
+                    (local_min[0] + local_max[0]) * 0.5,
+                    (local_min[1] + local_max[1]) * 0.5,
+                    (local_min[2] + local_max[2]) * 0.5,
+                ];
+                let local_half = [
+                    (local_max[0] - local_min[0]) * 0.5,
+                    (local_max[1] - local_min[1]) * 0.5,
+                    (local_max[2] - local_min[2]) * 0.5,
+                ];
+                let center = transform_point(&world_mat, local_center);
+                let raw_axes = [
+                    [world_mat[0], world_mat[4], world_mat[8]],
+                    [world_mat[1], world_mat[5], world_mat[9]],
+                    [world_mat[2], world_mat[6], world_mat[10]],
+                ];
+                let mut axes = [[0.0; 3]; 3];
+                let mut half_extents = [0.0; 3];
+                for axis in 0..3 {
+                    let length = (raw_axes[axis][0] * raw_axes[axis][0]
+                        + raw_axes[axis][1] * raw_axes[axis][1]
+                        + raw_axes[axis][2] * raw_axes[axis][2])
+                        .sqrt()
+                        .max(1.0e-6);
+                    axes[axis] = [
+                        raw_axes[axis][0] / length,
+                        raw_axes[axis][1] / length,
+                        raw_axes[axis][2] / length,
+                    ];
+                    half_extents[axis] = local_half[axis] * length;
+                }
+                let mut min = center;
+                let mut max = center;
+                for world_axis in 0..3 {
+                    let radius = (0..3)
+                        .map(|la| axes[la][world_axis].abs() * half_extents[la])
+                        .sum::<f32>();
+                    min[world_axis] -= radius;
+                    max[world_axis] += radius;
+                }
+                out.push((effective_id.to_string(), min, max, center, half_extents, axes));
+            }
+        }
+    }
+
+    // Recurse into children, passing this node's name as the inherited id.
+    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+        for child in children {
+            collect_colliders(child, scene, &world_mat, Some(effective_id), out);
+        }
+    }
+}
+
 fn assimp_colliders(
     scene: &serde_json::Value,
 ) -> Vec<(
@@ -582,74 +827,15 @@ fn assimp_colliders(
     [f32; 3],
     [[f32; 3]; 3],
 )> {
-    assimp_children(scene)
-        .into_iter()
-        .filter_map(|child| {
-            let id = child.get("name")?.as_str()?.to_string();
-            let mesh_index = child.get("meshes")?.as_array()?.first()?.as_u64()? as usize;
-            let vertices = scene
-                .get("meshes")?
-                .as_array()?
-                .get(mesh_index)?
-                .get("vertices")?
-                .as_array()?;
-            let matrix = assimp_matrix(child)?;
-            let mut local_min = [f32::INFINITY; 3];
-            let mut local_max = [f32::NEG_INFINITY; 3];
-            for xyz in vertices.chunks_exact(3) {
-                for axis in 0..3 {
-                    let value = xyz[axis].as_f64()? as f32;
-                    local_min[axis] = local_min[axis].min(value);
-                    local_max[axis] = local_max[axis].max(value);
-                }
-            }
-            if !local_min.iter().all(|value| value.is_finite()) {
-                return None;
-            }
-            let local_center = [
-                (local_min[0] + local_max[0]) * 0.5,
-                (local_min[1] + local_max[1]) * 0.5,
-                (local_min[2] + local_max[2]) * 0.5,
-            ];
-            let local_half = [
-                (local_max[0] - local_min[0]) * 0.5,
-                (local_max[1] - local_min[1]) * 0.5,
-                (local_max[2] - local_min[2]) * 0.5,
-            ];
-            let center = transform_point(&matrix, local_center);
-            let raw_axes = [
-                [matrix[0], matrix[4], matrix[8]],
-                [matrix[1], matrix[5], matrix[9]],
-                [matrix[2], matrix[6], matrix[10]],
-            ];
-            let mut axes = [[0.0; 3]; 3];
-            let mut half_extents = [0.0; 3];
-            for axis in 0..3 {
-                let length = (raw_axes[axis][0] * raw_axes[axis][0]
-                    + raw_axes[axis][1] * raw_axes[axis][1]
-                    + raw_axes[axis][2] * raw_axes[axis][2])
-                    .sqrt()
-                    .max(1.0e-6);
-                axes[axis] = [
-                    raw_axes[axis][0] / length,
-                    raw_axes[axis][1] / length,
-                    raw_axes[axis][2] / length,
-                ];
-                half_extents[axis] = local_half[axis] * length;
-            }
-            let mut min = center;
-            let mut max = center;
-            for world_axis in 0..3 {
-                let radius = (0..3)
-                    .map(|local_axis| axes[local_axis][world_axis].abs() * half_extents[local_axis])
-                    .sum::<f32>();
-                min[world_axis] -= radius;
-                max[world_axis] += radius;
-            }
-            Some((id, min, max, center, half_extents, axes))
-        })
-        .collect()
+    let root_children = assimp_children(scene);
+    let identity = identity_mat4();
+    let mut out = Vec::new();
+    for child in root_children {
+        collect_colliders(child, scene, &identity, None, &mut out);
+    }
+    out
 }
+
 
 fn assimp_bound(
     child: &serde_json::Value,

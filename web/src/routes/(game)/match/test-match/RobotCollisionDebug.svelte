@@ -33,28 +33,54 @@
 			.then((asset) => {
 				const result: Collider[] = [];
 				let floor = Infinity;
-				for (const node of asset.rootnode?.children ?? []) {
-					const mesh = asset.meshes?.[node.meshes?.[0] ?? -1];
-					const m = node.transformation;
-					if (!mesh?.vertices || !m) continue;
-					const points = [];
-					const localMin = [Infinity, Infinity, Infinity];
-					const localMax = [-Infinity, -Infinity, -Infinity];
-					for (let i = 0; i < mesh.vertices.length; i += 3) {
-						const x = mesh.vertices[i], y = mesh.vertices[i + 1], z = mesh.vertices[i + 2];
-						localMin[0] = Math.min(localMin[0], x); localMin[1] = Math.min(localMin[1], y); localMin[2] = Math.min(localMin[2], z);
-						localMax[0] = Math.max(localMax[0], x); localMax[1] = Math.max(localMax[1], y); localMax[2] = Math.max(localMax[2], z);
-						points.push([m[0] * x + m[1] * y + m[2] * z + m[3], m[4] * x + m[5] * y + m[6] * z + m[7], m[8] * x + m[9] * y + m[10] * z + m[11]]);
+
+				function collect(node: any, parentMatrix: Matrix4) {
+					const localM = new Matrix4();
+					if (node.transformation && node.transformation.length >= 16) {
+						const a = node.transformation;
+						localM.set(
+							a[0], a[1], a[2], a[3],
+							a[4], a[5], a[6], a[7],
+							a[8], a[9], a[10], a[11],
+							a[12], a[13], a[14], a[15]
+						);
 					}
-					const min = [Math.min(...points.map((p) => p[0])), Math.min(...points.map((p) => p[1])), Math.min(...points.map((p) => p[2]))];
-					const max = [Math.max(...points.map((p) => p[0])), Math.max(...points.map((p) => p[1])), Math.max(...points.map((p) => p[2]))];
-					floor = Math.min(floor, min[1]);
-					const rawAxes = [[m[0], m[4], m[8]], [m[1], m[5], m[9]], [m[2], m[6], m[10]]];
-					const axes = rawAxes.map((axis) => { const scale = Math.hypot(...axis); return axis.map((value) => value / Math.max(scale, 1e-6)); }) as Collider['axes'];
-					const half = rawAxes.map((axis, i) => (localMax[i] - localMin[i]) * Math.hypot(...axis) / 2) as [number, number, number];
-					const localCenter = localMin.map((value, i) => (value + localMax[i]) / 2);
-					const center: [number, number, number] = [m[0] * localCenter[0] + m[1] * localCenter[1] + m[2] * localCenter[2] + m[3], m[4] * localCenter[0] + m[5] * localCenter[1] + m[6] * localCenter[2] + m[7], m[8] * localCenter[0] + m[9] * localCenter[1] + m[10] * localCenter[2] + m[11]];
-					result.push({ center, half, axes });
+					const worldM = parentMatrix.clone().multiply(localM);
+					const meshIndex = node.meshes?.[0];
+					const mesh = Number.isInteger(meshIndex) ? asset.meshes?.[meshIndex!] : undefined;
+
+					if (mesh?.vertices) {
+						const m = worldM.elements;
+						const points = [];
+						const localMin = [Infinity, Infinity, Infinity];
+						const localMax = [-Infinity, -Infinity, -Infinity];
+						for (let i = 0; i < mesh.vertices.length; i += 3) {
+							const x = mesh.vertices[i], y = mesh.vertices[i + 1], z = mesh.vertices[i + 2];
+							localMin[0] = Math.min(localMin[0], x); localMin[1] = Math.min(localMin[1], y); localMin[2] = Math.min(localMin[2], z);
+							localMax[0] = Math.max(localMax[0], x); localMax[1] = Math.max(localMax[1], y); localMax[2] = Math.max(localMax[2], z);
+							points.push([m[0] * x + m[4] * y + m[8] * z + m[12], m[1] * x + m[5] * y + m[9] * z + m[13], m[2] * x + m[6] * y + m[10] * z + m[14]]);
+						}
+						const min = [Math.min(...points.map((p) => p[0])), Math.min(...points.map((p) => p[1])), Math.min(...points.map((p) => p[2]))];
+						const max = [Math.max(...points.map((p) => p[0])), Math.max(...points.map((p) => p[1])), Math.max(...points.map((p) => p[2]))];
+						floor = Math.min(floor, min[1]);
+						const rawAxes = [[m[0], m[1], m[2]], [m[4], m[5], m[6]], [m[8], m[9], m[10]]];
+						const axes = rawAxes.map((axis) => { const scale = Math.hypot(...axis); return axis.map((value) => value / Math.max(scale, 1e-6)); }) as Collider['axes'];
+						const half = rawAxes.map((axis, i) => (localMax[i] - localMin[i]) * Math.hypot(...axis) / 2) as [number, number, number];
+						const localCenter = localMin.map((value, i) => (value + localMax[i]) / 2);
+						const center: [number, number, number] = [m[0] * localCenter[0] + m[4] * localCenter[1] + m[8] * localCenter[2] + m[12], m[1] * localCenter[0] + m[5] * localCenter[1] + m[9] * localCenter[2] + m[13], m[2] * localCenter[0] + m[6] * localCenter[1] + m[10] * localCenter[2] + m[14]];
+						result.push({ center, half, axes });
+					}
+
+					if (node.children) {
+						for (const child of node.children) {
+							collect(child, worldM);
+						}
+					}
+				}
+
+				const identity = new Matrix4();
+				for (const node of asset.rootnode?.children ?? []) {
+					collect(node, identity);
 				}
 				colliders = result.map((collider) => ({ ...collider, center: [collider.center[0], collider.center[1] - floor - height / 2, collider.center[2]] }));
 			})

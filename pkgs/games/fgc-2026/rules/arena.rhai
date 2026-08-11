@@ -51,8 +51,10 @@ fn arena_config() {
             linear_damping: 0.02,
             angular_damping: 0.08,
             rolling_resistance_mps2: 0.40,
-            // Predict roughly one diameter ahead without the full cost of CCD.
-            soft_ccd_prediction_m: 0.12,
+            // Contacts begin only at the authored shape boundary.  Keep
+            // predictive collision expansion disabled so objects do not
+            // interact while visibly separated.
+            soft_ccd_prediction_m: 0.0,
             inertia_factor: 0.40,
             drag_coefficient: 0.47,
             air_density_kg_m3: 1.225,
@@ -61,8 +63,8 @@ fn arena_config() {
             // not let each foam contact absorb the whole forward stream.
             ball_friction: 0.18,
             restitution_curve: #{
-                low_speed: 0.48,
-                high_speed: 0.32,
+                low_speed: 0.65,
+                high_speed: 0.45,
                 transition_speed_mps: 1.50,
                 exponent: 0.65
             }
@@ -117,12 +119,12 @@ fn arena_config() {
             intake_radius_m: 0.045,
             intake_forward_offset_m: 0.38,
             intake_center_height_m: 0.075,
-            intake_surface_speed_mps: 3.0,
-            intake_friction: 0.90,
+            intake_surface_speed_mps: -0.005,
+            intake_friction: 1.60,
             intake_normal_force_n: 8.0,
             intake_restitution_curve: #{
-                low_speed: 0.22,
-                high_speed: 0.10,
+                low_speed: 0.08,
+                high_speed: 0.03,
                 transition_speed_mps: 1.50,
                 exponent: 0.70
             },

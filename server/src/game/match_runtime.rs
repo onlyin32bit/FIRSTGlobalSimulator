@@ -216,8 +216,8 @@ impl MatchRuntime {
                     .gravity_scale(arena.gravity_scale)
                     .linear_damping(arena.ball.linear_damping.max(0.0))
                     .angular_damping(arena.ball.angular_damping.max(0.0))
-                    // Soft CCD predicts contacts without expensive shape casts
-                    // and prevents 100 mm balls crossing each other at speed.
+                    // Explicitly keep Rapier's predictive contact expansion
+                    // disabled: collision response starts at real contact.
                     .soft_ccd_prediction(arena.ball.soft_ccd_prediction_m.max(0.0))
                     .ccd_enabled(false)
                     .build(),

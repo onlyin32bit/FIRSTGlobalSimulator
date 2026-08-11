@@ -1133,7 +1133,7 @@ mod protocol_tests {
             score: ScoreState::default(),
             practice_running: false,
         };
-        let encoded = encode_state(&state, ProcessMetrics::default());
+        let encoded = encode_state(&state, ProcessMetrics::default(), true);
         assert_eq!(&encoded[..4], b"FGS1");
         assert_eq!(u16::from_le_bytes(encoded[4..6].try_into().unwrap()), 1);
         assert_eq!(u16::from_le_bytes(encoded[6..8].try_into().unwrap()), 4);
