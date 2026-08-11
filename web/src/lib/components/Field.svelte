@@ -11,7 +11,8 @@
 		Object3D,
 		Quaternion,
 		Vector3,
-		Raycaster
+		Raycaster,
+		type Intersection
 	} from 'three';
 	import { onMount } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
@@ -117,6 +118,13 @@
 	let initialBlueQuat = new Quaternion();
 	const localXAxis = new Vector3(1, 0, 0);
 	const tmpQuat = new Quaternion();
+	const interactionRaycaster = new Raycaster();
+	const interactionDirection = new Vector3();
+	const interactionForward = new Vector3();
+	const interactionRight = new Vector3();
+	const interactionUp = new Vector3(0, 1, 0);
+	const interactionTextPosition = new Vector3();
+	const handleIntersections: Intersection<Object3D>[] = [];
 	let currentRedAngleOffset = 0;
 	let currentBlueAngleOffset = 0;
 	const HANDLE_LIFT_RAD = -8.3 * (Math.PI / 180);
@@ -460,19 +468,17 @@
 
 		if (cam) {
 			const rayOrigin = cam.position;
-			const rayDirection = new Vector3();
-			cam.getWorldDirection(rayDirection).normalize();
-
-			const raycaster = new Raycaster();
-			raycaster.set(rayOrigin, rayDirection);
+			cam.getWorldDirection(interactionDirection).normalize();
+			interactionRaycaster.set(rayOrigin, interactionDirection);
 
 			let closestDist = 15.0;
 
 			const checkHandle = (handleMesh: Object3D | null) => {
 				if (!handleMesh) return false;
-				const intersects = raycaster.intersectObject(handleMesh, true);
+				handleIntersections.length = 0;
+				interactionRaycaster.intersectObject(handleMesh, true, handleIntersections);
 				let hit = false;
-				for (const intersect of intersects) {
+				for (const intersect of handleIntersections) {
 					// Ignore any object that is an aura or inside HandleAuraWrapper
 					let isAura = false;
 					intersect.object.traverseAncestors((ancestor) => {
@@ -533,16 +539,14 @@
 		}
 
 		if (targetedHandleMesh && cam) {
-			const forward = new Vector3();
-			cam.getWorldDirection(forward);
-			const right = new Vector3().crossVectors(forward, new Vector3(0, 1, 0)).normalize();
-			const up = new Vector3(0, 1, 0);
+			cam.getWorldDirection(interactionForward);
+			interactionRight.crossVectors(interactionForward, interactionUp).normalize();
 
-			const textPos = new Vector3()
+			const textPos = interactionTextPosition
 				.copy(cam.position)
-				.addScaledVector(forward, 0.8)
-				.addScaledVector(right, 0.15)
-				.addScaledVector(up, -0.05);
+				.addScaledVector(interactionForward, 0.8)
+				.addScaledVector(interactionRight, 0.15)
+				.addScaledVector(interactionUp, -0.05);
 
 			crosshairTextPos = [textPos.x, textPos.y, textPos.z];
 		} else {

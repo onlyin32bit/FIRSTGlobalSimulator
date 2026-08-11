@@ -278,4 +278,78 @@ app.post('/:id/ticket', async (c) => {
   })
 })
 
+/**
+ * Open-arena join: issues a ticket for the always-on "arena" match without
+ * requiring a lobby slot. The arena match row is upserted in IN_PROGRESS
+ * state so that every authenticated user can join at any time, up to the
+ * server's active-user cap. Alliance is assigned deterministically by hashing
+ * the user ID so the same user always lands on the same side while keeping
+ * the teams roughly balanced.
+ */
+app.post('/arena/open-join', async (c) => {
+  const session = await requireUser(c)
+  if (!session) return jsonError(c, 401, 'AUTH_FAILED', 'Sign in is required.')
+  if (!c.env.JWT_SECRET) return jsonError(c, 503, 'INTERNAL_ERROR', 'Match tickets are not configured.')
+
+  const ARENA_ID = 'arena'
+  const ARENA_MAX_PLAYERS = 20
+  const db = drizzle(c.env.DB, { schema })
+
+  // Ensure the arena match row exists and is IN_PROGRESS.
+  // We do a read-then-write to avoid D1's limited conflict resolution with
+  // nullable columns (onConflictDoUpdate chokes on null params in D1).
+  // hostId uses the first joiner's real user ID to satisfy the FK constraint.
+  const existing = await db.query.matches.findFirst({ where: eq(schema.matches.id, ARENA_ID) })
+  if (!existing) {
+    await db.insert(schema.matches).values({
+      id: ARENA_ID,
+      hostId: session.user.id,
+      gamePackId: 'fgc-2026',
+      status: 'IN_PROGRESS',
+      maxPlayers: ARENA_MAX_PLAYERS,
+      updatedAt: new Date(),
+      createdAt: new Date()
+    })
+  } else if (existing.status !== 'IN_PROGRESS') {
+    await db.update(schema.matches)
+      .set({ status: 'IN_PROGRESS', updatedAt: new Date() })
+      .where(eq(schema.matches.id, ARENA_ID))
+  }
+
+
+  const server = await chooseGameServer(c, ARENA_ID)
+  if (!server || server.disabledAt || !server.lastHeartbeatAt || Date.now() - server.lastHeartbeatAt.getTime() >= 30_000) {
+    return jsonError(c, 503, 'GAME_SERVER_UNAVAILABLE', 'No healthy game server is available right now.')
+  }
+
+  // Deterministic but balanced alliance assignment via user-id hash.
+  const hashBytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(session.user.id))
+  const firstByte = new Uint8Array(hashBytes)[0] ?? 0
+  const alliance = firstByte % 2 === 0 ? 'red' : 'blue'
+
+  // Fetch latest robot for the user (optional – arena allows no robot)
+  const userRobots = await db.query.robots.findMany({
+    where: (robots, { eq }) => eq(robots.userId, session.user.id)
+  })
+  const latestRobot = userRobots[userRobots.length - 1] ?? null
+
+  const ticket = await issueTicket(c, {
+    userId: session.user.id,
+    teamName: session.user.team || alliance,
+    displayName: session.user.name || 'Arena player',
+    matchId: ARENA_ID,
+    robotData: latestRobot?.buildData || JSON.stringify({ kind: 'arena-bot' }),
+    slotId: `${alliance}-driver-1`,
+    role: 'driver',
+    alliance
+  })
+  if (!ticket) return jsonError(c, 503, 'INTERNAL_ERROR', 'Match tickets are not configured.')
+
+  return jsonSuccess(c, {
+    ticket,
+    ws_url: gameServerUrl(server.origin, ARENA_ID, ticket),
+    alliance
+  })
+})
+
 export default app

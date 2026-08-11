@@ -21,7 +21,6 @@
 
 	useTask(() => {
 		const mesh = meshRef;
-		const snapshot = frame;
 		if (!mesh) return;
 
 		if (!initialized) {
@@ -36,8 +35,8 @@
 			initialized = true;
 		}
 		const matrices = mesh.instanceMatrix.array as Float32Array;
-		const count = Math.min(snapshot.positions.length / 3, MAX_INSTANCES);
-		const scale = snapshot.radius / BASE_RADIUS;
+		const count = Math.min(frame.positions.length / 3, MAX_INSTANCES);
+		const scale = frame.radius / BASE_RADIUS;
 
 		for (let index = 0; index < count; index += 1) {
 			const positionOffset = index * 3;
@@ -57,9 +56,9 @@
 			matrices[offset + 9] = 0;
 			matrices[offset + 10] = scale;
 			matrices[offset + 11] = 0;
-			matrices[offset + 12] = snapshot.positions[positionOffset];
-			matrices[offset + 13] = snapshot.positions[positionOffset + 1];
-			matrices[offset + 14] = snapshot.positions[positionOffset + 2];
+			matrices[offset + 12] = frame.positions[positionOffset];
+			matrices[offset + 13] = frame.positions[positionOffset + 1];
+			matrices[offset + 14] = frame.positions[positionOffset + 2];
 			matrices[offset + 15] = 1;
 		}
 

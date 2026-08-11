@@ -238,8 +238,8 @@ export class APIClient {
 		return this.request<{ user: ApiUser }>('/api/user/me');
 	}
 
-	updateProfile(input: { name: string }) {
-		return this.request<{ message: string }>('/api/user/profile', {
+	updateProfile(input: { name: string; team: string; email: string }) {
+		return this.request<{ user: ApiUser }>('/api/user/profile', {
 			method: 'PATCH',
 			body: JSON.stringify(input)
 		});
@@ -266,6 +266,13 @@ export class APIClient {
 	createMatchTicket(matchId: string) {
 		return this.request<{ ticket: string; ws_url: string }>(
 			`/api/matches/${encodeURIComponent(matchId)}/ticket`,
+			{ method: 'POST' }
+		);
+	}
+
+	joinArena() {
+		return this.request<{ ticket: string; ws_url: string; alliance: 'red' | 'blue' }>(
+			'/api/matches/arena/open-join',
 			{ method: 'POST' }
 		);
 	}
@@ -337,6 +344,21 @@ export class APIClient {
 				objects: Array<Record<string, unknown>>;
 				phases: Array<Record<string, unknown>>;
 				scripts: Record<string, string>;
+				lobby?: {
+					topDown: {
+						asset: string;
+						worldBounds: { min: [number, number]; max: [number, number] };
+						horizontalDirection: 'inverted' | 'normal';
+						verticalAxis: 'z';
+						verticalDirection: 'inverted' | 'normal';
+					};
+					stations: Array<{
+						slotId: LobbySlotId;
+						label: string;
+						semanticAnchor: string;
+						area: { widthM?: number; heightM?: number; semanticBounds?: string };
+					}>;
+				};
 			};
 			scripts: Array<{
 				path: string;
@@ -353,6 +375,16 @@ export class APIClient {
 					axes: [[number, number, number], [number, number, number], [number, number, number]];
 				}>;
 				anchors: Record<string, [number, number, number]>;
+				semanticAreas: Record<
+					string,
+					{ id: string; min: [number, number, number]; max: [number, number, number] }
+				>;
+				scoringTargets: Array<{
+					id: string;
+					min: [number, number, number];
+					max: [number, number, number];
+					enabled: boolean;
+				}>;
 				triggers: Array<{
 					id: string;
 					min: [number, number, number];
@@ -364,9 +396,12 @@ export class APIClient {
 	}
 
 	getGamePackAssets(id: 'fgc-2026') {
-		return this.request<{ visual: string; physics: string; semantics: string; ui?: { scoreboard: string } }>(
-			`/api/game-packs/${encodeURIComponent(id)}/assets`
-		);
+		return this.request<{
+			visual: string;
+			physics: string;
+			semantics: string;
+			ui?: { scoreboard: string; lobbyField: string };
+		}>(`/api/game-packs/${encodeURIComponent(id)}/assets`);
 	}
 
 	getAdminOverview() {
@@ -538,19 +573,35 @@ export class APIClient {
 	}
 
 	getGameServer(id: string) {
-		return this.request<{ server: GameServer; instances: GameServerInstance[]; matches: GameServerRuntimeMatch[]; commands: GameServerCommand[] }>(
-			`/api/admin/game-servers/${encodeURIComponent(id)}`
+		return this.request<{
+			server: GameServer;
+			instances: GameServerInstance[];
+			matches: GameServerRuntimeMatch[];
+			commands: GameServerCommand[];
+		}>(`/api/admin/game-servers/${encodeURIComponent(id)}`);
+	}
+
+	commandGameServer(
+		id: string,
+		input: {
+			type: 'kick_player' | 'stop_match' | 'clear_match' | 'cleanup_idle' | 'reset_host';
+			matchId?: string;
+			userId?: string;
+		}
+	) {
+		return this.request<{ command: GameServerCommand }>(
+			`/api/admin/game-servers/${encodeURIComponent(id)}/commands`,
+			{
+				method: 'POST',
+				body: JSON.stringify(input)
+			}
 		);
 	}
 
-	commandGameServer(id: string, input: { type: 'kick_player' | 'stop_match' | 'clear_match' | 'cleanup_idle' | 'reset_host'; matchId?: string; userId?: string }) {
-		return this.request<{ command: GameServerCommand }>(`/api/admin/game-servers/${encodeURIComponent(id)}/commands`, {
-			method: 'POST', body: JSON.stringify(input)
-		});
-	}
-
 	deleteGameServer(id: string) {
-		return this.request<{ deleted: true }>(`/api/admin/game-servers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+		return this.request<{ deleted: true }>(`/api/admin/game-servers/${encodeURIComponent(id)}`, {
+			method: 'DELETE'
+		});
 	}
 }
 

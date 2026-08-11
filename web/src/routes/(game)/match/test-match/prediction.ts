@@ -42,8 +42,7 @@ export type DriveParams = {
 
 type V3 = [number, number, number];
 
-const clamp = (value: number, min: number, max: number) =>
-	Math.min(max, Math.max(min, value));
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const dot3 = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
@@ -58,6 +57,16 @@ const cross3 = (a: V3, b: V3): V3 => [
 ];
 
 const GRAVITY = 9.81;
+const CONTROL_DEADBAND = 0.08;
+const TURN_BRAKE_MULTIPLIER = 2.5;
+const TURN_STOP_EPSILON_RADPS = 0.04;
+
+const applyControlDeadband = (value: number) => {
+	const clamped = clamp(value, -1, 1);
+	const magnitude = Math.abs(clamped);
+	if (magnitude <= CONTROL_DEADBAND) return 0;
+	return Math.sign(clamped) * ((magnitude - CONTROL_DEADBAND) / (1 - CONTROL_DEADBAND));
+};
 
 /**
  * Projected planar half-extents of the rotated chassis, mirroring the
@@ -142,12 +151,7 @@ const projectFieldColliders = (p: RobotPose, params: DriveParams) => {
 		if (robotMaxY <= collider.min[1] || robotMinY >= collider.max[1]) continue;
 
 		if (collider.halfExtents.some((extent) => extent > 1.0e-6)) {
-			const contact = robotFieldObbContact(
-				[p.x, p.y, p.z],
-				p.yaw,
-				[halfX, halfY, halfZ],
-				collider
-			);
+			const contact = robotFieldObbContact([p.x, p.y, p.z], p.yaw, [halfX, halfY, halfZ], collider);
 			if (!contact) continue;
 			p.x += contact.normal[0] * contact.penetration;
 			p.y += contact.normal[1] * contact.penetration;
@@ -231,6 +235,8 @@ export class DrivePredictor {
 		} = this.params;
 		const p = this.pose;
 		const stepDt = clamp(dt, 0, 0.05);
+		const drive = applyControlDeadband(input.drive);
+		const turn = applyControlDeadband(input.turn);
 
 		// Robot is constrained to yaw only; forward/right follow the same
 		// quaternion expansion the server derives from Rapier's rotation.
@@ -244,8 +250,8 @@ export class DrivePredictor {
 
 		// Arcade input → differential wheel power, peak-normalised so hard
 		// steering scrubs forward drive exactly like the real drivetrain.
-		let leftPower = input.drive + input.turn;
-		let rightPower = input.drive - input.turn;
+		let leftPower = drive + turn;
+		let rightPower = drive - turn;
 		const peakPower = Math.max(Math.abs(leftPower), Math.abs(rightPower), 1);
 		leftPower /= peakPower;
 		rightPower /= peakPower;
@@ -281,12 +287,22 @@ export class DrivePredictor {
 			-maxTurnRateRadps,
 			maxTurnRateRadps
 		);
+		const turnAcceleration =
+			Math.abs(turn) <= Number.EPSILON
+				? maxAngularAccelerationRadps2 * TURN_BRAKE_MULTIPLIER
+				: maxAngularAccelerationRadps2;
 		const turnDelta = clamp(
 			targetTurnRate - p.angularVelocityY,
-			-maxAngularAccelerationRadps2 * stepDt,
-			maxAngularAccelerationRadps2 * stepDt
+			-turnAcceleration * stepDt,
+			turnAcceleration * stepDt
 		);
 		p.angularVelocityY += turnDelta;
+		if (
+			Math.abs(turn) <= Number.EPSILON &&
+			Math.abs(p.angularVelocityY) < TURN_STOP_EPSILON_RADPS
+		) {
+			p.angularVelocityY = 0;
+		}
 
 		p.x += p.vx * stepDt;
 		p.z += p.vz * stepDt;

@@ -186,9 +186,7 @@ impl RuntimeBackend {
     ) {
         match self {
             Self::Rapier(runtime) => runtime.set_player_input(id, x, z, sequence),
-            Self::Sphere(runtime) => {
-                runtime.set_player_input(id, x, z, intake, outtake, sequence)
-            }
+            Self::Sphere(runtime) => runtime.set_player_input(id, x, z, intake, outtake, sequence),
         }
     }
 
@@ -205,18 +203,15 @@ impl RuntimeBackend {
         }
     }
 
-    fn set_player_mech(&mut self, id: &str, mech: MechSpec) {
+    fn set_scoring_enabled(&mut self, enabled: bool) {
         if let Self::Sphere(runtime) = self {
-            runtime.set_player_mech(id, mech);
+            runtime.set_scoring_enabled(enabled);
         }
     }
 
-    /// Remove a game piece from play after a scoring trigger. The ball is
-    /// deactivated so it can never be scored twice.
-    fn contain_ball(&mut self, entity_id: &str) -> bool {
-        match self {
-            Self::Rapier(_) => false,
-            Self::Sphere(runtime) => runtime.contain_ball(entity_id),
+    fn set_player_mech(&mut self, id: &str, mech: MechSpec) {
+        if let Self::Sphere(runtime) = self {
+            runtime.set_player_mech(id, mech);
         }
     }
 
@@ -595,8 +590,11 @@ impl MatchRegistry {
                         .and_then(|state| state.as_ref().cloned());
                     if let Some(state) = state {
                         let include_physics = publish_count % 10 == 1;
-                        let _ =
-                            publisher_tx.send(Bytes::from(encode_state(&state, process_metrics, include_physics)));
+                        let _ = publisher_tx.send(Bytes::from(encode_state(
+                            &state,
+                            process_metrics,
+                            include_physics,
+                        )));
                     }
                 }
             })
@@ -688,6 +686,7 @@ impl MatchRegistry {
                     let match_running = live_phase_entered && clock_now < match_ends;
                     let physics_started = Instant::now();
                     if match_running || practice_continue {
+                        runtime.set_scoring_enabled(match_running);
                         runtime.step(&pack.arena, 1.0 / 60.0);
                     }
                     for event in runtime.drain_semantic_events() {
@@ -701,11 +700,6 @@ impl MatchRegistry {
                                 // points, so tweaking scoring.rhai rebalances a
                                 // match without a rebuild.
                                 runtime.apply_score(&outcome.team, &outcome.category, outcome.points as i32);
-                                // SU containment and EXT extinguishing remove the
-                                // piece from the field entirely (never re-scored).
-                                if outcome.category == "SU" || outcome.category == "EXT" {
-                                    runtime.contain_ball(&event.entity_id);
-                                }
                             }
                         }
                         recent_semantic_events.push_back(label);
@@ -895,68 +889,68 @@ fn encode_state(state: &MatchStateSync, process: ProcessMetrics, include_physics
     });
     if include_physics {
         section(&mut output, PHYSICS, |bytes| {
-        put_string(bytes, &state.physics.ball_material);
-        put_string(bytes, &state.physics.floor_material);
-        for value in [
-            state.physics.ball_diameter_m,
-            state.physics.ball_diameter_tolerance_m,
-            state.physics.ball_mass_kg,
-            state.physics.ball_friction,
-            state.physics.ball_restitution,
-            state.physics.ball_rolling_resistance_mps2,
-            state.physics.floor_friction,
-            state.physics.robot_mass_kg,
-            state.physics.robot_width_m,
-            state.physics.robot_height_m,
-            state.physics.robot_length_m,
-            state.physics.robot_max_speed_mps,
-        ] {
-            put_f32(bytes, value);
-        }
-        put_u8(bytes, u8::from(state.physics.intake_enabled));
-        put_u8(bytes, u8::from(state.physics.ramp_enabled));
-        for value in [
-            state.physics.ball_inertia_factor,
-            state.physics.ball_drag_coefficient,
-            state.physics.air_density_kg_m3,
-            state.physics.ball_ball_friction,
-            state.physics.floor_static_friction,
-            state.physics.floor_dynamic_friction,
-            state.physics.floor_rolling_resistance_mps2,
-            state.physics.intake_width_m,
-            state.physics.intake_radius_m,
-            state.physics.intake_forward_offset_m,
-            state.physics.intake_center_height_m,
-            state.physics.intake_surface_speed_mps,
-            state.physics.ramp_center_x,
-            state.physics.ramp_start_z,
-            state.physics.ramp_width_m,
-            state.physics.ramp_length_m,
-            state.physics.ramp_angle_deg,
-            state.physics.solver_position_iterations,
-            state.physics.solver_velocity_iterations,
-            state.physics.max_depenetration_speed_mps,
-            state.physics.max_ball_speed_mps,
-            state.physics.max_ball_angular_speed_radps,
-            state.physics.max_drive_force_n,
-            state.physics.max_drive_power_w,
-            state.physics.max_brake_force_n,
-        ] {
-            put_f32(bytes, value);
-        }
-        for value in [
-            state.physics.storage_capacity,
-            state.physics.intake_rate_bps,
-            state.physics.outtake_rate_bps,
-            state.physics.outtake_velocity_mps,
-            state.physics.outtake_angle_deg,
-            state.physics.flywheel_width_m,
-            state.physics.outtake_forward_offset_m,
-            state.physics.outtake_height_m,
-        ] {
-            put_f32(bytes, value);
-        }
-    });
+            put_string(bytes, &state.physics.ball_material);
+            put_string(bytes, &state.physics.floor_material);
+            for value in [
+                state.physics.ball_diameter_m,
+                state.physics.ball_diameter_tolerance_m,
+                state.physics.ball_mass_kg,
+                state.physics.ball_friction,
+                state.physics.ball_restitution,
+                state.physics.ball_rolling_resistance_mps2,
+                state.physics.floor_friction,
+                state.physics.robot_mass_kg,
+                state.physics.robot_width_m,
+                state.physics.robot_height_m,
+                state.physics.robot_length_m,
+                state.physics.robot_max_speed_mps,
+            ] {
+                put_f32(bytes, value);
+            }
+            put_u8(bytes, u8::from(state.physics.intake_enabled));
+            put_u8(bytes, u8::from(state.physics.ramp_enabled));
+            for value in [
+                state.physics.ball_inertia_factor,
+                state.physics.ball_drag_coefficient,
+                state.physics.air_density_kg_m3,
+                state.physics.ball_ball_friction,
+                state.physics.floor_static_friction,
+                state.physics.floor_dynamic_friction,
+                state.physics.floor_rolling_resistance_mps2,
+                state.physics.intake_width_m,
+                state.physics.intake_radius_m,
+                state.physics.intake_forward_offset_m,
+                state.physics.intake_center_height_m,
+                state.physics.intake_surface_speed_mps,
+                state.physics.ramp_center_x,
+                state.physics.ramp_start_z,
+                state.physics.ramp_width_m,
+                state.physics.ramp_length_m,
+                state.physics.ramp_angle_deg,
+                state.physics.solver_position_iterations,
+                state.physics.solver_velocity_iterations,
+                state.physics.max_depenetration_speed_mps,
+                state.physics.max_ball_speed_mps,
+                state.physics.max_ball_angular_speed_radps,
+                state.physics.max_drive_force_n,
+                state.physics.max_drive_power_w,
+                state.physics.max_brake_force_n,
+            ] {
+                put_f32(bytes, value);
+            }
+            for value in [
+                state.physics.storage_capacity,
+                state.physics.intake_rate_bps,
+                state.physics.outtake_rate_bps,
+                state.physics.outtake_velocity_mps,
+                state.physics.outtake_angle_deg,
+                state.physics.flywheel_width_m,
+                state.physics.outtake_forward_offset_m,
+                state.physics.outtake_height_m,
+            ] {
+                put_f32(bytes, value);
+            }
+        });
     }
     section(&mut output, SCORE, |bytes| {
         put_i32(bytes, state.score.blue_score);

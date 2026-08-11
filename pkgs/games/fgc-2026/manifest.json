@@ -8,6 +8,25 @@
     "physics": "field.physics.json",
     "semantics": "field.semantics.json"
   },
+  "lobby": {
+    "topDown": {
+      "asset": "topdown.webp",
+      "worldBounds": { "min": [-5.486422, -3.65135], "max": [5.432527, 3.934742] },
+      "horizontalDirection": "normal",
+      "verticalAxis": "z",
+      "verticalDirection": "normal"
+    },
+    "stations": [
+      { "slotId": "red-driver-1", "label": "Red driver 1", "semanticAnchor": "redSpawn1", "area": { "widthM": 0.72, "heightM": 0.76 } },
+      { "slotId": "red-driver-2", "label": "Red driver 2", "semanticAnchor": "redSpawn2", "area": { "widthM": 0.72, "heightM": 0.76 } },
+      { "slotId": "red-driver-3", "label": "Red driver 3", "semanticAnchor": "redSpawn3", "area": { "widthM": 0.72, "heightM": 0.76 } },
+      { "slotId": "red-human", "label": "Red human player", "semanticAnchor": "redHPzone", "area": { "semanticBounds": "redHPzone" } },
+      { "slotId": "blue-driver-1", "label": "Blue driver 1", "semanticAnchor": "blueSpawn1", "area": { "widthM": 0.72, "heightM": 0.76 } },
+      { "slotId": "blue-driver-2", "label": "Blue driver 2", "semanticAnchor": "blueSpawn2", "area": { "widthM": 0.72, "heightM": 0.76 } },
+      { "slotId": "blue-driver-3", "label": "Blue driver 3", "semanticAnchor": "blueSpawn3", "area": { "widthM": 0.72, "heightM": 0.76 } },
+      { "slotId": "blue-human", "label": "Blue human player", "semanticAnchor": "blueHPzone", "area": { "semanticBounds": "blueHPzone" } }
+    ]
+  },
   "objects": [
     {
       "id": "wildfire",
@@ -29,6 +48,15 @@
     "penalties": "rules/penalties.rhai",
     "robot_rules": "rules/robot.rhai",
     "arena": "rules/arena.rhai"
+  },
+  "scoring": {
+    "targets": [
+      { "id": "red-suppression-unit", "semanticId": "redSUscore", "kind": "suppression-unit", "alliance": "red", "points": 1, "requiresRobotOuttake": true, "area": { "min": [-1.465079, 0.65, -2.9914392], "max": [-0.503383, 1.92352463, -2.7963208] }, "retention": { "min": [-1.465079, 0.65, -3.14], "max": [-0.503383, 1.92352463, -2.74], "openTop": true } },
+      { "id": "blue-suppression-unit", "semanticId": "blueSUscore", "kind": "suppression-unit", "alliance": "blue", "points": 1, "requiresRobotOuttake": true, "area": { "min": [0.496984, 0.65, -2.9852828], "max": [1.458572, 1.9116209, -2.7940172] }, "retention": { "min": [0.496984, 0.65, -3.14], "max": [1.458572, 1.9116209, -2.74], "openTop": true } },
+      { "id": "red-fire-shield", "semanticId": "redFSscore", "kind": "fire-shield", "alliance": "red", "points": 0, "enabled": false },
+      { "id": "blue-fire-shield", "semanticId": "blueFSscore", "kind": "fire-shield", "alliance": "blue", "points": 0, "enabled": false },
+      { "id": "extinguisher", "semanticId": "EXTscore", "kind": "extinguisher", "points": 1, "enabled": false }
+    ]
   },
   "directories": {
     "rules": "rules",

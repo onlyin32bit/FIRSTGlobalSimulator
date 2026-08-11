@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { drizzle } from 'drizzle-orm/d1'
-import { eq } from 'drizzle-orm'
+import { and, eq, ne } from 'drizzle-orm'
 import * as schema from '../db/schema'
 import { profileSchema, isResponse, parseJson } from '../lib/validation'
 import { requireUser } from '../middleware'
@@ -38,11 +38,17 @@ app.patch('/profile', async (c) => {
   if (isResponse(body)) return body
 
   const db = drizzle(c.env.DB, { schema })
-  await db.update(schema.user)
-    .set({ name: body.name, updatedAt: new Date() })
-    .where(eq(schema.user.id, session.user.id))
+  const emailOwner = await db.query.user.findFirst({
+    where: and(eq(schema.user.email, body.email), ne(schema.user.id, session.user.id))
+  })
+  if (emailOwner) return jsonError(c, 409, 'VALIDATION_ERROR', 'That email is already in use.')
 
-  return jsonSuccess(c, { message: 'Profile updated.' })
+  const updated = await db.update(schema.user)
+    .set({ name: body.name, team: body.team, email: body.email, emailVerified: false, updatedAt: new Date() })
+    .where(eq(schema.user.id, session.user.id))
+    .returning()
+
+  return jsonSuccess(c, { user: userDto(updated[0]) })
 })
 
 export default app

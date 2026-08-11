@@ -11,11 +11,13 @@
 	let {
 		player,
 		direction = 'north',
-		distance = 8
+		distance = 8,
+		fov = 50
 	}: {
 		player?: TrackedPlayer;
 		direction?: 'north' | 'south';
 		distance?: number;
+		fov?: number;
 	} = $props();
 
 	let cameraRef: PerspectiveCamera | undefined = $state();
@@ -40,7 +42,7 @@
 	bind:ref={cameraRef}
 	makeDefault
 	position={[0, clampedDistance, direction === 'north' ? clampedDistance : -clampedDistance]}
-	fov={48}
+	{fov}
 	near={0.05}
 	far={100}
 />

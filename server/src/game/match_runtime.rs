@@ -5,6 +5,20 @@ use std::collections::HashMap;
 use super::pack_loader::ArenaConfig;
 use super::match_registry::ObjectPositionsSync;
 
+const CONTROL_DEADBAND: f32 = 0.08;
+const TURN_BRAKE_MULTIPLIER: f32 = 2.5;
+const TURN_STOP_EPSILON_RADPS: f32 = 0.04;
+
+fn apply_control_deadband(value: f32) -> f32 {
+    let clamped = value.clamp(-1.0, 1.0);
+    let magnitude = clamped.abs();
+    if magnitude <= CONTROL_DEADBAND {
+        0.0
+    } else {
+        clamped.signum() * (magnitude - CONTROL_DEADBAND) / (1.0 - CONTROL_DEADBAND)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchPhase {
     PreMatch,
@@ -352,8 +366,8 @@ impl MatchRuntime {
             && sequence >= player.sequence
         {
             player.sequence = sequence;
-            player.move_x = move_x.clamp(-1.0, 1.0);
-            player.move_z = move_z.clamp(-1.0, 1.0);
+            player.move_x = apply_control_deadband(move_x);
+            player.move_z = apply_control_deadband(move_z);
         }
     }
 
@@ -411,12 +425,23 @@ impl MatchRuntime {
                     / robot.track_width_m.max(0.1))
                 .clamp(-robot.max_turn_rate_radps, robot.max_turn_rate_radps);
                 let current_turn_rate = body.angvel().y;
-                let turn_delta = (target_turn_rate - current_turn_rate).clamp(
-                    -robot.max_angular_acceleration_radps2 * dt,
-                    robot.max_angular_acceleration_radps2 * dt,
-                );
+                let turn_acceleration = if player.move_x.abs() <= f32::EPSILON {
+                    robot.max_angular_acceleration_radps2 * TURN_BRAKE_MULTIPLIER
+                } else {
+                    robot.max_angular_acceleration_radps2
+                };
+                let mut next_turn_rate = current_turn_rate
+                    + (target_turn_rate - current_turn_rate).clamp(
+                        -turn_acceleration * dt,
+                        turn_acceleration * dt,
+                    );
+                if player.move_x.abs() <= f32::EPSILON
+                    && next_turn_rate.abs() < TURN_STOP_EPSILON_RADPS
+                {
+                    next_turn_rate = 0.0;
+                }
                 body.set_angvel(
-                    vector![0.0, current_turn_rate + turn_delta, 0.0].into(),
+                    vector![0.0, next_turn_rate, 0.0].into(),
                     true,
                 );
             }

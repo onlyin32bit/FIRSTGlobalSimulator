@@ -26,6 +26,7 @@
 	let {
 		colliders,
 		triggers,
+		scoringTargets = [],
 		boundary,
 		activeTriggerIds = new Set<string>(),
 		physicsUrl = null,
@@ -33,6 +34,7 @@
 	}: {
 		colliders: NamedBounds[];
 		triggers: NamedBounds[];
+		scoringTargets?: Array<NamedBounds & { enabled: boolean }>;
 		boundary: Bounds;
 		activeTriggerIds?: Set<string>;
 		physicsUrl?: string | null;
@@ -55,7 +57,9 @@
 				const response = await fetch(physicsUrl);
 				if (!response.ok) throw new Error(`physics asset returned ${response.status}`);
 				const data = (await response.json()) as {
-					rootnode?: { children?: Array<{ name?: string; meshes?: number[]; transformation?: number[] }> };
+					rootnode?: {
+						children?: Array<{ name?: string; meshes?: number[]; transformation?: number[] }>;
+					};
 					meshes?: Array<{ vertices?: number[]; faces?: number[][] }>;
 				};
 				if (disposed) return;
@@ -137,7 +141,11 @@
 
 	function size(bounds: Bounds): [number, number, number] {
 		if (bounds.halfExtents) {
-			return bounds.halfExtents.map((extent) => Math.max(0.01, extent * 2)) as [number, number, number];
+			return bounds.halfExtents.map((extent) => Math.max(0.01, extent * 2)) as [
+				number,
+				number,
+				number
+			];
 		}
 		return [
 			Math.max(0.01, bounds.max[0] - bounds.min[0]),
@@ -189,7 +197,11 @@
 		<T.MeshBasicMaterial color="#22c55e" wireframe transparent opacity={0.9} depthWrite={false} />
 	</T.Mesh>
 	{#if showColliderAabbs}
-		<T.InstancedMesh bind:ref={instancedMeshRef} args={[undefined, undefined, colliders.length]} renderOrder={20}>
+		<T.InstancedMesh
+			bind:ref={instancedMeshRef}
+			args={[undefined, undefined, colliders.length]}
+			renderOrder={20}
+		>
 			<T.BoxGeometry args={[1, 1, 1]} />
 			<T.MeshBasicMaterial
 				color="#facc15"
@@ -209,6 +221,18 @@
 				wireframe
 				transparent
 				opacity={active ? 1 : 0.48}
+				depthWrite={false}
+			/>
+		</T.Mesh>
+	{/each}
+	{#each scoringTargets as target (target.id)}
+		<T.Mesh position={center(target)} scale={size(target)} renderOrder={22}>
+			<T.BoxGeometry args={[1, 1, 1]} />
+			<T.MeshBasicMaterial
+				color={target.enabled ? '#f472b6' : '#64748b'}
+				wireframe
+				transparent
+				opacity={target.enabled ? 0.82 : 0.28}
 				depthWrite={false}
 			/>
 		</T.Mesh>

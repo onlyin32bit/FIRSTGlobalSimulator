@@ -19,7 +19,9 @@ export const inviteRequestSchema = z.object({
 }).strict()
 
 export const profileSchema = z.object({
-  name: trimmedText(2, 100)
+  name: trimmedText(2, 100),
+  team: trimmedText(2, 100),
+  email: z.string().trim().toLowerCase().email().max(254)
 }).strict()
 
 export const robotSchema = z.object({

@@ -17,6 +17,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { ApiError, api, type ApiUser } from '$lib/api';
 	import { adminNav } from './admin-nav';
+	import SettingsDialog from '$lib/features/settings/SettingsDialog.svelte';
 
 	let { children } = $props();
 	let currentUser = $state<ApiUser | null>(null);
@@ -37,7 +38,7 @@
 				errorMessage = 'Your account does not have administrator access.';
 		} catch (error) {
 			if (error instanceof ApiError && error.status === 401) {
-				await goto(resolve('/auth?next=' + encodeURIComponent(page.url.pathname) as Pathname));
+				await goto(resolve(('/auth?next=' + encodeURIComponent(page.url.pathname)) as Pathname));
 				return;
 			}
 			errorMessage =
@@ -107,6 +108,7 @@
 					<p class="truncate text-xs font-medium">{currentUser?.name}</p>
 					<p class="truncate text-[11px] text-muted-foreground">Administrator</p>
 				</div>
+				<SettingsDialog user={currentUser} onUserChanged={(user) => (currentUser = user)} />
 				<button
 					class="text-muted-foreground hover:text-foreground"
 					type="button"

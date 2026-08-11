@@ -7,6 +7,7 @@
 	import { BasicShadowMap, WebGLRenderer } from 'three';
 	import { Button } from '$lib/components/ui/button';
 	import { ApiError, api } from '$lib/api';
+	import { loadPreferences, type UserPreferences } from '$lib/features/settings/preferences.svelte';
 	import RobotFollowCamera from './RobotFollowCamera.svelte';
 	import RobotModel from './RobotModel.svelte';
 	import PackField from './PackField.svelte';
@@ -143,6 +144,12 @@
 			axes?: [[number, number, number], [number, number, number], [number, number, number]];
 		}>;
 		triggers: Array<{ id: string; min: [number, number, number]; max: [number, number, number] }>;
+		scoringTargets: Array<{
+			id: string;
+			min: [number, number, number];
+			max: [number, number, number];
+			enabled: boolean;
+		}>;
 		boundary: { min: [number, number, number]; max: [number, number, number] };
 	};
 	let fieldDefinition = $state<FieldDefinition | null>(null);
@@ -171,6 +178,9 @@
 	let cameraMode = $state<'overview' | 'robot'>('overview');
 	let cameraDirection = $state<'north' | 'south'>('north');
 	let robotCameraDistance = $state(8);
+	let cameraFov = $state(50);
+	let userPreferences = $state<UserPreferences | null>(null);
+	let rightStickWasPressed = false;
 	let clientFps = $state(0);
 	let averageFrameMs = $state(0);
 	let p95FrameMs = $state(0);
@@ -200,7 +210,7 @@
 	let blueScore = $state(0);
 	let redScore = $state(0);
 	let globalScore = $state(0);
-	let receivedMatchState = false;
+	let receivedMatchState = $state(false);
 	let startCueVisible = $state(false);
 	let startCueTimer: number | undefined;
 	let integrateMs = $state(0);
@@ -381,12 +391,6 @@
 		window.setTimeout(() => (copyState = 'COPY'), 1500);
 	}
 
-	function applyDeadzone(value: number, deadzone = 0.12) {
-		const magnitude = Math.abs(value);
-		if (magnitude <= deadzone) return 0;
-		return Math.sign(value) * ((magnitude - deadzone) / (1 - deadzone));
-	}
-
 	function activeGamepad() {
 		if (!navigator.getGamepads) return null;
 		return Array.from(navigator.getGamepads()).find((gamepad) => gamepad?.connected) ?? null;
@@ -412,21 +416,41 @@
 		let gamepadIntake = 0;
 		let gamepadOuttake = 0;
 		if (gamepad) {
-			gamepadDrive = applyDeadzone(-(gamepad.axes[1] ?? 0));
-			gamepadTurn = applyDeadzone(gamepad.axes[2] ?? gamepad.axes[0] ?? 0);
-			// Left side (LB/LT) intakes, right side (RB/RT) outtakes. Either
-			// trigger or bumper on its side drives the corresponding mechanism.
-			const left = Math.max(gamepad.buttons[4]?.value ?? 0, gamepad.buttons[6]?.value ?? 0);
-			const right = Math.max(gamepad.buttons[5]?.value ?? 0, gamepad.buttons[7]?.value ?? 0);
-			gamepadIntake = left;
-			gamepadOuttake = right;
+			const controls = userPreferences?.controls;
+			const driveMode = controls?.driveMode ?? 'arcade-left';
+			// The predictor and game host apply the same scaled deadband. Keep the
+			// raw axis here so every client gets identical neutral behavior.
+			const leftY = gamepad.axes[1] ?? 0;
+			const rightX = gamepad.axes[2] ?? 0;
+			const rightY = gamepad.axes[3] ?? 0;
+			if (driveMode === 'arcade-right') {
+				gamepadDrive = -rightY;
+				gamepadTurn = rightX;
+			} else if (driveMode === 'split-arcade') {
+				gamepadDrive = -leftY;
+				gamepadTurn = rightX;
+			} else if (driveMode === 'tank') {
+				gamepadDrive = -(leftY + rightY) / 2;
+				gamepadTurn = (rightY - leftY) / 2;
+			} else {
+				gamepadDrive = -leftY;
+				gamepadTurn = gamepad.axes[0] ?? 0;
+			}
+			gamepadIntake = gamepad.buttons[controls?.intakeButton ?? 4]?.value ?? 0;
+			gamepadOuttake = gamepad.buttons[controls?.outtakeButton ?? 5]?.value ?? 0;
+
+			const rightStickPressed = gamepad.buttons[11]?.pressed ?? false;
+			if (rightStickPressed && !rightStickWasPressed && cameraMode === 'robot') {
+				cameraDirection = cameraDirection === 'north' ? 'south' : 'north';
+			}
+			rightStickWasPressed = rightStickPressed;
 			// The A button commands neutral input, allowing the server-side
 			// brake limit to act.
 			if (gamepad.buttons[0]?.pressed) {
 				gamepadDrive = 0;
 				gamepadTurn = 0;
 			}
-		}
+		} else rightStickWasPressed = false;
 
 		const keyboardActive = keyboardDrive !== 0 || keyboardTurn !== 0;
 		return {
@@ -853,7 +877,7 @@
 			}
 			try {
 				const [ticket, currentUser, assets, metadata] = await Promise.all([
-					api.createMatchTicket(activeMatchId),
+					activeMatchId === 'arena' ? api.joinArena() : api.createMatchTicket(activeMatchId),
 					api.getCurrentUser(),
 					api.getGamePackAssets('fgc-2026'),
 					api.getGamePackMetadata('fgc-2026')
@@ -861,6 +885,9 @@
 				if (disposed) return;
 
 				localId = currentUser.user.id;
+				const savedPreferences = loadPreferences(localId);
+				userPreferences = savedPreferences;
+				cameraFov = savedPreferences.graphics.cameraFov;
 				fieldAssets = assets;
 				fieldDefinition = metadata.fieldDefinition;
 				const nextSocket = new WebSocket(ticket.ws_url);
@@ -996,7 +1023,7 @@
 	});
 </script>
 
-<div class="relative h-[calc(100vh-3.5rem)] overflow-hidden bg-slate-950">
+<main id="main-content" class="relative h-[calc(100vh-3.5rem)] overflow-hidden bg-slate-950">
 	<ScoreboardGraphic
 		matchId={activeMatchId}
 		matchClock={Math.min(matchClock, matchDurationSeconds)}
@@ -1057,8 +1084,8 @@
 		</p>
 		<p class="mt-1 text-xs text-white/60">Pack: {packVersion}</p>
 		<p class="mt-2 text-xs text-white/60">
-			W/S drive · A/D turn · Space intake · E flywheel outtake · Gamepad: LS-Y + RS-X, left side
-			intakes · right side outtakes
+			W/S drive · A/D turn · Space intake · E flywheel outtake · Gamepad follows your Settings
+			mapping
 		</p>
 		<p class="mt-1 max-w-72 truncate text-xs text-white/50" title={gamepadName}>
 			<span class={gamepadConnected ? 'text-cyan-300' : 'text-white/35'}>●</span>
@@ -1066,7 +1093,7 @@
 		</p>
 		<p class="mt-1 text-xs text-white/40">A: brake</p>
 		<p class="mt-1 text-xs text-white/40">
-			C: camera · F: flip north/south · B: field bounds · Ctrl+F3: diagnostics
+			C: camera · F or R3: flip north/south · B: field + score volumes · Ctrl+F3: diagnostics
 		</p>
 		{#if error}<p class="mt-2 text-fuchsia-300">✖ {error}</p>{/if}
 	</div>
@@ -1117,7 +1144,7 @@
 				: 'border-sky-300/30 bg-black/40 text-sky-100 hover:bg-sky-300/10'}
 			onclick={() => (fieldDebugOpen = !fieldDebugOpen)}
 		>
-			{fieldDebugOpen ? 'Hide field bounds' : 'Field bounds'}
+			{fieldDebugOpen ? 'Hide field volumes' : 'Field volumes'}
 		</Button>
 		<Button
 			variant="outline"
@@ -1460,9 +1487,10 @@
 				player={trackedPlayer}
 				direction={cameraDirection}
 				distance={robotCameraDistance}
+				fov={cameraFov}
 			/>
 		{:else}
-			<T.PerspectiveCamera makeDefault position={[11, 12, 14]} fov={50}>
+			<T.PerspectiveCamera makeDefault position={[11, 12, 14]} fov={cameraFov}>
 				<OrbitControls target={[0, 0, 0]} enablePan={false} minDistance={8} maxDistance={28} />
 			</T.PerspectiveCamera>
 		{/if}
@@ -1487,13 +1515,14 @@
 			<FieldBoundsDebug
 				colliders={fieldDefinition.colliders}
 				triggers={fieldDefinition.triggers}
+				scoringTargets={fieldDefinition.scoringTargets}
 				boundary={fieldDefinition.boundary}
 				physicsUrl={fieldAssets?.physics}
 				showColliderAabbs
 				{activeTriggerIds}
 			/>
 		{/if}
-		<ScriptedObjects frame={renderedObjectFrame} potatoMode={potatoMode} />
+		<ScriptedObjects frame={renderedObjectFrame} {potatoMode} />
 		<T.Group>
 			{#each renderedPlayers as player (player.id)}
 				<RobotModel
@@ -1506,4 +1535,4 @@
 			{/each}
 		</T.Group>
 	</Canvas>
-</div>
+</main>

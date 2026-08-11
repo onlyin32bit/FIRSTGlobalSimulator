@@ -52,11 +52,11 @@
 		Array.from({ length: Math.min(player.storedBalls, 6) }, (_, i) => {
 			const row = Math.floor(i / 2);
 			const col = i % 2;
-			return [
-				(col - 0.5) * 0.18,
-				physics.robotHeightM * 0.1 + row * 0.1,
-				(row * 0.08) - 0.05
-			] as [number, number, number];
+			return [(col - 0.5) * 0.18, physics.robotHeightM * 0.1 + row * 0.1, row * 0.08 - 0.05] as [
+				number,
+				number,
+				number
+			];
 		})
 	);
 </script>
@@ -101,11 +101,7 @@
 				-physics.intakeForwardOffsetM
 			]}
 		>
-			<T.Mesh
-				castShadow
-				receiveShadow
-				rotation={[intakeRotation, 0, Math.PI * 0.5]}
-			>
+			<T.Mesh castShadow receiveShadow rotation={[intakeRotation, 0, Math.PI * 0.5]}>
 				<T.CylinderGeometry args={intakeArgs} />
 				<T.MeshStandardMaterial
 					color={isIntaking ? '#06b6d4' : '#22d3ee'}
@@ -125,11 +121,7 @@
 				-physics.outtakeForwardOffsetM
 			]}
 		>
-			<T.Mesh
-				castShadow
-				receiveShadow
-				rotation={[flywheelRotation, 0, Math.PI * 0.5]}
-			>
+			<T.Mesh castShadow receiveShadow rotation={[flywheelRotation, 0, Math.PI * 0.5]}>
 				<T.CylinderGeometry args={[0.06, 0.06, physics.flywheelWidthM, 12]} />
 				<T.MeshStandardMaterial
 					color={isOuttaking ? '#84cc16' : '#a3e635'}
@@ -164,31 +156,20 @@
 	{#each visibleBalls as pos, i (i)}
 		<T.Mesh position={pos}>
 			<T.SphereGeometry args={[0.045, 12, 12]} />
-			<T.MeshStandardMaterial color="#f97316" roughness={0.3} emissive="#ea580c" emissiveIntensity={0.2} />
+			<T.MeshStandardMaterial
+				color="#f97316"
+				roughness={0.3}
+				emissive="#ea580c"
+				emissiveIntensity={0.2}
+			/>
 		</T.Mesh>
 	{/each}
 
-	<HTML position={[0, physics.robotHeightM * 0.5 + 0.55, 0]} center>
+	<HTML position={[0, physics.robotHeightM * 0.5 + 0.45, 0]} center>
 		<div
-			class="pointer-events-none flex flex-col items-center gap-0.5 rounded-lg border border-white/10 bg-black/80 px-2.5 py-1 backdrop-blur-md shadow-lg font-sans text-xs"
+			class="pointer-events-none font-sans text-xs font-semibold text-white drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]"
 		>
-			<div class="flex items-center gap-1.5 font-bold tracking-wide text-white">
-				<span class="size-2 rounded-full" style="background-color: {player.color}"></span>
-				<span>{player.name}</span>
-				{#if local}
-					<span class="rounded bg-primary/20 px-1 py-0.2 text-[10px] font-mono text-primary font-semibold">YOU</span>
-				{/if}
-			</div>
-			<div class="flex items-center gap-1.5 text-[10px] text-gray-300 font-mono">
-				<span>🏀 {player.storedBalls}/{player.capacity}</span>
-				{#if isIntaking}
-					<span class="text-cyan-400 font-semibold animate-pulse">[INTAKE]</span>
-				{/if}
-				{#if isOuttaking}
-					<span class="text-lime-400 font-semibold animate-pulse">[SHOOT]</span>
-				{/if}
-			</div>
+			{player.name}
 		</div>
 	</HTML>
 </T.Group>
-

@@ -10,7 +10,10 @@ fn arena_config() {
             position_iterations: 3.0,
             velocity_iterations: 4.0,
             contact_compliance: 0.0000002,
-            max_depenetration_speed_mps: 2.5,
+            // This is a split-impulse positional cap, not a velocity kick.
+            // A 500-ball pile needs enough correction to restore one full
+            // ball diameter in a frame instead of compressing into a goal.
+            max_depenetration_speed_mps: 5.0,
             max_ball_speed_mps: 12.0,
             max_ball_angular_speed_radps: 240.0,
             sleep_linear_threshold_mps: 0.035,

@@ -20,6 +20,52 @@ pub struct GamePackManifest {
     pub phases: Vec<serde_json::Value>,
     #[serde(default)]
     pub scripts: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub scoring: ScoringConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ScoringConfig {
+    #[serde(default)]
+    pub targets: Vec<ScoringTargetConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ScoringTargetConfig {
+    pub id: String,
+    pub semantic_id: String,
+    pub kind: String,
+    pub alliance: Option<String>,
+    pub points: i32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub requires_robot_outtake: bool,
+    pub area: Option<ScoringAreaConfig>,
+    /// Open-top physical pocket that retains scored balls. This is separate
+    /// from the scoring area because a sensor can be much thinner than the
+    /// hopper behind it.
+    pub retention: Option<ScoringRetentionConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScoringAreaConfig {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ScoringRetentionConfig {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+    #[serde(default = "default_true")]
+    pub open_top: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -56,6 +102,7 @@ pub struct FieldDefinition {
     pub colliders: Vec<FieldCollider>,
     pub anchors: BTreeMap<String, [f32; 3]>,
     pub triggers: Vec<FieldTrigger>,
+    pub scoring_targets: Vec<FieldScoringTarget>,
     /// Top surface of the authored playable floor/riser in metres.
     pub floor_height_m: f32,
     /// The playable X/Z envelope, derived from the riser's inner footprint.
@@ -106,6 +153,20 @@ pub struct FieldTrigger {
     pub id: String,
     pub min: [f32; 3],
     pub max: [f32; 3],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldScoringTarget {
+    pub id: String,
+    pub kind: String,
+    pub alliance: Option<String>,
+    pub points: i32,
+    pub enabled: bool,
+    pub requires_robot_outtake: bool,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+    pub retention: Option<ScoringRetentionConfig>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -345,8 +406,11 @@ impl PackLoader {
         let arena = arena.ok_or_else(|| {
             GameError::ScriptCompilationError("The pack must define an arena.rhai script".into())
         })?;
-        let field_definition =
-            load_field_definition(&snapshot.field_physics, &snapshot.field_semantics)?;
+        let field_definition = load_field_definition(
+            &snapshot.field_physics,
+            &snapshot.field_semantics,
+            &snapshot.manifest.scoring,
+        )?;
         Ok(GamePackMetadata {
             manifest: snapshot.manifest,
             scripts,
@@ -410,6 +474,7 @@ impl PackLoader {
 fn load_field_definition(
     physics: &serde_json::Value,
     semantics: &serde_json::Value,
+    scoring: &ScoringConfig,
 ) -> Result<FieldDefinition, GameError> {
     let mut definition = FieldDefinition::default();
     // Keep planar collision surfaces too. Most authored field collision
@@ -462,12 +527,14 @@ fn load_field_definition(
             }
         })
         .collect();
+    let mut semantic_bounds = BTreeMap::new();
     for child in assimp_children(&semantics) {
         let Some(id) = child.get("name").and_then(serde_json::Value::as_str) else {
             continue;
         };
         if child.get("meshes").is_some() {
             if let Some((_, min, max)) = assimp_bound(child, &semantics, false) {
+                semantic_bounds.insert(id.to_string(), (min, max));
                 definition.triggers.push(FieldTrigger {
                     id: id.into(),
                     min,
@@ -478,6 +545,32 @@ fn load_field_definition(
             definition.anchors.insert(id.into(), position);
         }
     }
+    definition.scoring_targets = scoring
+        .targets
+        .iter()
+        .filter_map(|target| {
+            let Some((min, max)) = semantic_bounds.get(&target.semantic_id) else {
+                warn!(target = %target.id, semantic = %target.semantic_id, "Scoring target has no semantic bounds");
+                return None;
+            };
+            let (min, max) = target
+                .area
+                .as_ref()
+                .map(|area| (area.min, area.max))
+                .unwrap_or((*min, *max));
+            Some(FieldScoringTarget {
+                id: target.id.clone(),
+                kind: target.kind.clone(),
+                alliance: target.alliance.clone(),
+                points: target.points,
+                enabled: target.enabled,
+                requires_robot_outtake: target.requires_robot_outtake,
+                min,
+                max,
+                retention: target.retention.clone(),
+            })
+        })
+        .collect();
     info!(
         colliders = definition.colliders.len(),
         anchors = definition.anchors.len(),
@@ -733,6 +826,17 @@ mod tests {
                 .iter()
                 .any(|trigger| trigger.id == "EXTscore")
         );
+        let red_su = metadata
+            .field_definition
+            .scoring_targets
+            .iter()
+            .find(|target| target.id == "red-suppression-unit")
+            .expect("red SU scoring area must be loaded");
+        assert!(
+            red_su.min[1] < 1.0,
+            "hopper area extends below the sensor plane"
+        );
+        assert!(red_su.max[1] > 1.9);
         assert!((metadata.field_definition.boundary.min[0] + 3.5).abs() < 0.01);
         assert!((metadata.field_definition.boundary.max[0] - 3.5).abs() < 0.01);
         assert!(metadata.field_definition.floor_height_m > 0.65);
