@@ -12,6 +12,7 @@
 	const session = useSession();
 	let currentUser = $state<ApiUser | null>(null);
 	let isSigningOut = $state(false);
+	const immersiveMatchScene = $derived(/^\/match\/[^/]+$/.test(page.url.pathname));
 
 	onMount(async () => {
 		try {
@@ -57,12 +58,14 @@
 			class="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-50 focus:rounded-md focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground"
 			href="#main-content">Skip to content</a
 		>
-		<AppHeader
-			user={currentUser}
-			{isSigningOut}
-			onSignOut={handleSignOut}
-			onUserChanged={(user) => (currentUser = user)}
-		/>
+		{#if !immersiveMatchScene}
+			<AppHeader
+				user={currentUser}
+				{isSigningOut}
+				onSignOut={handleSignOut}
+				onUserChanged={(user) => (currentUser = user)}
+			/>
+		{/if}
 		{@render children()}
 	</div>
 {/if}

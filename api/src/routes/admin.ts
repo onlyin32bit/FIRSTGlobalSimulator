@@ -351,6 +351,11 @@ app.post('/matches/:id/cancel', async (c) => {
   if (match.status === 'CANCELLED') return jsonError(c, 409, 'VALIDATION_ERROR', 'Match is already cancelled.')
   const now = new Date()
   const updated = await db.update(schema.matches).set({ status: 'CANCELLED', cancelledAt: now, cancelReason: body.reason, updatedAt: now }).where(eq(schema.matches.id, matchId)).returning()
+  if (match.gameServerId) await db.insert(schema.gameServerCommands).values({
+    id: crypto.randomUUID(), serverId: match.gameServerId, type: 'stop_match', payload: JSON.stringify({ matchId }),
+    status: 'pending', error: null, createdAt: now, deliveredAt: null, completedAt: null
+  })
+  try { await c.env.MATCH_LOBBY.getByName(matchId).complete(body.reason, true) } catch { /* matches without a lobby, such as arena, have no DO state */ }
   await writeAdminAudit(c.env, { actorUserId: session.user.id, action: 'match.cancelled', targetType: 'match', targetId: matchId, metadata: { reason: body.reason } })
   return jsonSuccess(c, { match: updated[0] })
 })

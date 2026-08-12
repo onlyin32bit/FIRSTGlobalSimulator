@@ -434,6 +434,15 @@ impl SphereRuntime {
         }
     }
 
+    pub fn disable_player_controls(&mut self) {
+        for player in self.players.values_mut() {
+            player.move_x = 0.0;
+            player.move_z = 0.0;
+            player.intake_power = 0.0;
+            player.outtake_power = 0.0;
+        }
+    }
+
     pub fn set_player_mech(&mut self, user_id: &str, mech: MechSpec) {
         if let Some(player) = self.players.get_mut(user_id) {
             player.mech = mech;

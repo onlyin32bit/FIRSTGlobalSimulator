@@ -4,7 +4,7 @@ import type { BatchItem } from 'drizzle-orm/batch'
 import { drizzle } from 'drizzle-orm/d1'
 import { verify } from 'hono/jwt'
 import * as schema from '../db/schema'
-import { gameServerHeartbeatSchema, gameServerTicketVerifySchema, isResponse, parseJson } from '../lib/validation'
+import { gameServerHeartbeatSchema, gameServerMatchCompletionSchema, gameServerMatchEventsSchema, gameServerTicketVerifySchema, isResponse, parseJson } from '../lib/validation'
 import { jsonError, jsonSuccess } from '../responses'
 import type { Bindings } from '../types'
 
@@ -21,6 +21,18 @@ export async function authenticatedGameServer(c: GameServerContext) {
   if (!key) return null
   const db = drizzle(c.env.DB, { schema })
   return db.query.gameServers.findFirst({ where: eq(schema.gameServers.keyHash, await hashKey(key)) })
+}
+
+function lobbyFor(c: GameServerContext, matchId: string) {
+  return c.env.MATCH_LOBBY.getByName(matchId)
+}
+
+async function assignedMatch(c: GameServerContext, matchId: string) {
+  const server = await authenticatedGameServer(c)
+  if (!server || server.disabledAt) return { server: null, match: null }
+  const match = await drizzle(c.env.DB, { schema }).query.matches.findFirst({ where: eq(schema.matches.id, matchId) })
+  if (!match || match.gameServerId !== server.id) return { server, match: null }
+  return { server, match }
 }
 
 /**
@@ -181,6 +193,7 @@ app.post('/tickets/verify', async (c) => {
     const teamName = typeof payload.team_name === 'string' ? payload.team_name : null
     const displayName = typeof payload.display_name === 'string' ? payload.display_name : null
     const robotData = typeof payload.robot_data === 'string' ? payload.robot_data : null
+    const robotId = typeof payload.robot_id === 'string' ? payload.robot_id : undefined
     const exp = typeof payload.exp === 'number' ? payload.exp : null
     if (!sub || !matchId || !teamName || !displayName || !robotData || !exp) {
       return jsonError(c, 401, 'AUTH_FAILED', 'The ticket claims are incomplete.')
@@ -190,6 +203,18 @@ app.post('/tickets/verify', async (c) => {
     if (!match || match.status !== 'IN_PROGRESS' || match.gameServerId !== server.id) {
       return jsonError(c, 403, 'AUTH_FAILED', 'This ticket is not assigned to this game server.')
     }
+    if (matchId !== 'arena') {
+      const bootstrap = await lobbyFor(c, matchId).getBootstrap()
+      const participant = bootstrap.participants.find((entry) => entry.userId === sub)
+      const role = typeof payload.role === 'string' ? payload.role : undefined
+      const slotId = typeof payload.slot_id === 'string' ? payload.slot_id : undefined
+      const alliance = typeof payload.alliance === 'string' ? payload.alliance : undefined
+      const isHost = role === 'host' && sub === bootstrap.hostId
+      const isObserver = role === 'spectator' || role === 'reviewer' || isHost
+      if (!isObserver && (!participant || participant.role !== role || participant.slotId !== slotId || participant.alliance !== alliance || participant.robotId !== (robotId ?? null))) {
+        return jsonError(c, 403, 'AUTH_FAILED', 'This ticket no longer matches the locked roster.')
+      }
+    }
     return jsonSuccess(c, {
       claims: {
         sub,
@@ -197,6 +222,7 @@ app.post('/tickets/verify', async (c) => {
         team_name: teamName,
         display_name: displayName,
         robot_data: robotData,
+        robot_id: robotId,
         slot_id: typeof payload.slot_id === 'string' ? payload.slot_id : undefined,
         role: typeof payload.role === 'string' ? payload.role : undefined,
         alliance: typeof payload.alliance === 'string' ? payload.alliance : undefined,
@@ -206,6 +232,66 @@ app.post('/tickets/verify', async (c) => {
   } catch {
     return jsonError(c, 401, 'AUTH_FAILED', 'The ticket is invalid or expired.')
   }
+})
+
+app.get('/matches/:id/bootstrap', async (c) => {
+  const { server, match } = await assignedMatch(c, c.req.param('id'))
+  if (!server) return jsonError(c, 401, 'AUTH_FAILED', 'The game server key is invalid or disabled.')
+  if (!match || match.status !== 'IN_PROGRESS') return jsonError(c, 403, 'AUTH_FAILED', 'This match is not assigned to this game server.')
+  if (match.id === 'arena') {
+    return jsonSuccess(c, { bootstrap: {
+      matchId: match.id, hostId: match.hostId, assignedServerId: server.id, gamePackId: match.gamePackId,
+      gamePackVersion: match.packVersion || '1.0.0', matchSeed: match.matchSeed || 0,
+      startsAt: match.startsAt?.getTime() || Date.now(), durationSeconds: 86_400, maxPlayers: match.maxPlayers,
+      scenarioId: 'open-arena', visibility: 'public', openArena: true, participants: []
+    } })
+  }
+  try {
+    const bootstrap = await lobbyFor(c, match.id).getBootstrap()
+    if (bootstrap.assignedServerId !== server.id) return jsonError(c, 403, 'AUTH_FAILED', 'This server does not own the locked roster.')
+    const db = drizzle(c.env.DB, { schema })
+    const participants = await Promise.all(bootstrap.participants.map(async (entry) => {
+      const robot = entry.robotId ? await db.query.robots.findFirst({ where: eq(schema.robots.id, entry.robotId) }) : null
+      return { ...entry, robotRevision: robot?.updatedAt.getTime() ?? null, robotData: robot?.buildData ?? null }
+    }))
+    return jsonSuccess(c, { bootstrap: { ...bootstrap, participants } })
+  } catch {
+    return jsonError(c, 409, 'LOBBY_INVALID_STATE', 'The match has no locked bootstrap.')
+  }
+})
+
+app.post('/matches/:id/events', async (c) => {
+  const body = await parseJson(c, gameServerMatchEventsSchema)
+  if (isResponse(body)) return body
+  const { server, match } = await assignedMatch(c, c.req.param('id'))
+  if (!server) return jsonError(c, 401, 'AUTH_FAILED', 'The game server key is invalid or disabled.')
+  if (!match || match.status !== 'IN_PROGRESS' || body.events.some((event) => event.gamePackVersion !== match.packVersion)) return jsonError(c, 403, 'AUTH_FAILED', 'These events are not valid for the assigned match.')
+  const db = drizzle(c.env.DB, { schema })
+  await db.batch(body.events.map((event) => db.insert(schema.matchEvents).values({
+    id: `${match.id}:${event.eventId}`, matchId: match.id, eventId: event.eventId, tick: event.tick,
+    kind: event.kind, payloadJson: JSON.stringify(event.payload), gamePackVersion: event.gamePackVersion, createdAt: new Date()
+  }).onConflictDoNothing()) as [ReturnType<typeof db.insert>, ...ReturnType<typeof db.insert>[]])
+  return jsonSuccess(c, { accepted: body.events.length })
+})
+
+app.post('/matches/:id/complete', async (c) => {
+  const body = await parseJson(c, gameServerMatchCompletionSchema)
+  if (isResponse(body)) return body
+  const { server, match } = await assignedMatch(c, c.req.param('id'))
+  if (!server) return jsonError(c, 401, 'AUTH_FAILED', 'The game server key is invalid or disabled.')
+  if (!match || match.packVersion !== body.gamePackVersion) return jsonError(c, 403, 'AUTH_FAILED', 'This completion is not valid for the assigned match.')
+  const db = drizzle(c.env.DB, { schema })
+  const events = await db.select().from(schema.matchEvents).where(eq(schema.matchEvents.matchId, match.id))
+  const replayKey = `matches/${match.id}/events.json`
+  await c.env.OBJECT_STORAGE.put(replayKey, JSON.stringify({ match: { id: match.id, gamePackId: match.gamePackId, gamePackVersion: body.gamePackVersion, seed: match.matchSeed }, completion: body, events }), { httpMetadata: { contentType: 'application/json' } })
+  const cancelled = /cancel|reset|fatal/i.test(body.reason)
+  await db.update(schema.matches).set({
+    status: cancelled ? 'CANCELLED' : 'FINISHED', completedAt: new Date(), completionReason: body.reason,
+    resultJson: JSON.stringify(body.result), replayKey, updatedAt: new Date(),
+    cancelledAt: cancelled ? new Date() : match.cancelledAt, cancelReason: cancelled ? body.reason : match.cancelReason
+  }).where(eq(schema.matches.id, match.id))
+  if (match.id !== 'arena') await lobbyFor(c, match.id).complete(body.reason, cancelled)
+  return jsonSuccess(c, { accepted: true, replayKey })
 })
 
 export { hashKey }

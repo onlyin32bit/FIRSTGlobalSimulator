@@ -3,6 +3,7 @@ import type { MatchLobby } from './match-lobby'
 
 export type Bindings = AuthEnvironment & {
   MATCH_LOBBY: DurableObjectNamespace<MatchLobby>
+	OBJECT_STORAGE: R2Bucket
   JWT_SECRET?: string
   N8N_WEBHOOK_URL?: string
   /** API-owned, versioned game-pack files deployed with this Worker. */

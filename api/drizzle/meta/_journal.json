@@ -64,6 +64,13 @@
       "when": 1785979626353,
       "tag": "0008_game_server_control_plane",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786500000000,
+      "tag": "0009_match_authority",
+      "breakpoints": true
     }
   ]
 }

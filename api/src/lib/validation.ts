@@ -147,11 +147,11 @@ export const gameServerHeartbeatSchema = z.object({
 }).strict()
 
 export const gameServerCommandSchema = z.object({
-  type: z.enum(['kick_player', 'stop_match', 'clear_match', 'cleanup_idle', 'reset_host']),
+  type: z.enum(['bootstrap_match', 'kick_player', 'stop_match', 'clear_match', 'cleanup_idle', 'reset_host']),
   matchId: z.string().trim().min(1).max(255).optional(),
   userId: z.string().trim().min(1).max(255).optional()
 }).strict().superRefine((value, ctx) => {
-  if (['kick_player', 'stop_match', 'clear_match'].includes(value.type) && !value.matchId) {
+  if (['bootstrap_match', 'kick_player', 'stop_match', 'clear_match'].includes(value.type) && !value.matchId) {
     ctx.addIssue({ code: 'custom', message: 'matchId is required for this command.' })
   }
   if (value.type === 'kick_player' && !value.userId) {
@@ -161,6 +161,21 @@ export const gameServerCommandSchema = z.object({
 
 export const gameServerTicketVerifySchema = z.object({
   ticket: z.string().trim().min(1).max(16_384)
+}).strict()
+
+const durablePayload = z.record(z.string(), z.unknown()).refine((value) => JSON.stringify(value).length <= 16_000, 'Event payload must be 16 KB or smaller.')
+export const gameServerMatchEventSchema = z.object({
+  eventId: z.string().trim().min(1).max(160), tick: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  kind: z.string().trim().min(1).max(120), payload: durablePayload,
+  gamePackVersion: z.string().trim().min(1).max(100)
+}).strict()
+export const gameServerMatchEventsSchema = z.object({
+  events: z.array(gameServerMatchEventSchema).min(1).max(100)
+}).strict()
+export const gameServerMatchCompletionSchema = z.object({
+  completionId: z.string().trim().min(1).max(160), tick: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  reason: z.string().trim().min(1).max(500), gamePackVersion: z.string().trim().min(1).max(100),
+  result: durablePayload
 }).strict()
 
 export const updateInvitationSchema = z.object({

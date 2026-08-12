@@ -9,10 +9,17 @@ export type LobbySlotId = typeof LOBBY_SLOT_IDS[number]
 export type LobbyStatus = 'LOBBY' | 'STARTING' | 'IN_PROGRESS' | 'FINISHED' | 'CANCELLED'
 export type LobbyAlliance = 'red' | 'blue'
 export type LobbyRole = 'driver' | 'human-player'
+export type MatchVisibility = 'private' | 'unlisted' | 'public'
 
 export type LobbyOccupant = { userId: string; name: string; teamName: string | null; robotId: string | null; ready: boolean }
 export type LobbySlot = { id: LobbySlotId; alliance: LobbyAlliance; role: LobbyRole; label: string; occupant: LobbyOccupant | null }
-export type LobbyState = { matchId: string; hostId: string; status: LobbyStatus; slots: LobbySlot[]; error: string | null; updatedAt: number }
+export type BootstrapParticipant = { userId: string; name: string; teamName: string | null; role: LobbyRole; slotId: LobbySlotId; alliance: LobbyAlliance; robotId: string | null }
+export type MatchBootstrap = {
+  matchId: string; hostId: string; assignedServerId: string; gamePackId: string; gamePackVersion: string
+  matchSeed: number; startsAt: number; durationSeconds: number; maxPlayers: number
+  scenarioId: string; visibility: MatchVisibility; participants: BootstrapParticipant[]
+}
+export type LobbyState = { matchId: string; hostId: string; status: LobbyStatus; slots: LobbySlot[]; error: string | null; bootstrap?: MatchBootstrap; updatedAt: number }
 export type LobbyUser = Pick<LobbyOccupant, 'userId' | 'name' | 'teamName'>
 
 const slot = (id: LobbySlotId): LobbySlot => {
@@ -124,11 +131,56 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
     return state
   }
 
+  /** Locks the roster once. The Rust host receives this immutable contract. */
+  async lockBootstrap(input: Omit<MatchBootstrap, 'matchId' | 'hostId' | 'participants'>): Promise<MatchBootstrap> {
+    const state = this.requireLobby()
+    if (state.bootstrap) return state.bootstrap
+    if (state.status !== 'STARTING' && state.status !== 'IN_PROGRESS') throw new Error('Lobby is not ready to lock.')
+    const participants = state.slots.flatMap((slot) => slot.occupant ? [{
+      userId: slot.occupant.userId, name: slot.occupant.name, teamName: slot.occupant.teamName,
+      role: slot.role, slotId: slot.id, alliance: slot.alliance, robotId: slot.occupant.robotId
+    }] : [])
+    if (participants.length > input.maxPlayers) throw new Error('The roster exceeds the match player limit.')
+    state.bootstrap = { ...input, matchId: state.matchId, hostId: state.hostId, participants }
+    state.status = 'IN_PROGRESS'
+    state.error = null
+    this.write(state)
+    return state.bootstrap
+  }
+
+  async getBootstrap(): Promise<MatchBootstrap> {
+    const bootstrap = this.requireLobby().bootstrap
+    if (!bootstrap) throw new Error('This match has not been assigned to a game server.')
+    return bootstrap
+  }
+
+  async complete(reason: string, cancelled = false): Promise<LobbyState> {
+    const state = this.requireLobby()
+    state.status = cancelled ? 'CANCELLED' : 'FINISHED'
+    state.error = reason
+    this.write(state)
+    return state
+  }
+
   async forceStart(): Promise<LobbyState> {
     const state = this.requireLobby()
     if (state.status === 'IN_PROGRESS') return state
     if (state.status !== 'LOBBY') throw new Error('Lobby cannot be entered immediately in its current state.')
     state.status = 'IN_PROGRESS'
+    state.error = null
+    this.write(state)
+    return state
+  }
+
+  /** Admin-start gets a real locked test driver, never a synthetic ticket. */
+  async assignAdminDriver(user: LobbyUser): Promise<LobbyState> {
+    const state = this.requireLobby()
+    this.assertMutable(state)
+    const existing = state.slots.find((slot) => slot.occupant?.userId === user.userId)
+    if (existing) return state
+    const target = state.slots.find((slot) => slot.id === 'red-driver-1')
+    if (!target || target.occupant) throw new Error('The admin test station is unavailable.')
+    target.occupant = { ...user, robotId: null, ready: true }
     state.error = null
     this.write(state)
     return state

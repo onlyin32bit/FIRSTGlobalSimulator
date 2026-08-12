@@ -71,6 +71,24 @@ export const matches = sqliteTable('matches', {
   cancelledAt: integer('cancelledAt', { mode: 'timestamp' }),
   cancelReason: text('cancelReason'),
   gameServerId: text('gameServerId').references(() => gameServers.id),
+  matchSeed: integer('matchSeed'),
+  packVersion: text('packVersion'),
+  startsAt: integer('startsAt', { mode: 'timestamp' }),
+  completedAt: integer('completedAt', { mode: 'timestamp' }),
+  completionReason: text('completionReason'),
+  resultJson: text('resultJson'),
+  replayKey: text('replayKey'),
+  createdAt: integer('createdAt', { mode: 'timestamp' }).notNull(),
+});
+
+export const matchEvents = sqliteTable('match_events', {
+  id: text('id').primaryKey(),
+  matchId: text('matchId').notNull().references(() => matches.id),
+  eventId: text('eventId').notNull(),
+  tick: integer('tick').notNull(),
+  kind: text('kind').notNull(),
+  payloadJson: text('payloadJson').notNull(),
+  gamePackVersion: text('gamePackVersion').notNull(),
   createdAt: integer('createdAt', { mode: 'timestamp' }).notNull(),
 });
 

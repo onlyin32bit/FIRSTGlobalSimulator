@@ -4,7 +4,7 @@ import { drizzle } from 'drizzle-orm/d1'
 import { sign } from 'hono/jwt'
 import * as schema from '../db/schema'
 import { isResponse, lobbyReadySchema, lobbySlotSchema, matchSchema, parseJson } from '../lib/validation'
-import type { LobbySlotId, LobbyUser } from '../match-lobby'
+import type { LobbySlotId, LobbyUser, MatchBootstrap } from '../match-lobby'
 import { requireAdmin, requireUser } from '../middleware'
 import { jsonError, jsonSuccess } from '../responses'
 import type { Bindings } from '../types'
@@ -37,7 +37,7 @@ async function chooseGameServer(c: Parameters<typeof requireUser>[0], matchId: s
   return server
 }
 
-async function issueTicket(c: Parameters<typeof requireUser>[0], input: { userId: string; teamName: string; displayName: string; matchId: string; robotData: string; slotId?: string; role?: string; alliance?: string }) {
+async function issueTicket(c: Parameters<typeof requireUser>[0], input: { userId: string; teamName: string; displayName: string; matchId: string; robotData: string; robotId?: string; slotId?: string; role?: string; alliance?: string }) {
   if (!c.env.JWT_SECRET) return null
   return sign({
     sub: input.userId,
@@ -45,6 +45,7 @@ async function issueTicket(c: Parameters<typeof requireUser>[0], input: { userId
     team_name: input.teamName,
     display_name: input.displayName,
     robot_data: input.robotData,
+    robot_id: input.robotId,
     slot_id: input.slotId,
     role: input.role,
     alliance: input.alliance,
@@ -67,6 +68,45 @@ async function findMatch(c: Parameters<typeof requireUser>[0], matchId: string) 
 
 function lobbyFor(c: Parameters<typeof requireUser>[0], matchId: string) {
   return c.env.MATCH_LOBBY.getByName(matchId)
+}
+
+function matchSeed() {
+  const values = crypto.getRandomValues(new Uint32Array(2))
+  return (values[0] & 0x1fffff) * 0x1_0000_0000 + values[1]
+}
+
+async function gamePackVersion(c: Parameters<typeof requireUser>[0], gamePackId: string) {
+  const url = new URL(c.req.url)
+  url.pathname = `/${gamePackId}/manifest.json`
+  const response = await c.env.PACK_ASSETS.fetch(new Request(url))
+  if (!response.ok) throw new Error('The selected game pack is unavailable.')
+  const manifest = await response.json<{ version?: unknown }>()
+  if (typeof manifest.version !== 'string' || !manifest.version) throw new Error('The selected game pack has no version.')
+  return manifest.version
+}
+
+async function lockMatchBootstrap(c: Parameters<typeof requireUser>[0], match: typeof schema.matches.$inferSelect, serverId: string): Promise<MatchBootstrap> {
+  const startsAt = Date.now() + 5_000
+  const bootstrap = await lobbyFor(c, match.id).lockBootstrap({
+    assignedServerId: serverId,
+    gamePackId: match.gamePackId,
+    gamePackVersion: await gamePackVersion(c, match.gamePackId),
+    matchSeed: matchSeed(),
+    startsAt,
+    durationSeconds: 150,
+    maxPlayers: match.maxPlayers,
+    scenarioId: 'default',
+    visibility: 'private'
+  })
+  await drizzle(c.env.DB, { schema }).update(schema.matches).set({
+    status: 'IN_PROGRESS', matchSeed: bootstrap.matchSeed, packVersion: bootstrap.gamePackVersion,
+    startsAt: new Date(bootstrap.startsAt), updatedAt: new Date()
+  }).where(eq(schema.matches.id, match.id))
+  await drizzle(c.env.DB, { schema }).insert(schema.gameServerCommands).values({
+    id: crypto.randomUUID(), serverId, type: 'bootstrap_match', payload: JSON.stringify({ matchId: match.id }),
+    status: 'pending', createdAt: new Date(), deliveredAt: null, completedAt: null, error: null
+  })
+  return bootstrap
 }
 
 function lobbyError(c: Parameters<typeof requireUser>[0], error: unknown) {
@@ -192,8 +232,8 @@ app.post('/:id/lobby/start', async (c) => {
       await lobby.reopen('No healthy game server is available right now.')
       return jsonError(c, 503, 'GAME_SERVER_UNAVAILABLE', 'No healthy game server is available right now.')
     }
-    await drizzle(c.env.DB, { schema }).update(schema.matches).set({ status: 'IN_PROGRESS', updatedAt: new Date() }).where(eq(schema.matches.id, match.id))
-    return jsonSuccess(c, { lobby: await lobby.markStarted(), game_server_id: server.id })
+    const bootstrap = await lockMatchBootstrap(c, match, server.id)
+    return jsonSuccess(c, { lobby: await lobby.getState(), game_server_id: server.id, starts_at: bootstrap.startsAt })
   } catch (error) {
     return lobbyError(c, error)
   }
@@ -217,10 +257,12 @@ app.post('/:id/lobby/admin-start', async (c) => {
     return jsonError(c, 503, 'GAME_SERVER_UNAVAILABLE', 'No healthy game server is available right now.')
   }
 
-  await db.update(schema.matches).set({ status: 'IN_PROGRESS', updatedAt: new Date() }).where(eq(schema.matches.id, matchId))
   try {
-    const lobby = await lobbyFor(c, matchId).forceStart()
-    return jsonSuccess(c, { lobby, game_server_id: server.id })
+    const lobby = lobbyFor(c, matchId)
+    await lobby.assignAdminDriver(lobbyUser(session))
+    await lobby.forceStart()
+    const bootstrap = await lockMatchBootstrap(c, match, server.id)
+    return jsonSuccess(c, { lobby: await lobby.getState(), game_server_id: server.id, starts_at: bootstrap.startsAt })
   } catch (error) {
     return lobbyError(c, error)
   }
@@ -266,6 +308,7 @@ app.post('/:id/ticket', async (c) => {
     displayName: session.user.name || 'Simulator player',
     matchId,
     robotData: userRobot?.buildData || JSON.stringify({ kind: adminBypass ? 'admin-test-cube' : 'human-player' }),
+    robotId: userRobot?.id,
     slotId: station?.id || 'red-driver-1',
     role: station?.role || 'driver',
     alliance: station?.alliance || 'red'
@@ -339,6 +382,7 @@ app.post('/arena/open-join', async (c) => {
     displayName: session.user.name || 'Arena player',
     matchId: ARENA_ID,
     robotData: latestRobot?.buildData || JSON.stringify({ kind: 'arena-bot' }),
+    robotId: latestRobot?.id,
     slotId: `${alliance}-driver-1`,
     role: 'driver',
     alliance

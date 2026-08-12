@@ -371,6 +371,13 @@ impl MatchRuntime {
         }
     }
 
+    pub fn disable_player_controls(&mut self) {
+        for player in self.players.values_mut() {
+            player.move_x = 0.0;
+            player.move_z = 0.0;
+        }
+    }
+
     pub fn apply_player_drive(&mut self, arena: &ArenaConfig) {
         let dt = self.integration_parameters.dt.max(1.0 / 240.0);
         let robot = &arena.robot;

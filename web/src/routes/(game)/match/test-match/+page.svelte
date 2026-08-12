@@ -15,6 +15,7 @@
 	import ScriptedObjects from './ScriptedObjects.svelte';
 	import TelemetrySparkline from './TelemetrySparkline.svelte';
 	import ScoreboardGraphic from './ScoreboardGraphic.svelte';
+	import MatchOverview from './MatchOverview.svelte';
 	import {
 		decodeMatchSnapshot,
 		type MatchPhysics as PhysicsModel,
@@ -213,6 +214,9 @@
 	let receivedMatchState = $state(false);
 	let startCueVisible = $state(false);
 	let startCueTimer: number | undefined;
+	let matchOverviewVisible = $state(false);
+	let matchEndTimer: number | undefined;
+	let matchHadStarted = false;
 	let integrateMs = $state(0);
 	let broadPhaseMs = $state(0);
 	let solveMs = $state(0);
@@ -940,6 +944,17 @@
 								if (startCueTimer !== undefined) window.clearTimeout(startCueTimer);
 								startCueTimer = window.setTimeout(() => (startCueVisible = false), 900);
 							}
+							if (message.matchRunning) matchHadStarted = true;
+							if (
+								!message.matchRunning &&
+								matchRunning &&
+								matchHadStarted &&
+								!message.practiceRunning &&
+								!matchOverviewVisible
+							) {
+								if (matchEndTimer !== undefined) window.clearTimeout(matchEndTimer);
+								matchEndTimer = window.setTimeout(() => (matchOverviewVisible = true), 3_500);
+							}
 							matchClock = message.matchClock;
 							matchDurationSeconds = message.matchDurationSeconds;
 							preMatchRemainingSeconds = message.preMatchRemainingSeconds;
@@ -1011,6 +1026,7 @@
 			window.clearInterval(inputTimer);
 			window.clearInterval(pingTimer);
 			if (startCueTimer !== undefined) window.clearTimeout(startCueTimer);
+			if (matchEndTimer !== undefined) window.clearTimeout(matchEndTimer);
 			if (robotSpecsTimer !== undefined) window.clearTimeout(robotSpecsTimer);
 			window.removeEventListener('keydown', keydown);
 			window.removeEventListener('keyup', keyup);
@@ -1023,7 +1039,7 @@
 	});
 </script>
 
-<main id="main-content" class="relative h-[calc(100vh-3.5rem)] overflow-hidden bg-slate-950">
+<main id="main-content" class="relative h-dvh overflow-hidden bg-slate-950">
 	<ScoreboardGraphic
 		matchId={activeMatchId}
 		matchClock={Math.min(matchClock, matchDurationSeconds)}
@@ -1034,6 +1050,17 @@
 		{blueRoster}
 		templateUrl={fieldAssets?.ui?.scoreboard}
 	/>
+
+	{#if matchOverviewVisible}
+		<MatchOverview
+			matchId={activeMatchId}
+			{redScore}
+			{blueScore}
+			{globalScore}
+			{redRoster}
+			{blueRoster}
+		/>
+	{/if}
 
 	{#if !matchRunning && practiceRunning}
 		<div class="fixed bottom-40 left-1/2 z-20 -translate-x-1/2">
@@ -1481,7 +1508,7 @@
 	{/if}
 	<!-- Cap pixel density for the heavy imported field; this is the largest
 	     client-side GPU cost on high-DPI displays. -->
-	<Canvas {createRenderer} dpr={[0.65, 1]} renderMode="on-demand" shadows>
+	<Canvas {createRenderer} dpr={[0.65, 1]} renderMode="on-demand" shadows={BasicShadowMap}>
 		{#if cameraMode === 'robot'}
 			<RobotFollowCamera
 				player={trackedPlayer}

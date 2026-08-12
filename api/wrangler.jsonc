@@ -16,6 +16,12 @@
 			"migrations_dir": "drizzle"
 		}
 	],
+	"r2_buckets": [
+		{
+			"binding": "OBJECT_STORAGE",
+			"bucket_name": "fgsim-storage"
+		}
+	],
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
@@ -54,6 +60,12 @@
 					"database_name": "fgsim",
 					"database_id": "e693e904-7e8d-437b-a071-663c0aec36ec",
 					"migrations_dir": "drizzle"
+				}
+			],
+			"r2_buckets": [
+				{
+					"binding": "OBJECT_STORAGE",
+					"bucket_name": "fgsim-storage"
 				}
 			],
 			"compatibility_flags": [

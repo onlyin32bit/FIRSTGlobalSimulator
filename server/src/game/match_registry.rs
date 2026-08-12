@@ -2,7 +2,7 @@ use axum::body::Bytes;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::info;
 
@@ -14,6 +14,66 @@ use super::sphere_runtime::{MechSpec, SphereRuntime, StepMetrics};
 pub struct MatchRegistry {
     matches: RwLock<HashMap<String, MatchHandle>>,
     pack: Arc<GamePackMetadata>,
+    reports: Option<mpsc::UnboundedSender<MatchReport>>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapParticipant {
+    pub user_id: String,
+    pub role: String,
+    pub slot_id: String,
+    pub alliance: String,
+    pub robot_id: Option<String>,
+    pub robot_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchBootstrap {
+    pub match_id: String,
+    pub host_id: String,
+    pub assigned_server_id: String,
+    pub game_pack_id: String,
+    pub game_pack_version: String,
+    pub match_seed: u64,
+    pub starts_at: u64,
+    pub duration_seconds: u64,
+    pub max_players: usize,
+    pub scenario_id: String,
+    pub visibility: String,
+    #[serde(default)]
+    pub open_arena: bool,
+    #[serde(default)]
+    pub participants: Vec<BootstrapParticipant>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchEventReport {
+    pub match_id: String,
+    pub event_id: String,
+    pub tick: u64,
+    pub kind: String,
+    pub payload: serde_json::Value,
+    pub game_pack_version: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchCompletionReport {
+    pub match_id: String,
+    pub completion_id: String,
+    pub tick: u64,
+    pub reason: String,
+    pub result: serde_json::Value,
+    pub game_pack_version: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchReport {
+    Event(MatchEventReport),
+    Completion(MatchCompletionReport),
 }
 
 #[derive(Clone)]
@@ -23,6 +83,33 @@ pub struct MatchHandle {
     shutdown: Arc<AtomicBool>,
     kicked_users: Arc<Mutex<HashSet<String>>>,
     telemetry: Arc<Mutex<RuntimeMatchTelemetry>>,
+    pub bootstrap: Arc<MatchBootstrap>,
+    reports: Option<mpsc::UnboundedSender<MatchReport>>,
+}
+
+impl MatchHandle {
+    pub fn report_input_rejection(&self, user_id: &str, reason: &str) {
+        if let Some(reports) = &self.reports {
+            let _ = reports.send(MatchReport::Event(MatchEventReport {
+                match_id: self.bootstrap.match_id.clone(),
+                event_id: format!(
+                    "{}:input:{}:{}",
+                    self.bootstrap.match_id,
+                    user_id,
+                    uuid::Uuid::new_v4()
+                ),
+                tick: self
+                    .telemetry
+                    .lock()
+                    .ok()
+                    .map(|value| value.tick)
+                    .unwrap_or_default(),
+                kind: "input.rejected".to_string(),
+                payload: serde_json::json!({ "userId": user_id, "reason": reason }),
+                game_pack_version: self.bootstrap.game_pack_version.clone(),
+            }));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -140,14 +227,14 @@ enum RuntimeBackend {
 }
 
 impl RuntimeBackend {
-    fn new(match_id: String, pack: &GamePackMetadata) -> Self {
+    fn new(match_id: String, pack: &GamePackMetadata, seed: u64) -> Self {
         if pack.arena.physics_backend == "sphere_xpbd" {
-            let mut runtime = SphereRuntime::new(match_id, pack.manifest.id.clone(), 0);
+            let mut runtime = SphereRuntime::new(match_id, pack.manifest.id.clone(), seed);
             runtime.context.game_pack_version = pack.manifest.version.clone();
             runtime.create_field_arena(&pack.arena, &pack.field_definition);
             Self::Sphere(Box::new(runtime))
         } else {
-            let mut runtime = MatchRuntime::new(match_id, pack.manifest.id.clone(), 0);
+            let mut runtime = MatchRuntime::new(match_id, pack.manifest.id.clone(), seed);
             runtime.context.game_pack_version = pack.manifest.version.clone();
             runtime.create_test_arena(&pack.arena);
             Self::Rapier(Box::new(runtime))
@@ -212,6 +299,13 @@ impl RuntimeBackend {
     fn set_player_mech(&mut self, id: &str, mech: MechSpec) {
         if let Self::Sphere(runtime) = self {
             runtime.set_player_mech(id, mech);
+        }
+    }
+
+    fn disable_player_controls(&mut self) {
+        match self {
+            Self::Rapier(runtime) => runtime.disable_player_controls(),
+            Self::Sphere(runtime) => runtime.disable_player_controls(),
         }
     }
 
@@ -401,6 +495,18 @@ impl MatchRegistry {
         Self {
             matches: RwLock::new(HashMap::new()),
             pack,
+            reports: None,
+        }
+    }
+
+    pub fn with_reports(
+        pack: Arc<GamePackMetadata>,
+        reports: mpsc::UnboundedSender<MatchReport>,
+    ) -> Self {
+        Self {
+            matches: RwLock::new(HashMap::new()),
+            pack,
+            reports: Some(reports),
         }
     }
 
@@ -479,6 +585,12 @@ impl MatchRegistry {
             .remove(match_id)
             .ok_or_else(|| "Match is not running on this host.".to_string())?;
         handle.shutdown.store(true, Ordering::Relaxed);
+        self.report_completion(
+            match_id,
+            0,
+            "cancelled",
+            serde_json::json!({ "reason": "control_plane_stop" }),
+        );
         Ok(())
     }
 
@@ -517,10 +629,47 @@ impl MatchRegistry {
         ids.len()
     }
 
-    pub async fn get_or_create_match(&self, match_id: &str) -> MatchHandle {
+    pub fn report_event(&self, event: MatchEventReport) {
+        if let Some(reports) = &self.reports {
+            let _ = reports.send(MatchReport::Event(event));
+        }
+    }
+
+    fn report_completion(
+        &self,
+        match_id: &str,
+        tick: u64,
+        reason: &str,
+        result: serde_json::Value,
+    ) {
+        if let Some(reports) = &self.reports {
+            let _ = reports.send(MatchReport::Completion(MatchCompletionReport {
+                match_id: match_id.to_string(),
+                completion_id: format!("{match_id}:complete:{tick}:{reason}"),
+                tick,
+                reason: reason.to_string(),
+                result,
+                game_pack_version: self.pack.manifest.version.clone(),
+            }));
+        }
+    }
+
+    pub async fn get_or_create_match(
+        &self,
+        bootstrap: MatchBootstrap,
+    ) -> Result<MatchHandle, String> {
+        if bootstrap.game_pack_id != self.pack.manifest.id
+            || bootstrap.game_pack_version != self.pack.manifest.version
+        {
+            return Err("The assigned game-pack version is not loaded on this host.".to_string());
+        }
+        let match_id = bootstrap.match_id.clone();
         let mut matches = self.matches.write().await;
-        if let Some(handle) = matches.get(match_id) {
-            return handle.clone();
+        if let Some(handle) = matches.get(&match_id) {
+            if handle.bootstrap.match_seed != bootstrap.match_seed {
+                return Err("The match bootstrap changed after startup.".to_string());
+            }
+            return Ok(handle.clone());
         }
 
         let (input_tx, mut input_rx) = mpsc::channel(256);
@@ -531,26 +680,28 @@ impl MatchRegistry {
             shutdown: Arc::new(AtomicBool::new(false)),
             kicked_users: Arc::new(Mutex::new(HashSet::new())),
             telemetry: Arc::new(Mutex::new(RuntimeMatchTelemetry {
-                id: match_id.to_string(),
+                id: match_id.clone(),
                 ..Default::default()
             })),
+            bootstrap: Arc::new(bootstrap.clone()),
+            reports: self.reports.clone(),
         };
-        matches.insert(match_id.to_string(), handle.clone());
-        let match_id = match_id.to_string();
+        matches.insert(match_id.clone(), handle.clone());
         let pack = self.pack.clone();
         let latest_state = Arc::new(Mutex::new(None::<Arc<MatchStateSync>>));
         let telemetry = handle.telemetry.clone();
         let publisher_shutdown = handle.shutdown.clone();
+        let report_tx = self.reports.clone();
 
         let mut rules = RhaiEngine::new();
         for script in pack.manifest.scripts.values() {
             let Some(source) = pack.script_sources.get(script) else {
                 tracing::error!(path = %script, "API runtime snapshot is missing a validated rule script");
-                return handle;
+                return Ok(handle);
             };
             if !rules.load_source(script, source) {
                 tracing::error!(path = %script, "Unable to compile a validated API rule script into match runtime");
-                return handle;
+                return Ok(handle);
             }
         }
         let loaded_script_count = rules.loaded_script_count();
@@ -604,7 +755,7 @@ impl MatchRegistry {
         std::thread::Builder::new()
             .name(format!("match-{match_id}"))
             .spawn(move || {
-                let mut runtime = RuntimeBackend::new(match_id.clone(), &pack);
+                let mut runtime = RuntimeBackend::new(match_id.clone(), &pack, bootstrap.match_seed);
                 let mut rules = RhaiEngine::new();
                 for script in pack.manifest.scripts.values() {
                     let Some(source) = pack.script_sources.get(script) else {
@@ -619,20 +770,20 @@ impl MatchRegistry {
                 let tick_duration = Duration::from_secs_f64(1.0 / 60.0);
                 let tick_budget_ms = tick_duration.as_secs_f64() * 1_000.0;
                 let mut next_tick = Instant::now();
-                // A short, server-owned staging phase gives every redirected
-                // client the same 5→1 presentation and prevents movement or
-                // game-piece release before the match actually starts.
-                const PRE_MATCH_COUNTDOWN: Duration = Duration::from_secs(5);
-                const MATCH_DURATION: Duration = Duration::from_secs(150);
-                let match_created = next_tick;
-                let match_started = match_created + PRE_MATCH_COUNTDOWN;
-                let match_ends = match_started + MATCH_DURATION;
+                let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                let match_started = next_tick + Duration::from_millis(bootstrap.starts_at.saturating_sub(now_ms));
+                let match_duration = Duration::from_secs(bootstrap.duration_seconds);
+                let match_ends = match_started + match_duration;
+                const POST_MATCH_SETTLE: Duration = Duration::from_millis(3_500);
+                let match_finalizes = match_ends + POST_MATCH_SETTLE;
                 let mut live_phase_entered = false;
                 let mut practice_continue = false;
+                let mut controls_disabled = false;
                 let mut tps_window_started = next_tick;
                 let mut ticks_in_tps_window = 0_u64;
                 let mut ticks_per_second = 60.0;
                 let mut tick = 0_u64;
+                let mut event_sequence = 0_u64;
                 let mut recent_semantic_events = VecDeque::<String>::with_capacity(16);
 
                 while !simulation_shutdown.load(Ordering::Relaxed) {
@@ -646,6 +797,12 @@ impl MatchRegistry {
                     }
                     next_tick += tick_duration;
 
+                    let clock_now = Instant::now();
+                    let controls_locked = live_phase_entered && clock_now >= match_ends;
+                    if controls_locked && !controls_disabled {
+                        runtime.disable_player_controls();
+                        controls_disabled = true;
+                    }
                     while let Ok(input) = input_rx.try_recv() {
                         match input {
                             MatchInput::PlayerJoin {
@@ -653,7 +810,7 @@ impl MatchRegistry {
                                 name,
                                 team_name,
                                 slot_id,
-                            } => runtime.add_player(user_id, name, team_name, slot_id, &pack.arena),
+                            } if !controls_locked => runtime.add_player(user_id, name, team_name, slot_id, &pack.arena),
                             MatchInput::PlayerLeave { user_id } => runtime.remove_player(&user_id),
                             MatchInput::PlayerInput {
                                 user_id,
@@ -662,44 +819,51 @@ impl MatchRegistry {
                                 intake_power,
                                 outtake_power,
                                 sequence,
-                            } => runtime.set_player_input(
-                                &user_id,
-                                move_x,
-                                move_z,
-                                intake_power,
-                                outtake_power,
-                                sequence,
-                            ),
-                            MatchInput::PlayerMech { user_id, mech } => {
-                                runtime.set_player_mech(&user_id, mech)
-                            }
-                            MatchInput::ContinuePractice => practice_continue = true,
-                            MatchInput::EndPractice => practice_continue = false,
+                            } if !controls_locked => runtime.set_player_input(&user_id, move_x, move_z, intake_power, outtake_power, sequence),
+                            MatchInput::PlayerMech { user_id, mech } if !controls_locked => runtime.set_player_mech(&user_id, mech),
+                            MatchInput::ContinuePractice if !controls_locked => practice_continue = true,
+                            MatchInput::EndPractice if !controls_locked => practice_continue = false,
+                            _ => {}
                         }
                     }
 
-                    let clock_now = Instant::now();
                     if !live_phase_entered && clock_now >= match_started {
                         runtime.begin_match();
                         live_phase_entered = true;
+                        if let Some(reports) = &report_tx { let _ = reports.send(MatchReport::Event(MatchEventReport {
+                            match_id: match_id.clone(), event_id: format!("{match_id}:started"), tick, kind: "match.started".to_string(),
+                            payload: serde_json::json!({ "seed": bootstrap.match_seed, "scenario": bootstrap.scenario_id }), game_pack_version: pack.manifest.version.clone(),
+                        })); }
                     }
                     let match_running = live_phase_entered && clock_now < match_ends;
+                    let settling = live_phase_entered && clock_now >= match_ends && clock_now < match_finalizes;
+                    let scoring_active = match_running || settling;
                     let physics_started = Instant::now();
-                    if match_running || practice_continue {
-                        runtime.set_scoring_enabled(match_running);
+                    if scoring_active || practice_continue {
+                        runtime.set_scoring_enabled(scoring_active);
                         runtime.step(&pack.arena, 1.0 / 60.0);
                     }
                     for event in runtime.drain_semantic_events() {
+                        event_sequence += 1;
                         let mut label = format!("{} {} ← {}", event.kind, event.target_id, event.entity_id);
-                        if match_running {
+                        if let Some(reports) = &report_tx { let _ = reports.send(MatchReport::Event(MatchEventReport {
+                            match_id: match_id.clone(), event_id: format!("{match_id}:{tick}:{event_sequence}"), tick,
+                            kind: format!("semantic.{}", event.kind), payload: serde_json::json!({ "targetId": event.target_id, "entityId": event.entity_id }), game_pack_version: pack.manifest.version.clone(),
+                        })); }
+                        if scoring_active {
                             let outcomes = rules.on_trigger_enter(&event.target_id, &event.entity_id);
                             for outcome in outcomes {
+                                event_sequence += 1;
                                 label.push_str(&format!(" · {} {}/{} +{}", outcome.kind, outcome.team, outcome.category, outcome.points));
                                 // Native scoring: the authored rule's outcome
                                 // is the source of truth for team, category and
                                 // points, so tweaking scoring.rhai rebalances a
                                 // match without a rebuild.
                                 runtime.apply_score(&outcome.team, &outcome.category, outcome.points as i32);
+                                if let Some(reports) = &report_tx { let _ = reports.send(MatchReport::Event(MatchEventReport {
+                                    match_id: match_id.clone(), event_id: format!("{match_id}:{tick}:{event_sequence}"), tick, kind: "score.awarded".to_string(),
+                                    payload: serde_json::json!({ "team": outcome.team, "category": outcome.category, "points": outcome.points }), game_pack_version: pack.manifest.version.clone(),
+                                })); }
                             }
                         }
                         recent_semantic_events.push_back(label);
@@ -730,7 +894,7 @@ impl MatchRegistry {
                         .checked_duration_since(match_started)
                         .unwrap_or_default()
                         .as_secs_f64()
-                        .min(MATCH_DURATION.as_secs_f64());
+                                .min(match_duration.as_secs_f64());
                     let clock_drift_ms = if match_running {
                         (simulation_clock - elapsed_live_seconds) * 1_000.0
                     } else {
@@ -763,7 +927,7 @@ impl MatchRegistry {
                             object_positions: runtime.positions(),
                             contacts: runtime.contacts(),
                             match_clock,
-                            match_duration_seconds: MATCH_DURATION.as_secs_f64(),
+                            match_duration_seconds: match_duration.as_secs_f64(),
                             pre_match_remaining_seconds,
                             match_running,
                             simulation_clock,
@@ -794,11 +958,20 @@ impl MatchRegistry {
                             *slot = Some(Arc::new(state));
                         }
                     }
+                    if live_phase_entered && !practice_continue && clock_now >= match_finalizes {
+                        let score = runtime.score_state();
+                        if let Some(reports) = &report_tx { let _ = reports.send(MatchReport::Completion(MatchCompletionReport {
+                            match_id: match_id.clone(), completion_id: format!("{match_id}:complete:{tick}:finished"), tick,
+                            reason: "finished".to_string(), game_pack_version: pack.manifest.version.clone(),
+                            result: serde_json::json!({ "redScore": score.red_score, "blueScore": score.blue_score, "globalScore": score.global_score, "breakdown": score.breakdown }),
+                        })); }
+                        simulation_shutdown.store(true, Ordering::Relaxed);
+                    }
                 }
             })
             .expect("failed to start match physics thread");
 
-        handle
+        Ok(handle)
     }
 }
 
