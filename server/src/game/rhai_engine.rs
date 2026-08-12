@@ -394,7 +394,11 @@ impl RhaiEngine {
                 outtake_velocity_mps: nested_number(&robot, "robot", "outtake_velocity_mps")?,
                 outtake_angle_deg: nested_number(&robot, "robot", "outtake_angle_deg")?,
                 flywheel_width_m: nested_number(&robot, "robot", "flywheel_width_m")?,
-                outtake_forward_offset_m: nested_number(&robot, "robot", "outtake_forward_offset_m")?,
+                outtake_forward_offset_m: nested_number(
+                    &robot,
+                    "robot",
+                    "outtake_forward_offset_m",
+                )?,
                 outtake_height_m: nested_number(&robot, "robot", "outtake_height_m")?,
             },
             goal_wall: crate::game::pack_loader::SurfacePhysicsConfig {
@@ -591,44 +595,5 @@ impl RhaiEngine {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::RhaiEngine;
-
-    #[test]
-    fn inspects_functions_and_engine_calls() {
-        let engine = RhaiEngine::new();
-        let metadata = engine
-            .inspect_source(
-                "rules/example.rhai",
-                "fn on_tick(state) { add_score(\"blue\", \"SU\", 1); }",
-            )
-            .unwrap();
-        assert_eq!(metadata.functions[0].name, "on_tick");
-        assert_eq!(metadata.functions[0].parameters, vec!["state"]);
-        assert_eq!(metadata.engine_calls, vec!["add_score"]);
-    }
-
-    #[test]
-    fn rejects_invalid_rhai() {
-        let engine = RhaiEngine::new();
-        assert!(
-            engine
-                .inspect_source("rules/broken.rhai", "fn broken( {")
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn executes_authored_trigger_hook_and_captures_score() {
-        let mut engine = RhaiEngine::new();
-        assert!(engine.load_source(
-            "rules/scoring.rhai",
-            r#"fn on_trigger_enter(trigger_id, entity_id) { add_score("blue", "SU", 1); }"#
-        ));
-        let outcomes = engine.on_trigger_enter("blueSUscore", "ball:42");
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(outcomes[0].team, "blue");
-        assert_eq!(outcomes[0].category, "SU");
-        assert_eq!(outcomes[0].points, 1);
-    }
-}
+#[path = "rhai_engine/tests.rs"]
+mod tests;

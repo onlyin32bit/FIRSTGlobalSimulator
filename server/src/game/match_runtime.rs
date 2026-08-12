@@ -2,8 +2,8 @@ use rapier3d::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
 
-use super::pack_loader::ArenaConfig;
 use super::match_registry::ObjectPositionsSync;
+use super::pack_loader::ArenaConfig;
 
 const CONTROL_DEADBAND: f32 = 0.08;
 const TURN_BRAKE_MULTIPLIER: f32 = 2.5;
@@ -431,19 +431,14 @@ impl MatchRuntime {
                     robot.max_angular_acceleration_radps2
                 };
                 let mut next_turn_rate = current_turn_rate
-                    + (target_turn_rate - current_turn_rate).clamp(
-                        -turn_acceleration * dt,
-                        turn_acceleration * dt,
-                    );
+                    + (target_turn_rate - current_turn_rate)
+                        .clamp(-turn_acceleration * dt, turn_acceleration * dt);
                 if player.move_x.abs() <= f32::EPSILON
                     && next_turn_rate.abs() < TURN_STOP_EPSILON_RADPS
                 {
                     next_turn_rate = 0.0;
                 }
-                body.set_angvel(
-                    vector![0.0, next_turn_rate, 0.0].into(),
-                    true,
-                );
+                body.set_angvel(vector![0.0, next_turn_rate, 0.0].into(), true);
             }
         }
     }
@@ -497,9 +492,8 @@ impl MatchRuntime {
                 if !body.is_sleeping() {
                     moving_mask[i / 8] |= 1 << (i % 8);
                     let position = body.translation();
-                    let quantize = |v: f32| -> u16 {
-                        ((v + 8.0) * 4095.9375).clamp(0.0, 65535.0) as u16
-                    };
+                    let quantize =
+                        |v: f32| -> u16 { ((v + 8.0) * 4095.9375).clamp(0.0, 65535.0) as u16 };
                     quantized_positions.push(quantize(position.x));
                     quantized_positions.push(quantize(position.y));
                     quantized_positions.push(quantize(position.z));
@@ -569,85 +563,9 @@ impl MatchRuntime {
 }
 
 #[cfg(test)]
-mod performance_tests {
-    use super::*;
-    use std::time::Instant;
+#[path = "match_runtime/tests.rs"]
+mod tests;
 
-    fn arena() -> ArenaConfig {
-        crate::game::pack_loader::PackLoader::new("0.1.0")
-            .load_pack("../pkgs/games/fgc-2026/manifest.json")
-            .unwrap()
-            .arena
-    }
-
-    #[test]
-    fn applies_pack_mass_and_drivetrain_limits() {
-        let mut arena = arena();
-        arena.object_count = 1;
-        let mut runtime = MatchRuntime::new("physics".into(), "fgc-2026".into(), 0);
-        runtime.create_test_arena(&arena);
-
-        let ball_body = runtime.rigid_body_set.get(runtime.objects[0].body).unwrap();
-        assert!((ball_body.mass() - 0.062).abs() < 0.0001);
-
-        let ball_handle = runtime.objects[0].body;
-        let ball_body = runtime.rigid_body_set.get_mut(ball_handle).unwrap();
-        ball_body.set_translation(vector![0.0, arena.ball.radius_m(), 0.0].into(), true);
-        ball_body.set_linvel(vector![1.0, 0.0, 0.0].into(), true);
-        runtime.apply_ball_rolling_resistance(1.0 / 60.0);
-        let ball_speed = runtime.rigid_body_set[ball_handle].linvel().x;
-        let expected_speed = 1.0 - arena.ball.rolling_resistance_mps2 / 60.0;
-        assert!((ball_speed - expected_speed).abs() < 0.0001);
-
-        runtime.add_player("player".into(), "Player".into(), "Team".into(), &arena);
-        runtime.set_player_input("player", 0.0, 1.0, 1);
-        // One second is long enough to observe acceleration while remaining
-        // clear of the arena wall from the default spawn point.
-        for _ in 0..60 {
-            runtime.apply_player_drive(&arena);
-            runtime.tick(1.0 / 60.0);
-        }
-
-        let player_body = runtime.players.get("player").unwrap().body;
-        let robot_body = runtime.rigid_body_set.get(player_body).unwrap();
-        let planar_speed = (robot_body.linvel().x.powi(2) + robot_body.linvel().z.powi(2)).sqrt();
-        assert!((robot_body.mass() - arena.robot.mass_kg).abs() < 0.001);
-        assert!(planar_speed > 0.5, "robot only reached {planar_speed} m/s");
-        assert!(planar_speed <= arena.robot.max_speed_mps + 0.15);
-
-        runtime.set_player_input("player", 0.5, 0.0, 2);
-        for _ in 0..30 {
-            runtime.apply_player_drive(&arena);
-            runtime.tick(1.0 / 60.0);
-        }
-        let robot_body = runtime.rigid_body_set.get(player_body).unwrap();
-        assert!(robot_body.angvel().y.abs() > 0.2);
-        assert!(robot_body.angvel().y.abs() <= arena.robot.max_turn_rate_radps + 0.01);
-    }
-
-    #[test]
-    #[ignore = "manual Rapier performance comparison"]
-    fn benchmark_rapier_ball_interaction() {
-        let arena = arena();
-        let mut runtime = MatchRuntime::new("perf".into(), "fgc-2026".into(), 0);
-        runtime.create_test_arena(&arena);
-        runtime.add_player("player".into(), "Player".into(), "Team".into(), &arena);
-        runtime.set_player_input("player", 0.35, 1.0, 1);
-
-        let started = Instant::now();
-        for _ in 0..300 {
-            runtime.apply_player_drive(&arena);
-            runtime.tick(1.0 / 60.0);
-        }
-        let elapsed = started.elapsed();
-        let milliseconds_per_tick = elapsed.as_secs_f64() * 1_000.0 / 300.0;
-
-        assert_eq!(runtime.field_object_positions().len(), arena.object_count);
-        eprintln!(
-            "Rapier {}-ball interaction: {:.2} ms/tick ({:.1} simulated FPS)",
-            arena.object_count,
-            milliseconds_per_tick,
-            1_000.0 / milliseconds_per_tick
-        );
-    }
-}
+#[cfg(test)]
+#[path = "match_runtime/performance_tests.rs"]
+mod performance_tests;
