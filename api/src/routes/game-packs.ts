@@ -6,6 +6,9 @@ import type { Bindings } from '../types'
 const PACK_ID = 'fgc-2026'
 const ALLOWED_ASSETS = new Set(['field.glb', 'field.physics.json', 'field.semantics.json', 'scoreboard.html', 'topdown.webp'])
 
+type RobotAssetKind = 'visual' | 'physics' | 'semantics'
+const ROBOT_ASSET_KINDS: RobotAssetKind[] = ['visual', 'physics', 'semantics']
+
 type Manifest = {
   id: string
   name: string
@@ -30,6 +33,13 @@ type Manifest = {
   objects: unknown[]
   phases: unknown[]
   scripts: Record<string, string>
+  robots?: Record<string, {
+    name: string
+    visual: string
+    physics?: string
+    semantics?: string
+    behavior?: string
+  }>
 }
 
 type Bounds = {
@@ -48,6 +58,31 @@ type PackContext = Context<{ Bindings: Bindings }>
 
 function packPath(path: string) {
   return `/${PACK_ID}/${path.replace(/^\/+/, '')}`
+}
+
+function isPackRelativePath(path: string) {
+  return !path.startsWith('/') && path.split('/').every((segment) => segment.length > 0 && segment !== '.' && segment !== '..')
+}
+
+function robotAssetPaths(robot: NonNullable<Manifest['robots']>[string]) {
+  return Object.fromEntries(
+    ROBOT_ASSET_KINDS.flatMap((kind) => {
+      const path = robot[kind]
+      return typeof path === 'string' && isPackRelativePath(path) ? [[kind, path]] : []
+    }),
+  ) as Partial<Record<RobotAssetKind, string>>
+}
+
+function robotAssetUrls(robotId: string, robot: NonNullable<Manifest['robots']>[string]) {
+  const prefix = `/api/game-packs/${PACK_ID}/robots/${encodeURIComponent(robotId)}/assets`
+  const paths = robotAssetPaths(robot)
+  return {
+    id: robotId,
+    name: robot.name,
+    visual: paths.visual ? `${prefix}/visual` : undefined,
+    physics: paths.physics ? `${prefix}/physics` : undefined,
+    semantics: paths.semantics ? `${prefix}/semantics` : undefined,
+  }
 }
 
 async function getPackAsset(c: PackContext, path: string) {
@@ -271,6 +306,42 @@ app.get('/:id/assets/:asset', async (c) => {
     return new Response(response.body, { status: response.status, headers })
   } catch {
     return c.text('Game pack asset service is unavailable.', 503)
+  }
+})
+
+app.get('/:id/robots/:robot/assets', async (c) => {
+  if (c.req.param('id') !== PACK_ID) return jsonError(c, 404, 'VALIDATION_ERROR', 'Game pack not found.')
+  try {
+    const manifest = await readPackJson<Manifest>(c, 'manifest.json')
+    const robotId = c.req.param('robot')
+    const robot = manifest.robots?.[robotId]
+    if (!robot || !robotAssetPaths(robot).visual) {
+      return jsonError(c, 404, 'VALIDATION_ERROR', 'Robot asset set not found.')
+    }
+    return jsonSuccess(c, robotAssetUrls(robotId, robot))
+  } catch (error) {
+    return jsonError(c, 503, 'INTERNAL_ERROR', error instanceof Error ? error.message : 'Robot assets are unavailable.')
+  }
+})
+
+app.get('/:id/robots/:robot/assets/:asset', async (c) => {
+  if (c.req.param('id') !== PACK_ID) return c.text('Game pack not found.', 404)
+  const asset = c.req.param('asset') as RobotAssetKind
+  if (!ROBOT_ASSET_KINDS.includes(asset)) return c.text('Unknown robot asset.', 404)
+
+  try {
+    const manifest = await readPackJson<Manifest>(c, 'manifest.json')
+    const robot = manifest.robots?.[c.req.param('robot')]
+    const path = robot && robotAssetPaths(robot)[asset]
+    if (!path) return c.text('Robot asset not found.', 404)
+
+    const response = await getPackAsset(c, path)
+    if (!response.ok) return c.text('Robot asset not found.', response.status === 404 ? 404 : 503)
+    const headers = new Headers(response.headers)
+    headers.set('cache-control', path.endsWith('.glb') ? 'public, max-age=86400' : 'public, max-age=300')
+    return new Response(response.body, { status: response.status, headers })
+  } catch {
+    return c.text('Robot asset service is unavailable.', 503)
   }
 })
 

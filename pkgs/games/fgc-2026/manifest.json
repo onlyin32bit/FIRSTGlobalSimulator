@@ -49,6 +49,15 @@
     "robot_rules": "rules/robot.rhai",
     "arena": "rules/arena.rhai"
   },
+  "robots": {
+    "starter-bot": {
+      "name": "Starter Bot",
+      "visual": "robots/starter-bot/bot.glb",
+      "physics": "robots/starter-bot/bot.physics.json",
+      "semantics": "robots/starter-bot/bot.semantics.json",
+      "behavior": "robots/starter-bot/robot.rhai"
+    }
+  },
   "scoring": {
     "targets": [
       { "id": "red-suppression-unit", "semanticId": "redSUscore", "kind": "suppression-unit", "alliance": "red", "points": 1, "requiresRobotOuttake": true, "area": { "min": [-1.465079, 0.65, -2.9914392], "max": [-0.503383, 1.92352463, -2.7963208] }, "retention": { "min": [-1.465079, 0.65, -3.14], "max": [-0.503383, 1.92352463, -2.74], "openTop": true } },
