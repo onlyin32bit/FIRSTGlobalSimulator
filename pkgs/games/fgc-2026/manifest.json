@@ -36,6 +36,7 @@
       "name": "Starter Robot",
       "visual": "robots/StarterBot/bot.glb",
       "physics": "robots/StarterBot/bot.physics.json",
+      "semantics": "robots/StarterBot/bot.semantics.json",
       "behavior": "robots/StarterBot/robot.rhai"
     }
   },

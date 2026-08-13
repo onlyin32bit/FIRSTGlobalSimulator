@@ -10,7 +10,7 @@ fn arena_config() {
             position_iterations: 3.0,
             velocity_iterations: 4.0,
             contact_compliance: 0.0000002,
-            max_depenetration_speed_mps: 2.5,
+            max_depenetration_speed_mps: 8.0,
             max_ball_speed_mps: 12.0,
             max_ball_angular_speed_radps: 240.0,
             sleep_linear_threshold_mps: 0.035,
@@ -122,6 +122,17 @@ fn arena_config() {
             intake_surface_speed_mps: -0.005,
             intake_friction: 1.60,
             intake_normal_force_n: 8.0,
+            // Peak horizontal acceleration the directional IntakeZone conveyor
+            // applies along the authored feed direction. It must overcome the
+            // roller preload grip (friction ~1.6 x 8 N on a 0.062 kg ball) and
+            // ball/floor resistance while staying below the launch threshold.
+            intake_force_mps2: 80.0,
+            // Same directional-conveyor acceleration for the TransferZone and
+            // OuttakeZone semantics. The ball stays a normal dynamic body;
+            // these values tune how crisply the mechanism shuttles a piece
+            // through the transfer path and out the shooter mouth.
+            transfer_force_mps2: 100.0,
+            outtake_force_mps2: 6000.0,
             intake_restitution_curve: #{
                 low_speed: 0.08,
                 high_speed: 0.03,

@@ -33,6 +33,7 @@ pub struct RobotInput {
     pub move_z: f32,
     pub intake_power: f32,
     pub outtake_power: f32,
+    pub transfer_power: f32,
 }
 
 pub struct RhaiEngine {
@@ -128,8 +129,13 @@ impl RhaiEngine {
             "outtake_power".into(),
             Dynamic::from_float(input.outtake_power as f64),
         );
+        authored.insert(
+            "transfer_power".into(),
+            Dynamic::from_float(input.transfer_power as f64),
+        );
         let result: Result<Map, _> =
-            self.engine.call_fn(&mut scope, ast, "robot_input", (authored,));
+            self.engine
+                .call_fn(&mut scope, ast, "robot_input", (authored,));
         let Ok(result) = result else {
             error!("Rhai robot_input hook failed; using raw driver input");
             return input;
@@ -146,6 +152,7 @@ impl RhaiEngine {
             move_z: number("move_z", input.move_z),
             intake_power: number("intake_power", input.intake_power),
             outtake_power: number("outtake_power", input.outtake_power),
+            transfer_power: number("transfer_power", input.transfer_power),
         }
     }
 
@@ -443,6 +450,9 @@ impl RhaiEngine {
                     &intake_restitution,
                     "robot.intake_restitution_curve",
                 )?,
+                intake_force_mps2: nested_number(&robot, "robot", "intake_force_mps2")?,
+                transfer_force_mps2: nested_number(&robot, "robot", "transfer_force_mps2")?,
+                outtake_force_mps2: nested_number(&robot, "robot", "outtake_force_mps2")?,
                 storage_capacity: nested_number(&robot, "robot", "storage_capacity")?.max(0.0)
                     as usize,
                 intake_rate_bps: nested_number(&robot, "robot", "intake_rate_bps")?,
@@ -450,7 +460,11 @@ impl RhaiEngine {
                 outtake_velocity_mps: nested_number(&robot, "robot", "outtake_velocity_mps")?,
                 outtake_angle_deg: nested_number(&robot, "robot", "outtake_angle_deg")?,
                 flywheel_width_m: nested_number(&robot, "robot", "flywheel_width_m")?,
-                outtake_forward_offset_m: nested_number(&robot, "robot", "outtake_forward_offset_m")?,
+                outtake_forward_offset_m: nested_number(
+                    &robot,
+                    "robot",
+                    "outtake_forward_offset_m",
+                )?,
                 outtake_height_m: nested_number(&robot, "robot", "outtake_height_m")?,
             },
             goal_wall: crate::game::pack_loader::SurfacePhysicsConfig {
@@ -560,6 +574,12 @@ impl RhaiEngine {
                 "robot.intake_normal_force_n",
                 arena.robot.intake_normal_force_n,
             ),
+            ("robot.intake_force_mps2", arena.robot.intake_force_mps2),
+            (
+                "robot.transfer_force_mps2",
+                arena.robot.transfer_force_mps2,
+            ),
+            ("robot.outtake_force_mps2", arena.robot.outtake_force_mps2),
             ("goal_wall.static_friction", arena.goal_wall.static_friction),
             (
                 "goal_wall.dynamic_friction",
@@ -697,13 +717,14 @@ mod tests {
         let mut engine = RhaiEngine::new();
         assert!(engine.load_source(
             "robots/StarterBot/robot.rhai",
-            "fn robot_input(input) { #{ move_x: input.move_x, move_z: input.move_z, intake_power: 0.0, outtake_power: input.outtake_power } }"
+            "fn robot_input(input) { #{ move_x: input.move_x, move_z: input.move_z, intake_power: 0.0, outtake_power: input.outtake_power, transfer_power: input.transfer_power } }"
         ));
         let input = engine.process_robot_input(RobotInput {
             move_x: 0.2,
             move_z: -0.4,
             intake_power: 1.0,
             outtake_power: 0.5,
+            transfer_power: 0.0,
         });
         assert_eq!(input.intake_power, 0.0);
         assert_eq!(input.outtake_power, 0.5);

@@ -6,7 +6,7 @@ import type { Bindings } from '../types'
 const PACK_ID = 'fgc-2026'
 const ALLOWED_ASSETS = new Set(['field.glb', 'field.physics.json', 'field.semantics.json'])
 const STARTER_BOT_ID = 'StarterBot'
-const ALLOWED_ROBOT_ASSETS = new Set(['bot.glb', 'bot.physics.json'])
+const ALLOWED_ROBOT_ASSETS = new Set(['bot.glb', 'bot.physics.json', 'bot.semantics.json'])
 
 type Manifest = {
   id: string
@@ -190,10 +190,11 @@ app.get('/:id/runtime', async (c) => {
   try {
     const { manifest, fieldPhysics, fieldSemantics } = await loadPack(c)
     const robotPhysics = await readPackJson<unknown>(c, 'robots/StarterBot/bot.physics.json')
+    const robotSemantics = await readPackJson<unknown>(c, 'robots/StarterBot/bot.semantics.json').catch(() => null)
     const scripts = Object.fromEntries(await Promise.all(
       Object.entries(manifest.scripts).map(async ([name, path]) => [path, await readPackText(c, path)] as const)
     ))
-    return jsonSuccess(c, { manifest, fieldPhysics, fieldSemantics, robotPhysics, scripts })
+    return jsonSuccess(c, { manifest, fieldPhysics, fieldSemantics, robotPhysics, robotSemantics, scripts })
   } catch (error) {
     return jsonError(c, 503, 'INTERNAL_ERROR', error instanceof Error ? error.message : 'Game pack runtime snapshot is unavailable.')
   }

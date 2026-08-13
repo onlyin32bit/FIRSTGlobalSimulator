@@ -62,10 +62,10 @@
 	// Lightweight PU foam: some rebound, but far less than a rubber ball.
 	const BALL_RESTITUTION = 0.4;
 	const BALL_FRICTION = 0.75;
-	const INTAKE_FORWARD_MIN = 0.08;
-	const INTAKE_FORWARD_MAX = 0.72;
-	const INTAKE_HALF_WIDTH = 0.34;
-	const INTAKE_MAX_HEIGHT = 0.5;
+	const INTAKE_FORWARD_MIN = 0.25;
+	const INTAKE_FORWARD_MAX = 0.45;
+	const INTAKE_HALF_WIDTH = 0.28;
+	const INTAKE_MAX_HEIGHT = 0.2;
 	const INTAKE_PULL_SPEED = 1.5;
 
 	function hasClearIntakePath(
@@ -458,104 +458,106 @@
 			}
 		}
 
-		// --- OUTTAKE LOGIC ---
-		if (rState.isShootActive && activeSlotStorage > 0) {
-			lastShootTime += delta;
-			const shootInterval = 1.0 / specs.outtakeRate;
-
-			if (lastShootTime >= shootInterval) {
-				// Shoot a wide burst of 3-4 balls!
-				const burstCount = Math.min(activeSlotStorage, 3 + Math.floor(Math.random() * 2));
-
-				let ballsToShoot: number[] = [];
-				for (let i = 0; i < rapierBodies.length; i++) {
-					if (ballStates[i] === 'stored' && ballOwnerSlot[i] === activeSlotId) {
-						ballsToShoot.push(i);
-						if (ballsToShoot.length === burstCount) break;
-					}
-				}
-
-				for (let j = 0; j < ballsToShoot.length; j++) {
-					const i = ballsToShoot[j];
-					ballStates[i] = 'active';
-					ballOwnerSlot[i] = '';
-					ballShotByRobot[i] = true;
-
-					const rightX = rState.forward.z;
-					const rightZ = -rState.forward.x;
-
-					let offsetMag = 0;
-					if (ballsToShoot.length > 1) {
-						// Span across +/- 0.18 meters (0.36m total width, fits inside the 0.5m robot)
-						const maxSpread = 0.18;
-						offsetMag = -maxSpread + (j / (ballsToShoot.length - 1)) * (maxSpread * 2);
-						// Add a little randomness so they aren't perfectly spaced
-						offsetMag += (Math.random() - 0.5) * 0.05;
-					}
-
-					// Time-stagger simulation:
-					// By moving the ball slightly forward/backward along the robot's forward vector,
-					// it completely breaks the "perfect mathematical line" and makes them look like
-					// they were fired a few milliseconds apart.
-					const timeStagger = (Math.random() - 0.5) * 0.35; // +/- 17.5 cm stagger
-
-					// Outtake zone is at the back of the robot, plus the lateral width offset and time stagger
-					const outX =
-						rState.pos.x -
-						rState.forward.x * 0.4 +
-						rightX * offsetMag +
-						rState.forward.x * timeStagger;
-					const outY = rState.pos.y + 0.3 + Math.random() * 0.05; // tiny vertical jitter
-					const outZ =
-						rState.pos.z -
-						rState.forward.z * 0.4 +
-						rightZ * offsetMag +
-						rState.forward.z * timeStagger;
-
-					rapierBodies[i].setTranslation(new rapier.Vector3(outX, outY, outZ), true);
-					// Do not sweep from the ball's old stored position when it is shot.
-					previousBallPositions[i] = { x: outX, y: outY, z: outZ };
-					ballZoneState[i] = '';
-
-					// Calculate velocity trajectory with entropy (randomness)
-					const verticalVariance = (Math.random() - 0.5) * 4.0;
-					const angleRad = (specs.outtakeAngle + verticalVariance) * (Math.PI / 180);
-
-					const speedMultiplier = 1.0 + (Math.random() - 0.5) * 0.1;
-					const finalSpeed = specs.outtakeVelocity * speedMultiplier;
-
-					const vY = Math.sin(angleRad) * finalSpeed;
-					const vHoriz = Math.cos(angleRad) * finalSpeed;
-
-					const spread = (Math.random() - 0.5) * 0.1;
-					const dirX = -rState.forward.x;
-					const dirZ = -rState.forward.z;
-					const spreadX = dirX * Math.cos(spread) - dirZ * Math.sin(spread);
-					const spreadZ = dirX * Math.sin(spread) + dirZ * Math.cos(spread);
-
-					const vX = spreadX * vHoriz + rState.vel.x;
-					const vZ = spreadZ * vHoriz + rState.vel.z;
-					const finalVy = vY + rState.vel.y;
-
-					// Massive backspin
-					const backspin = 40.0 + (Math.random() - 0.5) * 10.0;
-					const spinX = rightX * backspin + (Math.random() - 0.5) * 5.0;
-					const spinY = (Math.random() - 0.5) * 5.0;
-					const spinZ = rightZ * backspin + (Math.random() - 0.5) * 5.0;
-
-					rapierBodies[i].setAngvel(new rapier.Vector3(spinX, spinY, spinZ), true);
-					rapierBodies[i].setLinvel(new rapier.Vector3(vX, finalVy, vZ), true);
-
-					robotStorageMap.update((map) => ({
-						...map,
-						[activeSlotId]: Math.max(0, (map[activeSlotId] || 0) - 1)
-					}));
-				}
-				lastShootTime = 0;
-			}
-		} else {
-			lastShootTime = 0;
-		}
+		// --- OUTTAKE LOGIC (DISABLED for transfer testing) ---
+		// TODO: Re-enable once transfer mechanism is verified.
+		// if (rState.isShootActive && activeSlotStorage > 0) {
+		// 	lastShootTime += delta;
+		// 	const shootInterval = 1.0 / specs.outtakeRate;
+		//
+		// 	if (lastShootTime >= shootInterval) {
+		// 		// Shoot a wide burst of 3-4 balls!
+		// 		const burstCount = Math.min(activeSlotStorage, 3 + Math.floor(Math.random() * 2));
+		//
+		// 		let ballsToShoot: number[] = [];
+		// 		for (let i = 0; i < rapierBodies.length; i++) {
+		// 			if (ballStates[i] === 'stored' && ballOwnerSlot[i] === activeSlotId) {
+		// 				ballsToShoot.push(i);
+		// 				if (ballsToShoot.length === burstCount) break;
+		// 			}
+		// 		}
+		//
+		// 		for (let j = 0; j < ballsToShoot.length; j++) {
+		// 			const i = ballsToShoot[j];
+		// 			ballStates[i] = 'active';
+		// 			ballOwnerSlot[i] = '';
+		// 			ballShotByRobot[i] = true;
+		//
+		// 			const rightX = rState.forward.z;
+		// 			const rightZ = -rState.forward.x;
+		//
+		// 			let offsetMag = 0;
+		// 			if (ballsToShoot.length > 1) {
+		// 				// Span across +/- 0.18 meters (0.36m total width, fits inside the 0.5m robot)
+		// 				const maxSpread = 0.18;
+		// 				offsetMag = -maxSpread + (j / (ballsToShoot.length - 1)) * (maxSpread * 2);
+		// 				// Add a little randomness so they aren't perfectly spaced
+		// 				offsetMag += (Math.random() - 0.5) * 0.05;
+		// 			}
+		//
+		// 			// Time-stagger simulation:
+		// 			// By moving the ball slightly forward/backward along the robot's forward vector,
+		// 			// it completely breaks the "perfect mathematical line" and makes them look like
+		// 			// they were fired a few milliseconds apart.
+		// 			const timeStagger = (Math.random() - 0.5) * 0.35; // +/- 17.5 cm stagger
+		//
+		// 			// Outtake zone is at the back of the robot, plus the lateral width offset and time stagger
+		// 			const outX =
+		// 				rState.pos.x -
+		// 				rState.forward.x * 0.4 +
+		// 				rightX * offsetMag +
+		// 				rState.forward.x * timeStagger;
+		// 			const outY = rState.pos.y + 0.3 + Math.random() * 0.05; // tiny vertical jitter
+		// 			const outZ =
+		// 				rState.pos.z -
+		// 				rState.forward.z * 0.4 +
+		// 				rightZ * offsetMag +
+		// 				rState.forward.z * timeStagger;
+		//
+		// 			rapierBodies[i].setTranslation(new rapier.Vector3(outX, outY, outZ), true);
+		// 			// Do not sweep from the ball's old stored position when it is shot.
+		// 			previousBallPositions[i] = { x: outX, y: outY, z: outZ };
+		// 			ballZoneState[i] = '';
+		//
+		// 			// Calculate velocity trajectory with entropy (randomness)
+		// 			const verticalVariance = (Math.random() - 0.5) * 4.0;
+		// 			const angleRad = (specs.outtakeAngle + verticalVariance) * (Math.PI / 180);
+		//
+		// 			const speedMultiplier = 1.0 + (Math.random() - 0.5) * 0.1;
+		// 			const finalSpeed = specs.outtakeVelocity * speedMultiplier;
+		//
+		// 			const vY = Math.sin(angleRad) * finalSpeed;
+		// 			const vHoriz = Math.cos(angleRad) * finalSpeed;
+		//
+		// 			const spread = (Math.random() - 0.5) * 0.1;
+		// 			const dirX = -rState.forward.x;
+		// 			const dirZ = -rState.forward.z;
+		// 			const spreadX = dirX * Math.cos(spread) - dirZ * Math.sin(spread);
+		// 			const spreadZ = dirX * Math.sin(spread) + dirZ * Math.cos(spread);
+		//
+		// 			const vX = spreadX * vHoriz + rState.vel.x;
+		// 			const vZ = spreadZ * vHoriz + rState.vel.z;
+		// 			const finalVy = vY + rState.vel.y;
+		//
+		// 			// Massive backspin
+		// 			const backspin = 40.0 + (Math.random() - 0.5) * 10.0;
+		// 			const spinX = rightX * backspin + (Math.random() - 0.5) * 5.0;
+		// 			const spinY = (Math.random() - 0.5) * 5.0;
+		// 			const spinZ = rightZ * backspin + (Math.random() - 0.5) * 5.0;
+		//
+		// 			rapierBodies[i].setAngvel(new rapier.Vector3(spinX, spinY, spinZ), true);
+		// 			rapierBodies[i].setLinvel(new rapier.Vector3(vX, finalVy, vZ), true);
+		//
+		// 			robotStorageMap.update((map) => ({
+		// 				...map,
+		// 				[activeSlotId]: Math.max(0, (map[activeSlotId] || 0) - 1)
+		// 			}));
+		// 		}
+		// 		lastShootTime = 0;
+		// 	}
+		// } else {
+		// 	lastShootTime = 0;
+		// }
+		lastShootTime = 0; // Keep state clean while outtake is disabled
 
 		// --- TRANSFER LOGIC ---
 		// Transfers 3-4 balls at a time out of the FRONT (intake side) of the robot

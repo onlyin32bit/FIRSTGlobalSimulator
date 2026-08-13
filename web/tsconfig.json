@@ -12,5 +12,6 @@
 		"strict": true,
 		"moduleResolution": "bundler",
 		"types": ["./worker-configuration.d.ts"]
-	}
+	},
+	"exclude": [".svelte-kit/**", "node_modules/**"]
 }

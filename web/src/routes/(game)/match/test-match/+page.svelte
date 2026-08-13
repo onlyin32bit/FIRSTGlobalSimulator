@@ -12,6 +12,7 @@
 	import RobotCollisionDebug from './RobotCollisionDebug.svelte';
 	import PackField from './PackField.svelte';
 	import FieldBoundsDebug from './FieldBoundsDebug.svelte';
+	import MechanismForceDebug from './MechanismForceDebug.svelte';
 	import ScriptedObjects from './ScriptedObjects.svelte';
 	import TelemetrySparkline from './TelemetrySparkline.svelte';
 	import ScoreboardGraphic from './ScoreboardGraphic.svelte';
@@ -133,7 +134,7 @@
 	let pingNonce = 0;
 	let pingMs = $state<number | null>(null);
 	let packVersion = $state('Loading pack…');
-	let fieldAssets = $state<{ visual: string; physics: string; semantics: string } | null>(null);
+	let fieldAssets = $state<{ visual: string; physics: string; semantics: string; ui?: { scoreboard: string } } | null>(null);
 	let robotAssets = $state<{ visual: string; physics: string } | null>(null);
 	type FieldDefinition = {
 		colliders: Array<{
@@ -150,6 +151,8 @@
 	let fieldDefinition = $state<FieldDefinition | null>(null);
 	let fieldDebugOpen = $state(false);
 	let robotCollisionDebugOpen = $state(false);
+	let intakeCollisionDebugOpen = $state(false);
+	let mechanismForceDebugOpen = $state(true);
 	let semanticEvents = $state<string[]>([]);
 	let activeTriggerIds = $derived(
 		new Set(
@@ -171,6 +174,7 @@
 	let inputTurn = $state(0);
 	let inputIntake = $state(0);
 	let inputOuttake = $state(0);
+	let inputTransfer = $state(0);
 	let inputClimb = $state(0);
 	let cameraMode = $state<'overview' | 'robot'>('overview');
 	let cameraDirection = $state<'north' | 'south'>('north');
@@ -267,6 +271,7 @@
 	let lastSentTurn = Number.NaN;
 	let lastSentIntake = Number.NaN;
 	let lastSentOuttake = Number.NaN;
+	let lastSentTransfer = Number.NaN;
 	let lastSentClimb = Number.NaN;
 	let lastInputSentAt = 0;
 	const highIsBadTone = (value: number, warning: number, critical: number) =>
@@ -416,7 +421,8 @@
 			Number(pressed.has('w') || pressed.has('arrowup')) -
 			Number(pressed.has('s') || pressed.has('arrowdown'));
 		const keyboardIntake = Number(pressed.has(' ') || pressed.has('e'));
-		const keyboardOuttake = Number(pressed.has('q') || pressed.has('f'));
+		const keyboardOuttake = Number(pressed.has('q'));
+		const keyboardTransfer = Number(pressed.has('f'));
 		const keyboardClimb = Number(pressed.has('c') || pressed.has('v') || pressed.has('shift'));
 
 		const gamepad = activeGamepad();
@@ -424,6 +430,7 @@
 		let gamepadTurn = 0;
 		let gamepadIntake = 0;
 		let gamepadOuttake = 0;
+		let gamepadTransfer = 0;
 		let gamepadClimb = 0;
 		if (gamepad) {
 			gamepadDrive = applyDeadzone(-(gamepad.axes[1] ?? 0));
@@ -434,6 +441,7 @@
 			const right = Math.max(gamepad.buttons[5]?.value ?? 0, gamepad.buttons[7]?.value ?? 0);
 			gamepadIntake = left;
 			gamepadOuttake = right;
+			gamepadTransfer = gamepad.buttons[0]?.value ?? 0;
 			gamepadClimb = gamepad.buttons[3]?.value ?? gamepad.buttons[2]?.value ?? 0;
 			// The A button commands neutral input, allowing the server-side
 			// brake limit to act.
@@ -449,6 +457,7 @@
 			turn: keyboardActive ? keyboardTurn : gamepadTurn,
 			intake: Math.max(keyboardIntake, gamepadIntake),
 			outtake: Math.max(keyboardOuttake, gamepadOuttake),
+			transfer: Math.max(keyboardTransfer, gamepadTransfer),
 			climb: Math.max(keyboardClimb, gamepadClimb),
 			source: (keyboardActive ? 'keyboard' : gamepad ? 'gamepad' : 'keyboard') as
 				'keyboard' | 'gamepad'
@@ -463,6 +472,7 @@
 			Math.abs(input.turn - lastSentTurn) > 0.005 ||
 			Math.abs(input.intake - lastSentIntake) > 0.005 ||
 			Math.abs(input.outtake - lastSentOuttake) > 0.005 ||
+			Math.abs(input.transfer - lastSentTransfer) > 0.005 ||
 			Math.abs(input.climb - lastSentClimb) > 0.005;
 		if (!force && !changed && now - lastInputSentAt < 250) return;
 
@@ -471,11 +481,13 @@
 		inputTurn = input.turn;
 		inputIntake = input.intake;
 		inputOuttake = input.outtake;
+		inputTransfer = input.transfer;
 		inputClimb = input.climb;
 		lastSentDrive = input.drive;
 		lastSentTurn = input.turn;
 		lastSentIntake = input.intake;
 		lastSentOuttake = input.outtake;
+		lastSentTransfer = input.transfer;
 		lastSentClimb = input.climb;
 		lastInputSentAt = now;
 		socket.send(
@@ -486,6 +498,7 @@
 				move_z: input.drive,
 				intake_power: input.intake,
 				outtake_power: input.outtake,
+				transfer_power: input.transfer,
 				climb_power: input.climb
 			})
 		);
@@ -1056,6 +1069,24 @@
 		>
 			{robotCollisionDebugOpen ? 'Hide robot collisions' : 'Robot collisions'}
 		</Button>
+		<Button
+			variant="outline"
+			class={intakeCollisionDebugOpen
+				? 'border-fuchsia-300/70 bg-fuchsia-300/20 text-fuchsia-100 hover:bg-fuchsia-300/30'
+				: 'border-fuchsia-300/35 bg-black/40 text-fuchsia-100 hover:bg-fuchsia-300/10'}
+			onclick={() => (intakeCollisionDebugOpen = !intakeCollisionDebugOpen)}
+		>
+			{intakeCollisionDebugOpen ? 'Hide intake collision' : 'Intake collision'}
+		</Button>
+		<Button
+			variant="outline"
+			class={mechanismForceDebugOpen
+				? 'border-yellow-300/70 bg-yellow-300/20 text-yellow-100 hover:bg-yellow-300/30'
+				: 'border-yellow-300/35 bg-black/40 text-yellow-100 hover:bg-yellow-300/10'}
+			onclick={() => (mechanismForceDebugOpen = !mechanismForceDebugOpen)}
+		>
+			{mechanismForceDebugOpen ? 'Hide mechanism forces' : 'Mechanism forces'}
+		</Button>
 		{#if cameraMode === 'robot'}
 			<Button
 				variant="outline"
@@ -1479,6 +1510,22 @@
 			length={physics.robotLengthM}
 			physicsUrl={robotAssets?.physics}
 			visible={robotCollisionDebugOpen}
+		/>
+		<RobotCollisionDebug
+			players={players}
+			frame={objectFrame}
+			width={physics.robotWidthM}
+			height={physics.robotHeightM}
+			length={physics.robotLengthM}
+			physicsUrl={robotAssets?.physics}
+			visible={intakeCollisionDebugOpen}
+			intakeOnly
+			showBalls={false}
+		/>
+		<MechanismForceDebug
+			players={players}
+			semanticsUrl={robotAssets?.physics}
+			visible={mechanismForceDebugOpen}
 		/>
 		<ScriptedObjects frame={renderedObjectFrame} />
 		<T.Group>

@@ -2,9 +2,21 @@
 	import { T } from '@threlte/core';
 	import { Euler, Matrix4, Vector3 } from 'three';
 
-	type Player = { id: string; x: number; y: number; z: number; yaw: number };
+	type Player = {
+		id: string;
+		x: number;
+		y: number;
+		z: number;
+		yaw: number;
+		intakeRollerAngle: number;
+	};
 	type Frame = { positions: Float32Array; radius: number };
-	type Collider = { center: [number, number, number]; half: [number, number, number]; axes: [[number, number, number], [number, number, number], [number, number, number]] };
+	type Collider = {
+		id: string;
+		center: [number, number, number];
+		half: [number, number, number];
+		axes: [[number, number, number], [number, number, number], [number, number, number]];
+	};
 
 	let {
 		players,
@@ -13,7 +25,9 @@
 		height,
 		length,
 		physicsUrl,
-		visible
+		visible,
+		intakeOnly = false,
+		showBalls = true
 	}: {
 		players: Player[];
 		frame: Frame;
@@ -22,19 +36,36 @@
 		length: number;
 		physicsUrl: string | undefined;
 		visible: boolean;
+		intakeOnly?: boolean;
+		showBalls?: boolean;
 	} = $props();
 	let colliders = $state<Collider[]>([]);
+	const displayedColliders = $derived(
+		intakeOnly ? colliders.filter((collider) => collider.id === 'IntakeRoller') : colliders
+	);
+
+	function mechanismId(name: string | undefined, inherited: string | undefined) {
+		const candidates = [name, inherited];
+		if (candidates.some((candidate) => candidate === 'IntakeRoller' || candidate?.startsWith('IntakeRoller'))) return 'IntakeRoller';
+		if (candidates.some((candidate) => candidate === 'OuttakeRoller' || candidate?.startsWith('OuttakeRoller'))) return 'OuttakeRoller';
+		if (candidates.some((candidate) => candidate === 'TransferFlap' || candidate?.startsWith('TransferFlap') || candidate === 'Transfer Flap')) return 'TransferFlap';
+		if (candidates.some((candidate) => candidate === 'ClimbWheel1' || candidate?.startsWith('ClimbWheel1'))) return 'ClimbWheel1';
+		if (candidates.some((candidate) => candidate === 'ClimbWheel2' || candidate?.startsWith('ClimbWheel2'))) return 'ClimbWheel2';
+		return undefined;
+	}
 
 	$effect(() => {
 		if (!physicsUrl) return;
 		const controller = new AbortController();
 		fetch(physicsUrl, { signal: controller.signal })
 			.then((response) => response.json())
-			.then((asset) => {
+			.then((asset: any) => {
 				const result: Collider[] = [];
 				let floor = Infinity;
 
-				function collect(node: any, parentMatrix: Matrix4) {
+				function collect(node: any, parentMatrix: Matrix4, inheritedId?: string) {
+					const mechanism = mechanismId(node.name, inheritedId);
+					const id = mechanism ?? node.name ?? inheritedId ?? 'unnamed';
 					const localM = new Matrix4();
 					if (node.transformation && node.transformation.length >= 16) {
 						const a = node.transformation;
@@ -63,17 +94,19 @@
 						const min = [Math.min(...points.map((p) => p[0])), Math.min(...points.map((p) => p[1])), Math.min(...points.map((p) => p[2]))];
 						const max = [Math.max(...points.map((p) => p[0])), Math.max(...points.map((p) => p[1])), Math.max(...points.map((p) => p[2]))];
 						floor = Math.min(floor, min[1]);
-						const rawAxes = [[m[0], m[1], m[2]], [m[4], m[5], m[6]], [m[8], m[9], m[10]]];
+						// Match the Rust pack loader exactly: authored transforms are
+						// row-major, and each OBB axis comes from a matrix row.
+						const rawAxes = [[m[0], m[4], m[8]], [m[1], m[5], m[9]], [m[2], m[6], m[10]]];
 						const axes = rawAxes.map((axis) => { const scale = Math.hypot(...axis); return axis.map((value) => value / Math.max(scale, 1e-6)); }) as Collider['axes'];
 						const half = rawAxes.map((axis, i) => (localMax[i] - localMin[i]) * Math.hypot(...axis) / 2) as [number, number, number];
 						const localCenter = localMin.map((value, i) => (value + localMax[i]) / 2);
 						const center: [number, number, number] = [m[0] * localCenter[0] + m[4] * localCenter[1] + m[8] * localCenter[2] + m[12], m[1] * localCenter[0] + m[5] * localCenter[1] + m[9] * localCenter[2] + m[13], m[2] * localCenter[0] + m[6] * localCenter[1] + m[10] * localCenter[2] + m[14]];
-						result.push({ center, half, axes });
+						result.push({ id, center, half, axes });
 					}
 
 					if (node.children) {
 						for (const child of node.children) {
-							collect(child, worldM);
+							collect(child, worldM, mechanism ?? inheritedId);
 						}
 					}
 				}
@@ -90,7 +123,7 @@
 
 	function ballTouchesRobot(ball: [number, number, number], player: Player) {
 		const sin = Math.sin(player.yaw + Math.PI), cos = Math.cos(player.yaw + Math.PI);
-		const volumes = colliders.length ? colliders : [{ center: [0, 0, 0] as [number, number, number], half: [width / 2, height / 2, length / 2] as [number, number, number], axes: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as Collider['axes'] }];
+		const volumes = colliders.length ? colliders : [{ id: 'RobotEnvelope', center: [0, 0, 0] as [number, number, number], half: [width / 2, height / 2, length / 2] as [number, number, number], axes: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as Collider['axes'] }];
 		return volumes.some((volume) => {
 			const center = [player.x + cos * volume.center[0] + sin * volume.center[2], player.y + volume.center[1], player.z - sin * volume.center[0] + cos * volume.center[2]];
 			const delta = [ball[0] - center[0], ball[1] - center[1], ball[2] - center[2]];
@@ -105,16 +138,33 @@
 		return [frame.positions[index * 3], frame.positions[index * 3 + 1], frame.positions[index * 3 + 2]];
 	}
 
-	function colliderPose(player: Player, collider: Collider) {
+	function colliderWorldAxes(player: Player, collider: Collider) {
 		const yaw = player.yaw + Math.PI;
 		const sin = Math.sin(yaw);
 		const cos = Math.cos(yaw);
+		const spin = collider.id === 'IntakeRoller' ? player.intakeRollerAngle : 0;
+		const spinSin = Math.sin(spin);
+		const spinCos = Math.cos(spin);
+		// This is the same Y-axis Rodrigues rotation used by the server for
+		// the intake roller's collision OBBs.
+		const spinAxis = (axis: [number, number, number]): [number, number, number] => [
+			axis[0] * spinCos + axis[2] * spinSin,
+			axis[1],
+			-axis[0] * spinSin + axis[2] * spinCos
+		];
 		const rotate = (axis: [number, number, number]): [number, number, number] => [
 			cos * axis[0] + sin * axis[2],
 			axis[1],
 			-sin * axis[0] + cos * axis[2]
 		];
-		const worldAxes = collider.axes.map(rotate) as Collider['axes'];
+		return collider.axes.map((axis) => rotate(spinAxis(axis))) as Collider['axes'];
+	}
+
+	function colliderPose(player: Player, collider: Collider) {
+		const yaw = player.yaw + Math.PI;
+		const sin = Math.sin(yaw);
+		const cos = Math.cos(yaw);
+		const worldAxes = colliderWorldAxes(player, collider);
 		const matrix = new Matrix4().makeBasis(
 			new Vector3(...worldAxes[0]),
 			new Vector3(...worldAxes[1]),
@@ -126,35 +176,82 @@
 				player.x + cos * collider.center[0] + sin * collider.center[2],
 				player.y + collider.center[1],
 				player.z - sin * collider.center[0] + cos * collider.center[2]
-			],
+			] as [number, number, number],
 			rotation: [euler.x, euler.y, euler.z] as [number, number, number]
+		};
+	}
+
+	function intakeCylinderPose(player: Player, collider: Collider) {
+		const yaw = player.yaw + Math.PI;
+		const sin = Math.sin(yaw);
+		const cos = Math.cos(yaw);
+		const axialAxis = collider.half.reduce(
+			(longest, extent, index) => (extent > collider.half[longest] ? index : longest),
+			0
+		);
+		const radialAxes = [0, 1, 2].filter((axis) => axis !== axialAxis);
+		const worldAxes = colliderWorldAxes(player, collider);
+		const matrix = new Matrix4().makeBasis(
+			new Vector3(...worldAxes[radialAxes[0]]),
+			new Vector3(...worldAxes[axialAxis]),
+			new Vector3(...worldAxes[radialAxes[1]])
+		);
+		const euler = new Euler().setFromRotationMatrix(matrix);
+		return {
+			position: [
+				player.x + cos * collider.center[0] + sin * collider.center[2],
+				player.y + collider.center[1],
+				player.z - sin * collider.center[0] + cos * collider.center[2]
+			] as [number, number, number],
+			rotation: [euler.x, euler.y, euler.z] as [number, number, number],
+			radius: (collider.half[radialAxes[0]] + collider.half[radialAxes[1]]) * 0.5,
+			height: collider.half[axialAxis] * 2
 		};
 	}
 </script>
 
 {#if visible}
 	{#each players as player (player.id)}
-		{#if colliders.length}
-			{#each colliders as collider}
-				{@const pose = colliderPose(player, collider)}
-				<T.Mesh position={pose.position} rotation={pose.rotation}>
-					<T.BoxGeometry args={[collider.half[0] * 2, collider.half[1] * 2, collider.half[2] * 2]} />
-					<T.MeshBasicMaterial color="#22d3ee" wireframe transparent opacity={0.9} />
+		{#if displayedColliders.length}
+			{#each displayedColliders as collider}
+				{@const isIntakeCylinder = collider.id === 'IntakeRoller'}
+				{@const boxPose = colliderPose(player, collider)}
+				{@const cylinderPose = intakeCylinderPose(player, collider)}
+				<T.Mesh
+					position={isIntakeCylinder ? cylinderPose.position : boxPose.position}
+					rotation={isIntakeCylinder ? cylinderPose.rotation : boxPose.rotation}
+					renderOrder={100}
+				>
+					{#if isIntakeCylinder}
+						<T.CylinderGeometry args={[cylinderPose.radius, cylinderPose.radius, cylinderPose.height, 16]} />
+					{:else}
+						<T.BoxGeometry args={[collider.half[0] * 2, collider.half[1] * 2, collider.half[2] * 2]} />
+					{/if}
+					<T.MeshBasicMaterial
+						color={intakeOnly ? '#d946ef' : '#22d3ee'}
+						wireframe={!intakeOnly}
+						transparent
+						opacity={intakeOnly ? 0.38 : 0.9}
+						depthWrite={false}
+						depthTest={!intakeOnly}
+					/>
 				</T.Mesh>
 			{/each}
-		{:else}
+		{:else if !intakeOnly}
 			<T.Mesh position={[player.x, player.y, player.z]} rotation={[0, player.yaw, 0]}>
 				<T.BoxGeometry args={[width, height, length]} />
 				<T.MeshBasicMaterial color="#f97316" wireframe transparent opacity={0.9} />
 			</T.Mesh>
 		{/if}
 	{/each}
-	{#each Array.from({ length: frame.positions.length / 3 }) as _, index (index)}
-		{@const position = ballPosition(index)}
-		{@const touching = players.some((player) => ballTouchesRobot(position, player))}
-		<T.Mesh position={position}>
-			<T.SphereGeometry args={[frame.radius * (touching ? 1.12 : 1.03), 8, 6]} />
-			<T.MeshBasicMaterial color={touching ? '#ef4444' : '#facc15'} wireframe />
-		</T.Mesh>
-	{/each}
+	{#if showBalls}
+		{#each Array.from({ length: frame.positions.length / 3 }) as _, index (index)}
+			{@const position = ballPosition(index)}
+			{@const touching = players.some((player) => ballTouchesRobot(position, player))}
+			<T.Mesh position={position}>
+				<T.SphereGeometry args={[frame.radius * (touching ? 1.12 : 1.03), 8, 6]} />
+				<T.MeshBasicMaterial color={touching ? '#ef4444' : '#facc15'} wireframe />
+			</T.Mesh>
+		{/each}
+	{/if}
 {/if}

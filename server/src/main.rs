@@ -222,6 +222,8 @@ enum ClientMessage {
         intake_power: f32,
         #[serde(default)]
         outtake_power: f32,
+        #[serde(default)]
+        transfer_power: f32,
     },
     RobotSpecs {
         #[serde(default)]
@@ -545,8 +547,8 @@ async fn handle_socket(
             },
             message = receiver.next() => match message {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
-                    Ok(ClientMessage::Input { sequence, move_x, move_z, intake_power, outtake_power }) => {
-                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, intake_power, outtake_power, sequence }).await;
+                    Ok(ClientMessage::Input { sequence, move_x, move_z, intake_power, outtake_power, transfer_power }) => {
+                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, intake_power, outtake_power, transfer_power, sequence }).await;
                     }
                     Ok(ClientMessage::RobotSpecs { capacity, intake_rate_bps, outtake_rate_bps, outtake_velocity_mps, outtake_angle_deg, flywheel_width_m }) => {
                         let _ = match_handle.input_tx.send(MatchInput::PlayerMech { user_id: claims.sub.clone(), mech: game::sphere_runtime::MechSpec {

@@ -12,6 +12,7 @@ export type MatchPlayer = {
 	velocityY: number;
 	velocityZ: number;
 	angularVelocityY: number;
+	intakeRollerAngle: number;
 	storedBalls: number;
 	capacity: number;
 };
@@ -303,7 +304,8 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 						velocityZ: section.f32(),
 						angularVelocityY: section.f32(),
 						storedBalls: section.u32(),
-						capacity: section.u32()
+						capacity: section.u32(),
+						intakeRollerAngle: section.f32()
 					});
 				}
 				snapshot.players = players;

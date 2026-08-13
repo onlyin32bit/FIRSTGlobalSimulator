@@ -52,6 +52,9 @@ pub struct PlayerSnapshot {
     pub velocity_z: f32,
     #[serde(rename = "angularVelocityY")]
     pub angular_velocity_y: f32,
+    /// Authoritative intake-roller angle used by collision debug rendering.
+    #[serde(rename = "intakeRollerAngle")]
+    pub intake_roller_angle: f32,
     pub color: String,
     #[serde(rename = "storedBalls")]
     pub stored_balls: usize,
@@ -449,6 +452,7 @@ impl MatchRuntime {
                         velocity_y: velocity.y,
                         velocity_z: velocity.z,
                         angular_velocity_y: angular_velocity.y,
+                        intake_roller_angle: 0.0,
                         color: player.color.to_string(),
                         stored_balls: 0,
                         capacity: self.storage_capacity,

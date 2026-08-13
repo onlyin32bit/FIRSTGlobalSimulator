@@ -30,10 +30,59 @@ pub struct GamePackMetadata {
     pub arena: ArenaConfig,
     pub field_definition: FieldDefinition,
     pub robot_colliders: Vec<FieldCollider>,
+    /// Authorized semantic zones pulled from `bot.semantics.json` (IntakeZone,
+    /// TransferZone, OuttakeZone). Empty when the pack ships no semantics:
+    /// the mechanism buttons then have no pull force.
+    pub semantic_zones: Vec<RobotSemanticZone>,
     /// Raw Rhai source belongs to the API pack snapshot, not the filesystem.
     /// It stays process-local and is never sent to connected clients.
     #[serde(skip)]
     pub script_sources: BTreeMap<String, String>,
+}
+
+/// The kind of an authored robot semantic zone. The simulator treats every
+/// zone with the exact same directional-conveyor mechanism; the kind only
+/// decides which mechanism power channel gates it and which force config it
+/// uses.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SemanticZoneKind {
+    Intake,
+    Transfer,
+    Outtake,
+}
+
+/// An authored robot semantic zone: the feed geometry for a mechanism and the
+/// kind that selects its power channel and force configuration.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RobotSemanticZone {
+    pub kind: SemanticZoneKind,
+    pub geometry: RobotIntakeGeometry,
+}
+
+/// Robot-local mechanism geometry described in the authored robot semantics.
+/// All coordinates are in robot-local metres (yaw applied per player at
+/// runtime), and the Z-help caller — an IntakeZone mesh, a TransferZone mesh
+/// or an OuttakeZone mesh — is described identically by this OBB + feed
+/// direction.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RobotIntakeGeometry {
+    /// OBB centre of the authored zone mesh in robot-local space.
+    pub zone_center: [f32; 3],
+    /// Half extents of the OBB along each of `zone_axes`.
+    pub zone_half_extents: [f32; 3],
+    /// Normalised local axes of the OBB in robot-local space. The mouth is a
+    /// thin slot that spans the robot width, so the touch test uses this OBB
+    /// instead of a fat bounding sphere that would magnetise balls from afar.
+    pub zone_axes: [[f32; 3]; 3],
+    /// Robot-local unit vector pointing along the mechanism feed direction,
+    /// derived from the zone transform (its local +Z column points out of the
+    /// mechanism mouth, so the conveyor pushes along the negated column).
+    /// Never hardcoded world space: it is rotated per player with the same
+    /// yaw convention as the physics colliders.
+    pub direction: [f32; 3],
 }
 
 /// The API-owned source of truth a match host fetches before it accepts users.
@@ -46,6 +95,10 @@ pub struct GamePackRuntimeSnapshot {
     pub field_physics: serde_json::Value,
     pub field_semantics: serde_json::Value,
     pub robot_physics: serde_json::Value,
+    /// Optional authored robot semantics (e.g. IntakeZone) mirrored from the
+    /// API runtime response. Old packs without one deserialize as empty.
+    #[serde(default)]
+    pub robot_semantics: serde_json::Value,
     pub scripts: BTreeMap<String, String>,
 }
 
@@ -126,9 +179,15 @@ fn default_actuator_mass() -> f32 {
 fn default_actuator_friction() -> f32 {
     0.9
 }
-fn default_contact_stiffness() -> f32 { 500.0 }
-fn default_contact_damping() -> f32 { 5.0 }
-fn default_max_compression() -> f32 { 0.010 }
+fn default_contact_stiffness() -> f32 {
+    500.0
+}
+fn default_contact_damping() -> f32 {
+    5.0
+}
+fn default_max_compression() -> f32 {
+    0.010
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -308,6 +367,19 @@ pub struct RobotPhysicsConfig {
     pub intake_friction: f32,
     pub intake_normal_force_n: f32,
     pub intake_restitution_curve: RestitutionCurveConfig,
+    /// Maximum horizontal acceleration (m/s²) the directional IntakeZone
+    /// conveyor applies to a ball near the mouth, along the authored feed
+    /// direction. The ball stays a normal dynamic body — this is an ordinary
+    /// acceleration integrated with gravity, not a teleport or set-position.
+    pub intake_force_mps2: f32,
+    /// Same directional-conveyor acceleration for the TransferZone. Matches
+    /// `intake_force_mps2` semantics: the mechanism pushes a ball along the
+    /// zone's authored feed direction as a normal dynamic body.
+    pub transfer_force_mps2: f32,
+    /// Same directional-conveyor acceleration for the OuttakeZone. Pushes a
+    /// ball along the zone's authored feed direction (outward) as a normal
+    /// dynamic body.
+    pub outtake_force_mps2: f32,
     /// Ball storage capacity of the on-robot hopper (0 = no storage, balls
     /// simply deflect off the chassis as before).
     pub storage_capacity: usize,
@@ -403,14 +475,18 @@ impl PackLoader {
                 "The pack robot physics asset contains no collision volumes".into(),
             ));
         } else {
-            info!(colliders = robot_colliders.len(), "Loaded authored robot collision volumes");
+            info!(
+                colliders = robot_colliders.len(),
+                "Loaded authored robot collision volumes"
+            );
         }
         Ok(GamePackMetadata {
             manifest: snapshot.manifest,
             scripts,
             arena,
             field_definition,
-            robot_colliders,
+            robot_colliders: robot_colliders.clone(),
+            semantic_zones: robot_semantic_zones(&snapshot.robot_semantics),
             script_sources: snapshot.scripts,
         })
     }
@@ -473,11 +549,20 @@ impl PackLoader {
         )
         .ok()
         .and_then(|source| serde_json::from_str(&source).ok());
+        let robot_semantics = std::fs::read_to_string(
+            root.parent()
+                .and_then(std::path::Path::parent)
+                .unwrap_or(root)
+                .join("robots/StarterBot/bot.semantics.json"),
+        )
+        .ok()
+        .and_then(|source| serde_json::from_str(&source).ok());
         self.load_runtime_snapshot(GamePackRuntimeSnapshot {
             manifest,
             field_physics,
             field_semantics,
             robot_physics: robot_physics.unwrap_or_else(|| serde_json::json!({})),
+            robot_semantics: robot_semantics.unwrap_or_else(|| serde_json::json!({})),
             scripts,
         })
     }
@@ -624,15 +709,35 @@ fn infer_actuator_config(id: &str, robot: &RobotPhysicsConfig) -> Option<Actuato
     }
 
     let (channel, speed, spin_axis, friction) = if is_intake {
-        ("intake".to_string(), robot.intake_surface_speed_mps, [0.0, 1.0, 0.0], robot.intake_friction)
+        (
+            "intake".to_string(),
+            robot.intake_surface_speed_mps,
+            [0.0, 1.0, 0.0],
+            robot.intake_friction,
+        )
     } else if is_outtake {
         if id == "OuttakeRoller" {
-            ("outtake".to_string(), robot.outtake_velocity_mps, [0.0, 1.0, 0.0], robot.surface_friction)
+            (
+                "outtake".to_string(),
+                robot.outtake_velocity_mps,
+                [0.0, 1.0, 0.0],
+                robot.surface_friction,
+            )
         } else {
-            ("outtake".to_string(), robot.outtake_velocity_mps, [0.0, 1.0, 0.0], robot.surface_friction)
+            (
+                "outtake".to_string(),
+                robot.outtake_velocity_mps,
+                [0.0, 1.0, 0.0],
+                robot.surface_friction,
+            )
         }
     } else {
-        ("climb".to_string(), 3.0, [1.0, 0.0, 0.0], robot.surface_friction)
+        (
+            "climb".to_string(),
+            3.0,
+            [1.0, 0.0, 0.0],
+            robot.surface_friction,
+        )
     };
 
     Some(ActuatorConfig {
@@ -668,9 +773,7 @@ fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut out = [0.0f32; 16];
     for row in 0..4 {
         for col in 0..4 {
-            out[row * 4 + col] = (0..4)
-                .map(|k| a[row * 4 + k] * b[k * 4 + col])
-                .sum();
+            out[row * 4 + col] = (0..4).map(|k| a[row * 4 + k] * b[k * 4 + col]).sum();
         }
     }
     out
@@ -678,10 +781,7 @@ fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 
 fn identity_mat4() -> [f32; 16] {
     [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ]
 }
 
@@ -690,7 +790,8 @@ fn get_mechanism_id(name: &str) -> Option<&str> {
         Some("IntakeRoller")
     } else if name == "OuttakeRoller" || name.starts_with("OuttakeRoller") {
         Some("OuttakeRoller")
-    } else if name == "TransferFlap" || name.starts_with("TransferFlap") || name == "Transfer Flap" {
+    } else if name == "TransferFlap" || name.starts_with("TransferFlap") || name == "Transfer Flap"
+    {
         Some("TransferFlap")
     } else if name == "ClimbWheel1" || name.starts_with("ClimbWheel1") {
         Some("ClimbWheel1")
@@ -710,7 +811,14 @@ fn collect_colliders(
     scene: &serde_json::Value,
     parent_mat: &[f32; 16],
     inherited_id: Option<&str>,
-    out: &mut Vec<(String, [f32; 3], [f32; 3], [f32; 3], [f32; 3], [[f32; 3]; 3])>,
+    out: &mut Vec<(
+        String,
+        [f32; 3],
+        [f32; 3],
+        [f32; 3],
+        [f32; 3],
+        [[f32; 3]; 3],
+    )>,
 ) {
     let node_name = node.get("name").and_then(|v| v.as_str()).unwrap_or("");
     // Compose this node's local transform with the parent's.
@@ -761,7 +869,9 @@ fn collect_colliders(
                         break;
                     }
                 }
-                if !ok { break; }
+                if !ok {
+                    break;
+                }
             }
             if ok && local_min.iter().all(|v| v.is_finite()) {
                 let local_center = [
@@ -804,7 +914,14 @@ fn collect_colliders(
                     min[world_axis] -= radius;
                     max[world_axis] += radius;
                 }
-                out.push((effective_id.to_string(), min, max, center, half_extents, axes));
+                out.push((
+                    effective_id.to_string(),
+                    min,
+                    max,
+                    center,
+                    half_extents,
+                    axes,
+                ));
             }
         }
     }
@@ -835,7 +952,6 @@ fn assimp_colliders(
     }
     out
 }
-
 
 fn assimp_bound(
     child: &serde_json::Value,
@@ -899,6 +1015,111 @@ fn transform_point(matrix: &[f32; 16], point: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Extract every authored mechanism zone from `bot.semantics.json`: the
+/// IntakeZone, TransferZone and OuttakeZone nodes. Each node carries its
+/// mechanism mesh; the mesh OBB becomes the touch volume for the conveyor,
+/// and the node's local Z axis (negated) gives the feed direction. The feed
+/// direction is never hardcoded world space — it comes from each zone's own
+/// authored transform. Coordinates stay robot-local and are rotated per-player
+/// with the same convention as the physics colliders.
+fn robot_semantic_zones(semantics: &serde_json::Value) -> Vec<RobotSemanticZone> {
+    if semantics.is_null() {
+        return Vec::new();
+    }
+    let mut zones = Vec::new();
+    let mut candidates = assimp_children(semantics);
+    if let Some(root) = semantics.get("rootnode") {
+        candidates.push(root);
+    }
+    for node in candidates {
+        let Some(name) = node
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let kind = match name {
+            "IntakeZone" => SemanticZoneKind::Intake,
+            "TransferZone" => SemanticZoneKind::Transfer,
+            "OuttakeZone" => SemanticZoneKind::Outtake,
+            _ => continue,
+        };
+        if let Some(geometry) = robot_zone_geometry(node, semantics) {
+            zones.push(RobotSemanticZone { kind, geometry });
+        }
+    }
+    zones
+}
+
+/// Compute the OBB + feed direction of one authored mechanism zone node.
+fn robot_zone_geometry(
+    node: &serde_json::Value,
+    semantics: &serde_json::Value,
+) -> Option<RobotIntakeGeometry> {
+    let matrix = assimp_matrix(node)?;
+    let mesh_index = node.get("meshes")?.as_array()?.first()?.as_u64()? as usize;
+    let vertices = semantics
+        .get("meshes")?
+        .as_array()?
+        .get(mesh_index)?
+        .get("vertices")?
+        .as_array()?;
+    let mut local_min = [f32::INFINITY; 3];
+    let mut local_max = [f32::NEG_INFINITY; 3];
+    for xyz in vertices.chunks_exact(3) {
+        for axis in 0..3 {
+            let value = xyz[axis].as_f64()? as f32;
+            local_min[axis] = local_min[axis].min(value);
+            local_max[axis] = local_max[axis].max(value);
+        }
+    }
+    let raw_axes = [
+        [matrix[0], matrix[4], matrix[8]],
+        [matrix[1], matrix[5], matrix[9]],
+        [matrix[2], matrix[6], matrix[10]],
+    ];
+    let mut axes = [[0.0; 3]; 3];
+    let mut half_extents = [0.0; 3];
+    for axis in 0..3 {
+        let length = (raw_axes[axis][0] * raw_axes[axis][0]
+            + raw_axes[axis][1] * raw_axes[axis][1]
+            + raw_axes[axis][2] * raw_axes[axis][2])
+            .sqrt()
+            .max(1.0e-6);
+        axes[axis] = [
+            raw_axes[axis][0] / length,
+            raw_axes[axis][1] / length,
+            raw_axes[axis][2] / length,
+        ];
+        half_extents[axis] = 0.5 * (local_max[axis] - local_min[axis]) * length;
+    }
+    let local_center = [
+        0.5 * (local_min[0] + local_max[0]),
+        0.5 * (local_min[1] + local_max[1]),
+        0.5 * (local_min[2] + local_max[2]),
+    ];
+    let zone_center = transform_point(&matrix, local_center);
+    // The mechanism mouth is authored facing out: its local +Z column points
+    // outward, so the conveyor pushes balls toward local -Z. This is the same
+    // orientation convention the collision solver already uses.
+    let depth_len = (raw_axes[2][0] * raw_axes[2][0]
+        + raw_axes[2][1] * raw_axes[2][1]
+        + raw_axes[2][2] * raw_axes[2][2])
+        .sqrt()
+        .max(1.0e-6);
+    let direction = [
+        -raw_axes[2][0] / depth_len,
+        -raw_axes[2][1] / depth_len,
+        -raw_axes[2][2] / depth_len,
+    ];
+    Some(RobotIntakeGeometry {
+        zone_center,
+        zone_half_extents: half_extents,
+        zone_axes: axes,
+        direction,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{GamePackRuntimeSnapshot, PackLoader};
@@ -950,6 +1171,16 @@ mod tests {
                             .and_then(std::path::Path::parent)
                             .unwrap()
                             .join("robots/StarterBot/bot.physics.json"),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+                robot_semantics: serde_json::from_str(
+                    &std::fs::read_to_string(
+                        root.parent()
+                            .and_then(std::path::Path::parent)
+                            .unwrap()
+                            .join("robots/StarterBot/bot.semantics.json"),
                     )
                     .unwrap(),
                 )
