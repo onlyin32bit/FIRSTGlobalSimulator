@@ -409,6 +409,7 @@ export class APIClient {
 			id: string;
 			name: string;
 			visual: string;
+			lod1?: string;
 			physics?: string;
 			semantics?: string;
 		}>(`/api/game-packs/${encodeURIComponent(id)}/robots/${encodeURIComponent(robotId)}/assets`);

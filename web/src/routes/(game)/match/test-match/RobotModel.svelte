@@ -2,17 +2,22 @@
 	import { T, useTask } from '@threlte/core';
 	import { HTML } from '@threlte/extras';
 	import type { MatchPhysics, MatchPlayer } from './match-protocol';
+	import StarterBotModel from './StarterBotModel.svelte';
 
 	let {
 		player,
 		physics,
 		local,
+		visualAsset,
+		detailVisualAsset,
 		isIntaking = false,
 		isOuttaking = false
 	}: {
 		player: MatchPlayer;
 		physics: MatchPhysics;
 		local: boolean;
+		visualAsset?: string;
+		detailVisualAsset?: string;
 		isIntaking?: boolean;
 		isOuttaking?: boolean;
 	} = $props();
@@ -62,108 +67,115 @@
 </script>
 
 <T.Group position={[player.x, player.y, player.z]} rotation={[0, player.yaw, 0]}>
-	<T.Mesh castShadow receiveShadow>
-		<T.BoxGeometry args={chassisArgs} />
-		<T.MeshStandardMaterial
-			color={player.color}
-			emissive={local ? player.color : '#000000'}
-			emissiveIntensity={local ? 0.25 : 0}
-			roughness={0.4}
-			metalness={0.3}
-		/>
-	</T.Mesh>
-	<T.Mesh
-		castShadow
-		receiveShadow
-		position={[physics.robotWidthM * 0.5 + 0.035, -physics.robotHeightM * 0.18, 0]}
-	>
-		<T.BoxGeometry args={wheelArgs} />
-		<T.MeshStandardMaterial color="#111827" />
-	</T.Mesh>
-	<T.Mesh
-		castShadow
-		receiveShadow
-		position={[-physics.robotWidthM * 0.5 - 0.035, -physics.robotHeightM * 0.18, 0]}
-	>
-		<T.BoxGeometry args={wheelArgs} />
-		<T.MeshStandardMaterial color="#111827" />
-	</T.Mesh>
-	<T.Mesh castShadow receiveShadow position={[0, 0, -physics.robotLengthM * 0.5 - 0.06]}>
-		<T.BoxGeometry args={headingArgs} />
-		<T.MeshStandardMaterial color="#f8fafc" emissive="#38bdf8" emissiveIntensity={0.4} />
-	</T.Mesh>
-
-	{#if physics.intakeEnabled}
-		<T.Group
-			position={[
-				0,
-				physics.intakeCenterHeightM - physics.robotHeightM * 0.5,
-				-physics.intakeForwardOffsetM
-			]}
-		>
-			<T.Mesh castShadow receiveShadow rotation={[intakeRotation, 0, Math.PI * 0.5]}>
-				<T.CylinderGeometry args={intakeArgs} />
-				<T.MeshStandardMaterial
-					color={isIntaking ? '#06b6d4' : '#22d3ee'}
-					emissive={isIntaking ? '#06b6d4' : '#000000'}
-					emissiveIntensity={isIntaking ? 0.8 : 0}
-					roughness={0.4}
-				/>
-			</T.Mesh>
+	{#if visualAsset}
+		<!-- Player poses are chassis-centred; the imported model is ground-authored. -->
+		<T.Group position={[0, -physics.robotHeightM * 0.5, 0]} rotation={[0, Math.PI, 0]}>
+			<StarterBotModel assetUrl={visualAsset} detailAssetUrl={detailVisualAsset} />
 		</T.Group>
-	{/if}
-
-	{#if physics.outtakeHeightM > 0}
-		<T.Group
-			position={[
-				0,
-				physics.outtakeHeightM - physics.robotHeightM * 0.5,
-				-physics.outtakeForwardOffsetM
-			]}
-		>
-			<T.Mesh castShadow receiveShadow rotation={[flywheelRotation, 0, Math.PI * 0.5]}>
-				<T.CylinderGeometry args={[0.06, 0.06, physics.flywheelWidthM, 12]} />
-				<T.MeshStandardMaterial
-					color={isOuttaking ? '#84cc16' : '#a3e635'}
-					emissive={isOuttaking ? '#a3e635' : '#000000'}
-					emissiveIntensity={isOuttaking ? 1.0 : 0}
-					roughness={0.2}
-					metalness={0.6}
-				/>
-			</T.Mesh>
-			<T.Mesh
-				castShadow
-				receiveShadow
-				position={[physics.flywheelWidthM * 0.5 + 0.025, 0, 0]}
-				rotation={[0, 0, Math.PI * 0.5]}
-			>
-				<T.CylinderGeometry args={[0.035, 0.035, 0.05, 8]} />
-				<T.MeshStandardMaterial color="#4d7c0f" />
-			</T.Mesh>
-			<T.Mesh
-				castShadow
-				receiveShadow
-				position={[-physics.flywheelWidthM * 0.5 - 0.025, 0, 0]}
-				rotation={[0, 0, Math.PI * 0.5]}
-			>
-				<T.CylinderGeometry args={[0.035, 0.035, 0.05, 8]} />
-				<T.MeshStandardMaterial color="#4d7c0f" />
-			</T.Mesh>
-		</T.Group>
-	{/if}
-
-	<!-- Hopper stored balls visual -->
-	{#each visibleBalls as pos, i (i)}
-		<T.Mesh position={pos}>
-			<T.SphereGeometry args={[0.045, 12, 12]} />
+	{:else}
+		<T.Mesh castShadow receiveShadow>
+			<T.BoxGeometry args={chassisArgs} />
 			<T.MeshStandardMaterial
-				color="#f97316"
-				roughness={0.3}
-				emissive="#ea580c"
-				emissiveIntensity={0.2}
+				color={player.color}
+				emissive={local ? player.color : '#000000'}
+				emissiveIntensity={local ? 0.25 : 0}
+				roughness={0.4}
+				metalness={0.3}
 			/>
 		</T.Mesh>
-	{/each}
+		<T.Mesh
+			castShadow
+			receiveShadow
+			position={[physics.robotWidthM * 0.5 + 0.035, -physics.robotHeightM * 0.18, 0]}
+		>
+			<T.BoxGeometry args={wheelArgs} />
+			<T.MeshStandardMaterial color="#111827" />
+		</T.Mesh>
+		<T.Mesh
+			castShadow
+			receiveShadow
+			position={[-physics.robotWidthM * 0.5 - 0.035, -physics.robotHeightM * 0.18, 0]}
+		>
+			<T.BoxGeometry args={wheelArgs} />
+			<T.MeshStandardMaterial color="#111827" />
+		</T.Mesh>
+		<T.Mesh castShadow receiveShadow position={[0, 0, -physics.robotLengthM * 0.5 - 0.06]}>
+			<T.BoxGeometry args={headingArgs} />
+			<T.MeshStandardMaterial color="#f8fafc" emissive="#38bdf8" emissiveIntensity={0.4} />
+		</T.Mesh>
+
+		{#if physics.intakeEnabled}
+			<T.Group
+				position={[
+					0,
+					physics.intakeCenterHeightM - physics.robotHeightM * 0.5,
+					-physics.intakeForwardOffsetM
+				]}
+			>
+				<T.Mesh castShadow receiveShadow rotation={[intakeRotation, 0, Math.PI * 0.5]}>
+					<T.CylinderGeometry args={intakeArgs} />
+					<T.MeshStandardMaterial
+						color={isIntaking ? '#06b6d4' : '#22d3ee'}
+						emissive={isIntaking ? '#06b6d4' : '#000000'}
+						emissiveIntensity={isIntaking ? 0.8 : 0}
+						roughness={0.4}
+					/>
+				</T.Mesh>
+			</T.Group>
+		{/if}
+
+		{#if physics.outtakeHeightM > 0}
+			<T.Group
+				position={[
+					0,
+					physics.outtakeHeightM - physics.robotHeightM * 0.5,
+					-physics.outtakeForwardOffsetM
+				]}
+			>
+				<T.Mesh castShadow receiveShadow rotation={[flywheelRotation, 0, Math.PI * 0.5]}>
+					<T.CylinderGeometry args={[0.06, 0.06, physics.flywheelWidthM, 12]} />
+					<T.MeshStandardMaterial
+						color={isOuttaking ? '#84cc16' : '#a3e635'}
+						emissive={isOuttaking ? '#a3e635' : '#000000'}
+						emissiveIntensity={isOuttaking ? 1.0 : 0}
+						roughness={0.2}
+						metalness={0.6}
+					/>
+				</T.Mesh>
+				<T.Mesh
+					castShadow
+					receiveShadow
+					position={[physics.flywheelWidthM * 0.5 + 0.025, 0, 0]}
+					rotation={[0, 0, Math.PI * 0.5]}
+				>
+					<T.CylinderGeometry args={[0.035, 0.035, 0.05, 8]} />
+					<T.MeshStandardMaterial color="#4d7c0f" />
+				</T.Mesh>
+				<T.Mesh
+					castShadow
+					receiveShadow
+					position={[-physics.flywheelWidthM * 0.5 - 0.025, 0, 0]}
+					rotation={[0, 0, Math.PI * 0.5]}
+				>
+					<T.CylinderGeometry args={[0.035, 0.035, 0.05, 8]} />
+					<T.MeshStandardMaterial color="#4d7c0f" />
+				</T.Mesh>
+			</T.Group>
+		{/if}
+
+		<!-- Hopper stored balls visual -->
+		{#each visibleBalls as pos, i (i)}
+			<T.Mesh position={pos}>
+				<T.SphereGeometry args={[0.045, 12, 12]} />
+				<T.MeshStandardMaterial
+					color="#f97316"
+					roughness={0.3}
+					emissive="#ea580c"
+					emissiveIntensity={0.2}
+				/>
+			</T.Mesh>
+		{/each}
+	{/if}
 
 	<HTML position={[0, physics.robotHeightM * 0.5 + 0.45, 0]} center>
 		<div

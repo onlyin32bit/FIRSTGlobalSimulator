@@ -4,7 +4,7 @@
 	import { page } from '$app/state';
 	import { Canvas, T } from '@threlte/core';
 	import { Grid, OrbitControls } from '@threlte/extras';
-	import { BasicShadowMap, WebGLRenderer } from 'three';
+	import { WebGLRenderer } from 'three';
 	import { Button } from '$lib/components/ui/button';
 	import { ApiError, api } from '$lib/api';
 	import { loadPreferences, type UserPreferences } from '$lib/features/settings/preferences.svelte';
@@ -135,6 +135,8 @@
 	let pingMs = $state<number | null>(null);
 	let packVersion = $state('Loading pack…');
 	let fieldAssets = $state<{ visual: string; physics: string; semantics: string } | null>(null);
+	let starterBotVisual = $state<string | null>(null);
+	let starterBotDetailVisual = $state<string | null>(null);
 	type FieldDefinition = {
 		colliders: Array<{
 			id: string;
@@ -262,10 +264,7 @@
 	let renderer: WebGLRenderer | undefined;
 	const createRenderer = (canvas: HTMLCanvasElement) => {
 		renderer = new WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-		// One low-cost shadow map is enough to anchor the robots and balls to
-		// the field. BasicShadowMap avoids the extra filtering passes of PCF.
-		renderer.shadowMap.enabled = true;
-		renderer.shadowMap.type = BasicShadowMap;
+		renderer.shadowMap.enabled = false;
 		return renderer;
 	};
 	let lastSentDrive = Number.NaN;
@@ -880,11 +879,12 @@
 				return;
 			}
 			try {
-				const [ticket, currentUser, assets, metadata] = await Promise.all([
+				const [ticket, currentUser, assets, metadata, starterBot] = await Promise.all([
 					activeMatchId === 'arena' ? api.joinArena() : api.createMatchTicket(activeMatchId),
 					api.getCurrentUser(),
 					api.getGamePackAssets('fgc-2026'),
-					api.getGamePackMetadata('fgc-2026')
+					api.getGamePackMetadata('fgc-2026'),
+					api.getGamePackRobotAssets('fgc-2026', 'starter-bot')
 				]);
 				if (disposed) return;
 
@@ -893,6 +893,8 @@
 				userPreferences = savedPreferences;
 				cameraFov = savedPreferences.graphics.cameraFov;
 				fieldAssets = assets;
+				starterBotVisual = starterBot.visual;
+				starterBotDetailVisual = starterBot.lod1 ?? null;
 				fieldDefinition = metadata.fieldDefinition;
 				const nextSocket = new WebSocket(ticket.ws_url);
 				nextSocket.binaryType = 'arraybuffer';
@@ -1506,9 +1508,7 @@
 			{/if}
 		</aside>
 	{/if}
-	<!-- Cap pixel density for the heavy imported field; this is the largest
-	     client-side GPU cost on high-DPI displays. -->
-	<Canvas {createRenderer} dpr={[0.65, 1]} renderMode="on-demand" shadows={BasicShadowMap}>
+	<Canvas {createRenderer} dpr={[0.6, 0.85]} renderMode="on-demand">
 		{#if cameraMode === 'robot'}
 			<RobotFollowCamera
 				player={trackedPlayer}
@@ -1525,9 +1525,6 @@
 		<T.DirectionalLight
 			position={[8, 12, 6]}
 			intensity={2.1}
-			castShadow
-			shadow.mapSize={[512, 512]}
-			shadow.bias={-0.0005}
 		/>
 		<Grid
 			position={[0, 0.002, 0]}
@@ -1551,10 +1548,16 @@
 		{/if}
 		<ScriptedObjects frame={renderedObjectFrame} {potatoMode} />
 		<T.Group>
-			{#each renderedPlayers as player (player.id)}
-				<RobotModel
-					{player}
-					{physics}
+		{#each renderedPlayers as player (player.id)}
+			<RobotModel
+				{player}
+				{physics}
+				visualAsset={starterBotVisual ?? undefined}
+				detailVisualAsset={
+					player.id === localId && userPreferences?.graphics.quality === 'high'
+						? (starterBotDetailVisual ?? undefined)
+						: undefined
+				}
 					local={player.id === localId}
 					isIntaking={player.id === localId ? inputIntake > 0 : false}
 					isOuttaking={player.id === localId ? inputOuttake > 0 : false}
