@@ -30,8 +30,15 @@ pub(super) fn length_sq(value: Vec3) -> f32 {
 }
 
 pub(super) fn robot_planar_extents(robot: &RobotPhysicsConfig, yaw: f32) -> (f32, f32) {
-    let half_x = robot.width_m * 0.5;
-    let half_z = robot.length_m * 0.5;
+    robot_planar_extents_from_half(
+        [robot.width_m * 0.5, robot.height_m * 0.5, robot.length_m * 0.5],
+        yaw,
+    )
+}
+
+pub(super) fn robot_planar_extents_from_half(robot_half: Vec3, yaw: f32) -> (f32, f32) {
+    let half_x = robot_half[0];
+    let half_z = robot_half[2];
     let cos = yaw.cos().abs();
     let sin = yaw.sin().abs();
     (half_x * cos + half_z * sin, half_x * sin + half_z * cos)
@@ -325,13 +332,13 @@ pub(super) fn sphere_collider_contact(
 /// rigid-body solver to every 60 Hz tick.
 pub(super) fn project_robot_field_colliders(
     player: &mut PlayerBody,
-    robot: &RobotPhysicsConfig,
+    robot_half: Vec3,
     field_colliders: &[FieldCollider],
 ) -> (usize, Option<Vec3>) {
-    let half_x = robot.width_m * 0.5;
-    let half_z = robot.length_m * 0.5;
-    let robot_min_y = player.position[1] - robot.height_m * 0.5;
-    let robot_max_y = player.position[1] + robot.height_m * 0.5;
+    let half_x = robot_half[0];
+    let half_z = robot_half[2];
+    let robot_min_y = player.position[1] - robot_half[1];
+    let robot_max_y = player.position[1] + robot_half[1];
     let mut contacts = 0;
     let mut contact_normal = None;
 
@@ -343,7 +350,7 @@ pub(super) fn project_robot_field_colliders(
             if let Some((normal, penetration)) = robot_field_obb_contact(
                 player.position,
                 player.yaw,
-                [half_x, robot.height_m * 0.5, half_z],
+                robot_half,
                 collider,
             ) {
                 player.position = add(player.position, mul(normal, penetration));
@@ -655,6 +662,97 @@ pub(super) fn sphere_obb_contact(
         -sin * local_normal[0] + cos * local_normal[2],
     ];
     Some((world_normal, penetration))
+}
+
+/// Sphere contact against an arbitrary authored OBB. Robot pack colliders are
+/// expressed this way so the server never needs to approximate a whole bot as
+/// a single chassis cube.
+pub(super) fn sphere_authored_obb_contact(
+    sphere: Vec3,
+    radius: f32,
+    collider: &FieldCollider,
+) -> Option<(Vec3, f32)> {
+    let relative = sub(sphere, collider.center);
+    let local = [
+        dot(relative, collider.axes[0]),
+        dot(relative, collider.axes[1]),
+        dot(relative, collider.axes[2]),
+    ];
+    let closest = [
+        local[0].clamp(-collider.half_extents[0], collider.half_extents[0]),
+        local[1].clamp(-collider.half_extents[1], collider.half_extents[1]),
+        local[2].clamp(-collider.half_extents[2], collider.half_extents[2]),
+    ];
+    let delta = sub(local, closest);
+    let distance_sq = length_sq(delta);
+    if distance_sq >= radius * radius { return None; }
+    let (local_normal, penetration) = if distance_sq > 1.0e-12 {
+        let distance = distance_sq.sqrt();
+        (mul(delta, 1.0 / distance), radius - distance)
+    } else {
+        let gaps = [
+            collider.half_extents[0] - local[0].abs(),
+            collider.half_extents[1] - local[1].abs(),
+            collider.half_extents[2] - local[2].abs(),
+        ];
+        let axis = if gaps[0] <= gaps[1] && gaps[0] <= gaps[2] { 0 } else if gaps[1] <= gaps[2] { 1 } else { 2 };
+        let mut normal = [0.0; 3];
+        normal[axis] = if local[axis] >= 0.0 { 1.0 } else { -1.0 };
+        (normal, radius + gaps[axis])
+    };
+    let normal = add(
+        add(mul(collider.axes[0], local_normal[0]), mul(collider.axes[1], local_normal[1])),
+        mul(collider.axes[2], local_normal[2]),
+    );
+    Some((normal, penetration))
+}
+
+pub(super) fn robot_local_collider(
+    local: &FieldCollider,
+    player_position: Vec3,
+    yaw: f32,
+    ground_offset_y: f32,
+) -> FieldCollider {
+    let sin = yaw.sin();
+    let cos = yaw.cos();
+    let rotate = |vector: Vec3| -> Vec3 {
+        [
+            cos * vector[0] + sin * vector[2],
+            vector[1],
+            -sin * vector[0] + cos * vector[2],
+        ]
+    };
+    let local_center = [local.center[0], local.center[1] + ground_offset_y, local.center[2]];
+    let offset = rotate(local_center);
+    let center = add(player_position, offset);
+    let axes = [rotate(local.axes[0]), rotate(local.axes[1]), rotate(local.axes[2])];
+    let mut min = center;
+    let mut max = center;
+    for world_axis in 0..3 {
+        let radius = (0..3)
+            .map(|axis| axes[axis][world_axis].abs() * local.half_extents[axis])
+            .sum::<f32>();
+        min[world_axis] -= radius;
+        max[world_axis] += radius;
+    }
+    FieldCollider {
+        id: local.id.clone(),
+        min,
+        max,
+        center,
+        half_extents: local.half_extents,
+        axes,
+    }
+}
+
+pub(super) fn rotate_robot_local(vector: Vec3, yaw: f32) -> Vec3 {
+    let sin = yaw.sin();
+    let cos = yaw.cos();
+    [
+        cos * vector[0] + sin * vector[2],
+        vector[1],
+        -sin * vector[0] + cos * vector[2],
+    ]
 }
 
 pub(super) fn ramp_contact(

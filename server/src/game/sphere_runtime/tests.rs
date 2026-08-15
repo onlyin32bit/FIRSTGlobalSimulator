@@ -8,6 +8,47 @@ fn arena() -> ArenaConfig {
 }
 
 #[test]
+fn starter_bot_uses_authored_intake_semantics() {
+    let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    arena.gravity_scale = 0.0;
+    let mut runtime = SphereRuntime::new("starter-bot-intake".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.context.phase = MatchPhase::Teleop;
+    runtime.ball_release_elapsed = Some(arena.spawn_release_seconds);
+    runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+    let player = runtime.players.get_mut("p").unwrap();
+    player.position = [0.0, runtime.field_floor_y + arena.robot.height_m * 0.5, 0.0];
+    player.intake_power = 1.0;
+    let definition = runtime.robot_definition.as_ref().unwrap();
+    let intake = definition
+        .zones
+        .iter()
+        .find(|zone| zone.kind == RobotSemanticKind::Intake)
+        .unwrap();
+    let mouth = robot_local_collider(
+        &intake.collider,
+        runtime.players["p"].position,
+        0.0,
+        -arena.robot.height_m * 0.5,
+    );
+    runtime.balls[0].active = true;
+    runtime.balls[0].released = true;
+    runtime.balls[0].position = mouth.center;
+    runtime.balls[0].previous_position = mouth.center;
+    for _ in 0..30 {
+        runtime.tick(1.0 / 60.0);
+    }
+    assert_eq!(runtime.players["p"].stored.len(), 1);
+    assert_eq!(runtime.players["p"].stored[0], 0);
+}
+
+#[test]
 fn simulates_pack_count_and_keeps_balls_in_bounds() {
     let arena = arena();
     let mut runtime = SphereRuntime::new("test".into(), "fgc-2026".into(), 0);
