@@ -3,6 +3,7 @@
   "name": "Igniting Innovation",
   "version": "1.0.0",
   "engineVersion": ">=0.1.0",
+  "defaultRobot": "starter-bot",
   "field": {
     "visual": "field.glb",
     "physics": "field.physics.json",

@@ -22,6 +22,19 @@ pub struct GamePackManifest {
     pub scripts: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub scoring: ScoringConfig,
+    #[serde(default, rename = "defaultRobot")]
+    pub default_robot: Option<String>,
+    #[serde(default)]
+    pub robots: BTreeMap<String, PackRobotManifest>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PackRobotManifest {
+    pub name: String,
+    pub visual: String,
+    pub physics: Option<String>,
+    pub semantics: Option<String>,
+    pub behavior: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -75,6 +88,7 @@ pub struct GamePackMetadata {
     pub scripts: Vec<RuleScriptMetadata>,
     pub arena: ArenaConfig,
     pub field_definition: FieldDefinition,
+    pub default_robot: Option<RobotDefinition>,
     /// Raw Rhai source belongs to the API pack snapshot, not the filesystem.
     /// It stays process-local and is never sent to connected clients.
     #[serde(skip)]
@@ -91,6 +105,14 @@ pub struct GamePackRuntimeSnapshot {
     pub field_physics: serde_json::Value,
     pub field_semantics: serde_json::Value,
     pub scripts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub robots: BTreeMap<String, RobotRuntimeAssets>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct RobotRuntimeAssets {
+    pub physics: serde_json::Value,
+    pub semantics: serde_json::Value,
 }
 
 /// Server-ready subset of the authored Assimp field files. The GLB is only a
@@ -411,11 +433,25 @@ impl PackLoader {
             &snapshot.field_semantics,
             &snapshot.manifest.scoring,
         )?;
+        let default_robot = snapshot
+            .manifest
+            .default_robot
+            .as_deref()
+            .map(|id| {
+                let assets = snapshot.robots.get(id).ok_or_else(|| {
+                    GameError::ManifestParseError(format!(
+                        "Runtime snapshot is missing collision or semantics for default robot {id}"
+                    ))
+                })?;
+                load_robot_definition(id, &assets.physics, &assets.semantics)
+            })
+            .transpose()?;
         Ok(GamePackMetadata {
             manifest: snapshot.manifest,
             scripts,
             arena,
             field_definition,
+            default_robot,
             script_sources: snapshot.scripts,
         })
     }
@@ -462,17 +498,44 @@ impl PackLoader {
                     .map_err(|error| GameError::ManifestParseError(error.to_string()))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let robots = manifest
+            .robots
+            .iter()
+            .filter_map(|(id, robot)| match (&robot.physics, &robot.semantics) {
+                (Some(physics), Some(semantics)) => Some((id, physics, semantics)),
+                _ => None,
+            })
+            .map(|(id, physics, semantics)| {
+                let physics = serde_json::from_str(
+                    &std::fs::read_to_string(root.join(physics)).map_err(|error| {
+                        GameError::ManifestParseError(error.to_string())
+                    })?,
+                )
+                .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
+                let semantics = serde_json::from_str(
+                    &std::fs::read_to_string(root.join(semantics)).map_err(|error| {
+                        GameError::ManifestParseError(error.to_string())
+                    })?,
+                )
+                .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
+                Ok((id.clone(), RobotRuntimeAssets { physics, semantics }))
+            })
+            .collect::<Result<BTreeMap<_, _>, GameError>>()?;
         self.load_runtime_snapshot(GamePackRuntimeSnapshot {
             manifest,
             field_physics,
             field_semantics,
             scripts,
+            robots,
         })
     }
 }
 
 mod field;
 use field::load_field_definition;
+mod robot;
+pub use robot::{RobotDefinition, RobotSemanticKind};
+use robot::load_robot_definition;
 
 #[cfg(test)]
 #[path = "pack_loader/tests.rs"]

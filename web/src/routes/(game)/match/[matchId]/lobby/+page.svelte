@@ -52,7 +52,7 @@
 				<aside class="space-y-6">
 					<section class="rounded-xl bg-card p-5 shadow-sm">
 						<h2 class="font-semibold">Your station</h2>
-						{#if controller.robots.length > 0 && !controller.mySlot}
+						{#if !controller.mySlot}
 							<label class="mt-4 block text-sm text-muted-foreground" for="robot-select"
 								>Robot</label
 							>
@@ -61,6 +61,7 @@
 								class="mt-2 w-full rounded-lg bg-muted px-3 py-2 text-sm"
 								bind:value={controller.selectedRobotId}
 							>
+								<option value="pack:starter-bot">Starter Bot</option>
 								{#each controller.robots as robot (robot.id)}
 									<option value={robot.id}>{robot.name}</option>
 								{/each}

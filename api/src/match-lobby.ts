@@ -173,14 +173,14 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
   }
 
   /** Admin-start gets a real locked test driver, never a synthetic ticket. */
-  async assignAdminDriver(user: LobbyUser): Promise<LobbyState> {
+  async assignAdminDriver(user: LobbyUser, robotId: string): Promise<LobbyState> {
     const state = this.requireLobby()
     this.assertMutable(state)
     const existing = state.slots.find((slot) => slot.occupant?.userId === user.userId)
     if (existing) return state
     const target = state.slots.find((slot) => slot.id === 'red-driver-1')
     if (!target || target.occupant) throw new Error('The admin test station is unavailable.')
-    target.occupant = { ...user, robotId: null, ready: true }
+    target.occupant = { ...user, robotId, ready: true }
     state.error = null
     this.write(state)
     return state

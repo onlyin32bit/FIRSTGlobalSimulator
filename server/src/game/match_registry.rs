@@ -232,6 +232,7 @@ impl RuntimeBackend {
             let mut runtime = SphereRuntime::new(match_id, pack.manifest.id.clone(), seed);
             runtime.context.game_pack_version = pack.manifest.version.clone();
             runtime.create_field_arena(&pack.arena, &pack.field_definition);
+            runtime.set_robot_definition(pack.default_robot.as_ref());
             Self::Sphere(Box::new(runtime))
         } else {
             let mut runtime = MatchRuntime::new(match_id, pack.manifest.id.clone(), seed);

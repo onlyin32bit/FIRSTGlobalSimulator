@@ -251,6 +251,14 @@ app.get('/matches/:id/bootstrap', async (c) => {
     if (bootstrap.assignedServerId !== server.id) return jsonError(c, 403, 'AUTH_FAILED', 'This server does not own the locked roster.')
     const db = drizzle(c.env.DB, { schema })
     const participants = await Promise.all(bootstrap.participants.map(async (entry) => {
+      if (entry.robotId?.startsWith('pack:')) {
+        const robotId = entry.robotId.slice('pack:'.length)
+        return {
+          ...entry,
+          robotRevision: null,
+          robotData: JSON.stringify({ kind: 'pack-robot', gamePackId: match.gamePackId, robotId })
+        }
+      }
       const robot = entry.robotId ? await db.query.robots.findFirst({ where: eq(schema.robots.id, entry.robotId) }) : null
       return { ...entry, robotRevision: robot?.updatedAt.getTime() ?? null, robotData: robot?.buildData ?? null }
     }))
