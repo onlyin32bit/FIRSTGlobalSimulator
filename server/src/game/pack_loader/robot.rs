@@ -7,6 +7,8 @@ use super::*;
 pub struct RobotDefinition {
     pub id: String,
     pub colliders: Vec<FieldCollider>,
+    pub climb_colliders: Vec<FieldCollider>,
+    pub climber: Option<RobotClimberConfig>,
     pub bounds: FieldCollider,
     pub zones: Vec<RobotSemanticZone>,
 }
@@ -34,10 +36,53 @@ pub(super) fn load_robot_definition(
     id: &str,
     physics: &serde_json::Value,
     semantics: &serde_json::Value,
+    climber: Option<RobotClimberConfig>,
 ) -> Result<RobotDefinition, GameError> {
+    if let Some(config) = &climber {
+        let axle_length_sq = config.axle.iter().map(|axis| axis * axis).sum::<f32>();
+        let finite = config
+            .axle
+            .iter()
+            .chain([
+                &config.wheel_mass_kg,
+                &config.groove_root_radius_m,
+                &config.groove_outer_radius_m,
+                &config.max_climb_speed_mps,
+                &config.free_speed_radps,
+                &config.stall_torque_nm,
+                &config.brake_torque_nm,
+                &config.static_friction,
+                &config.dynamic_friction,
+                &config.contact_skin_m,
+            ])
+            .all(|value| value.is_finite());
+        if config.wheel_parts.is_empty()
+            || !finite
+            || axle_length_sq <= 1.0e-8
+            || config.wheel_mass_kg <= 0.0
+            || config.groove_root_radius_m <= 0.0
+            || config.groove_outer_radius_m <= config.groove_root_radius_m
+            || config.max_climb_speed_mps <= 0.0
+            || config.free_speed_radps <= 0.0
+            || config.stall_torque_nm <= 0.0
+            || config.brake_torque_nm < 0.0
+            || config.static_friction < 0.0
+            || config.dynamic_friction < 0.0
+            || config.contact_skin_m < 0.0
+        {
+            return Err(GameError::ManifestParseError(format!(
+                "Robot {id} has an invalid climber configuration"
+            )));
+        }
+    }
     let colliders = assimp_obb_nodes(physics)
         .into_iter()
-        .filter(|collider| collider.half_extents.iter().all(|extent| extent.is_finite()))
+        .filter(|collider| {
+            collider
+                .half_extents
+                .iter()
+                .all(|extent| extent.is_finite())
+        })
         .map(extrude_robot_surface)
         .collect::<Vec<_>>();
     if colliders.is_empty() {
@@ -48,6 +93,32 @@ pub(super) fn load_robot_definition(
     let bounds = combined_bounds(&colliders).ok_or_else(|| {
         GameError::ManifestParseError(format!("Robot {id} has invalid collision bounds"))
     })?;
+    let wheel_parts = climber
+        .as_ref()
+        .map(|climber| climber.wheel_parts.as_slice())
+        .unwrap_or(&[]);
+    let climb_colliders = colliders
+        .iter()
+        .filter(|collider| {
+            wheel_parts.iter().any(|part| part == &collider.id)
+                || (wheel_parts.is_empty() && collider.id.starts_with("ClimbWheel"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if climber.is_some() && climb_colliders.len() != wheel_parts.len() {
+        return Err(GameError::ManifestParseError(format!(
+            "Robot {id} climber references missing wheel collision parts"
+        )));
+    }
+    if let Some(climber) = &climber {
+        for part in &climber.support_parts {
+            if !colliders.iter().any(|collider| &collider.id == part) {
+                return Err(GameError::ManifestParseError(format!(
+                    "Robot {id} climber references missing support part {part}"
+                )));
+            }
+        }
+    }
     let zones = assimp_obb_nodes(semantics)
         .into_iter()
         .filter_map(|collider| {
@@ -57,7 +128,11 @@ pub(super) fn load_robot_definition(
                 "OuttakeZone" => RobotSemanticKind::Outtake,
                 _ => return None,
             };
-            let direction = [-collider.axes[2][0], -collider.axes[2][1], -collider.axes[2][2]];
+            let direction = [
+                -collider.axes[2][0],
+                -collider.axes[2][1],
+                -collider.axes[2][2],
+            ];
             Some(RobotSemanticZone {
                 id: collider.id.clone(),
                 kind,
@@ -66,15 +141,32 @@ pub(super) fn load_robot_definition(
             })
         })
         .collect::<Vec<_>>();
-    for kind in [RobotSemanticKind::Intake, RobotSemanticKind::Transfer, RobotSemanticKind::Outtake] {
+    for kind in [
+        RobotSemanticKind::Intake,
+        RobotSemanticKind::Transfer,
+        RobotSemanticKind::Outtake,
+    ] {
         if zones.iter().filter(|zone| zone.kind == kind).count() != 1 {
             return Err(GameError::ManifestParseError(format!(
                 "Robot {id} must define exactly one {kind:?}Zone"
             )));
         }
     }
-    info!(robot = id, colliders = colliders.len(), zones = zones.len(), "Loaded robot physics and semantics");
-    Ok(RobotDefinition { id: id.into(), colliders, bounds, zones })
+    info!(
+        robot = id,
+        colliders = colliders.len(),
+        climb_colliders = climb_colliders.len(),
+        zones = zones.len(),
+        "Loaded robot physics and semantics"
+    );
+    Ok(RobotDefinition {
+        id: id.into(),
+        colliders,
+        climb_colliders,
+        climber,
+        bounds,
+        zones,
+    })
 }
 
 fn assimp_obb_nodes(scene: &serde_json::Value) -> Vec<FieldCollider> {
@@ -91,7 +183,12 @@ fn assimp_obb_nodes(scene: &serde_json::Value) -> Vec<FieldCollider> {
 fn assimp_obb_node(node: &serde_json::Value, scene: &serde_json::Value) -> Option<FieldCollider> {
     let id = node.get("name")?.as_str()?.to_string();
     let mesh_index = node.get("meshes")?.as_array()?.first()?.as_u64()? as usize;
-    let vertices = scene.get("meshes")?.as_array()?.get(mesh_index)?.get("vertices")?.as_array()?;
+    let vertices = scene
+        .get("meshes")?
+        .as_array()?
+        .get(mesh_index)?
+        .get("vertices")?
+        .as_array()?;
     let matrix = assimp_matrix(node)?;
     let mut local_min = [f32::INFINITY; 3];
     let mut local_max = [f32::NEG_INFINITY; 3];
@@ -102,7 +199,9 @@ fn assimp_obb_node(node: &serde_json::Value, scene: &serde_json::Value) -> Optio
             local_max[axis] = local_max[axis].max(value);
         }
     }
-    if !local_min.iter().all(|value| value.is_finite()) { return None; }
+    if !local_min.iter().all(|value| value.is_finite()) {
+        return None;
+    }
     let local_center = [
         (local_min[0] + local_max[0]) * 0.5,
         (local_min[1] + local_max[1]) * 0.5,
@@ -112,7 +211,9 @@ fn assimp_obb_node(node: &serde_json::Value, scene: &serde_json::Value) -> Optio
     let mut half_extents = [0.0; 3];
     for axis in 0..3 {
         let raw = [matrix[axis], matrix[axis + 4], matrix[axis + 8]];
-        let length = (raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2]).sqrt().max(1.0e-6);
+        let length = (raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2])
+            .sqrt()
+            .max(1.0e-6);
         axes[axis] = [raw[0] / length, raw[1] / length, raw[2] / length];
         half_extents[axis] = (local_max[axis] - local_min[axis]) * 0.5 * length;
     }
@@ -123,7 +224,9 @@ fn assimp_obb_node(node: &serde_json::Value, scene: &serde_json::Value) -> Optio
 fn assimp_matrix(node: &serde_json::Value) -> Option<[f32; 16]> {
     let values = node.get("transformation")?.as_array()?;
     let mut matrix = [0.0; 16];
-    for (index, value) in values.iter().take(16).enumerate() { matrix[index] = value.as_f64()? as f32; }
+    for (index, value) in values.iter().take(16).enumerate() {
+        matrix[index] = value.as_f64()? as f32;
+    }
     Some(matrix)
 }
 
@@ -136,29 +239,66 @@ fn transform_point(matrix: &[f32; 16], point: [f32; 3]) -> [f32; 3] {
 }
 
 fn extrude_robot_surface(mut collider: FieldCollider) -> FieldCollider {
-    for extent in &mut collider.half_extents { *extent = extent.max(0.01); }
-    make_bounds(collider.id, collider.center, collider.half_extents, collider.axes)
+    for extent in &mut collider.half_extents {
+        *extent = extent.max(0.01);
+    }
+    make_bounds(
+        collider.id,
+        collider.center,
+        collider.half_extents,
+        collider.axes,
+    )
 }
 
 fn combined_bounds(colliders: &[FieldCollider]) -> Option<FieldCollider> {
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
     for collider in colliders {
-        for axis in 0..3 { min[axis] = min[axis].min(collider.min[axis]); max[axis] = max[axis].max(collider.max[axis]); }
+        for axis in 0..3 {
+            min[axis] = min[axis].min(collider.min[axis]);
+            max[axis] = max[axis].max(collider.max[axis]);
+        }
     }
     min[0].is_finite().then(|| {
-        let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5, (min[2] + max[2]) * 0.5];
-        make_bounds("robot-envelope".into(), center, [(max[0]-min[0])*0.5, (max[1]-min[1])*0.5, (max[2]-min[2])*0.5], default_axes())
+        let center = [
+            (min[0] + max[0]) * 0.5,
+            (min[1] + max[1]) * 0.5,
+            (min[2] + max[2]) * 0.5,
+        ];
+        make_bounds(
+            "robot-envelope".into(),
+            center,
+            [
+                (max[0] - min[0]) * 0.5,
+                (max[1] - min[1]) * 0.5,
+                (max[2] - min[2]) * 0.5,
+            ],
+            default_axes(),
+        )
     })
 }
 
-fn make_bounds(id: String, center: [f32; 3], half_extents: [f32; 3], axes: [[f32; 3]; 3]) -> FieldCollider {
+fn make_bounds(
+    id: String,
+    center: [f32; 3],
+    half_extents: [f32; 3],
+    axes: [[f32; 3]; 3],
+) -> FieldCollider {
     let mut min = center;
     let mut max = center;
     for world_axis in 0..3 {
-        let radius = (0..3).map(|local_axis| axes[local_axis][world_axis].abs() * half_extents[local_axis]).sum::<f32>();
+        let radius = (0..3)
+            .map(|local_axis| axes[local_axis][world_axis].abs() * half_extents[local_axis])
+            .sum::<f32>();
         min[world_axis] -= radius;
         max[world_axis] += radius;
     }
-    FieldCollider { id, min, max, center, half_extents, axes }
+    FieldCollider {
+        id,
+        min,
+        max,
+        center,
+        half_extents,
+        axes,
+    }
 }

@@ -106,8 +106,18 @@ impl SphereRuntime {
     fn apply_score_delta(&mut self, target: &FieldScoringTarget, direction: i32) {
         let points = target.points * direction;
         match target.alliance.as_deref() {
-            Some("blue") => self.score_state.blue_score += points,
-            Some("red") => self.score_state.red_score += points,
+            Some("blue") => {
+                self.score_state.blue_score += points;
+                if target.kind == "suppression-unit" {
+                    self.score_state.blue_su_score += points;
+                }
+            }
+            Some("red") => {
+                self.score_state.red_score += points;
+                if target.kind == "suppression-unit" {
+                    self.score_state.red_su_score += points;
+                }
+            }
             _ => self.score_state.global_score += points,
         }
         let entry = self

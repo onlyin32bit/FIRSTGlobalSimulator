@@ -143,6 +143,7 @@ pub enum MatchInput {
         move_z: f32,
         intake_power: f32,
         outtake_power: f32,
+        climb_power: f32,
         sequence: u64,
     },
     PlayerMech {
@@ -270,11 +271,14 @@ impl RuntimeBackend {
         z: f32,
         intake: f32,
         outtake: f32,
+        climb: f32,
         sequence: u64,
     ) {
         match self {
             Self::Rapier(runtime) => runtime.set_player_input(id, x, z, sequence),
-            Self::Sphere(runtime) => runtime.set_player_input(id, x, z, intake, outtake, sequence),
+            Self::Sphere(runtime) => {
+                runtime.set_player_input_with_climb(id, x, z, intake, outtake, climb, sequence)
+            }
         }
     }
 
@@ -317,8 +321,18 @@ impl RuntimeBackend {
             Self::Sphere(runtime) => &mut runtime.score_state,
         };
         match team {
-            "blue" => score.blue_score += points,
-            "red" => score.red_score += points,
+            "blue" => {
+                score.blue_score += points;
+                if category == "SU" {
+                    score.blue_su_score += points;
+                }
+            }
+            "red" => {
+                score.red_score += points;
+                if category == "SU" {
+                    score.red_su_score += points;
+                }
+            }
             _ => score.global_score += points,
         }
         *score.breakdown.entry(category.to_string()).or_insert(0) += points;
@@ -349,6 +363,29 @@ impl RuntimeBackend {
         match self {
             Self::Rapier(runtime) => runtime.player_snapshots(),
             Self::Sphere(runtime) => runtime.player_snapshots(),
+        }
+    }
+
+    fn players_with_brace_states(
+        &self,
+        triggers: &[super::pack_loader::FieldTrigger],
+    ) -> Vec<PlayerSnapshot> {
+        match self {
+            Self::Rapier(runtime) => runtime.player_snapshots(),
+            Self::Sphere(runtime) => runtime.player_snapshots_with_brace_states(triggers),
+        }
+    }
+
+    fn brace_multipliers(&self, triggers: &[super::pack_loader::FieldTrigger]) -> (f32, f32) {
+        match self {
+            Self::Rapier(_) => (1.0, 1.0),
+            Self::Sphere(runtime) => runtime.brace_multipliers(triggers),
+        }
+    }
+
+    fn apply_endgame_brace_multipliers(&mut self, multipliers: (f32, f32)) {
+        if let Self::Sphere(runtime) = self {
+            runtime.apply_endgame_brace_multipliers(multipliers.0, multipliers.1);
         }
     }
 
@@ -786,6 +823,8 @@ impl MatchRegistry {
                 let mut tick = 0_u64;
                 let mut event_sequence = 0_u64;
                 let mut recent_semantic_events = VecDeque::<String>::with_capacity(16);
+                let mut brace_score_applied = false;
+                let mut endgame_brace_multipliers = None;
 
                 while !simulation_shutdown.load(Ordering::Relaxed) {
                     let now = Instant::now();
@@ -819,8 +858,9 @@ impl MatchRegistry {
                                 move_z,
                                 intake_power,
                                 outtake_power,
+                                climb_power,
                                 sequence,
-                            } if !controls_locked => runtime.set_player_input(&user_id, move_x, move_z, intake_power, outtake_power, sequence),
+                            } if !controls_locked => runtime.set_player_input(&user_id, move_x, move_z, intake_power, outtake_power, climb_power, sequence),
                             MatchInput::PlayerMech { user_id, mech } if !controls_locked => runtime.set_player_mech(&user_id, mech),
                             MatchInput::ContinuePractice if !controls_locked => practice_continue = true,
                             MatchInput::EndPractice if !controls_locked => practice_continue = false,
@@ -838,6 +878,12 @@ impl MatchRegistry {
                     }
                     let match_running = live_phase_entered && clock_now < match_ends;
                     let settling = live_phase_entered && clock_now >= match_ends && clock_now < match_finalizes;
+                    if settling && endgame_brace_multipliers.is_none() {
+                        // Lock the brace result at the final buzzer, then let
+                        // balls keep settling and scoring until completion.
+                        endgame_brace_multipliers =
+                            Some(runtime.brace_multipliers(&pack.field_definition.triggers));
+                    }
                     let scoring_active = match_running || settling;
                     let physics_started = Instant::now();
                     if scoring_active || practice_continue {
@@ -921,7 +967,7 @@ impl MatchRegistry {
                             tick,
                             game_pack_id: pack.manifest.id.clone(),
                             game_pack_version: pack.manifest.version.clone(),
-                            players: runtime.players(),
+                            players: runtime.players_with_brace_states(&pack.field_definition.triggers),
                             object_id: pack.arena.object_id.clone(),
                             object_radius: pack.arena.ball.radius_m(),
                             object_color: pack.arena.color.clone(),
@@ -958,6 +1004,17 @@ impl MatchRegistry {
                         if let Ok(mut slot) = latest_state.lock() {
                             *slot = Some(Arc::new(state));
                         }
+                    }
+                    if live_phase_entered && !practice_continue && clock_now >= match_finalizes && !brace_score_applied {
+                        runtime.apply_endgame_brace_multipliers(
+                            endgame_brace_multipliers.unwrap_or((1.0, 1.0)),
+                        );
+                        brace_score_applied = true;
+                        recent_semantic_events.push_back("match_end · brace multipliers applied".into());
+                        while recent_semantic_events.len() > 16 {
+                            recent_semantic_events.pop_front();
+                        }
+                        continue;
                     }
                     if live_phase_entered && !practice_continue && clock_now >= match_finalizes {
                         let score = runtime.score_state();

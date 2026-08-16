@@ -15,6 +15,7 @@ export type UserPreferences = {
 		driveMode: DriveMode;
 		intakeButton: number;
 		outtakeButton: number;
+		climbButton: number;
 	};
 };
 
@@ -30,7 +31,8 @@ export const defaultPreferences = (): UserPreferences => ({
 	controls: {
 		driveMode: 'arcade-left',
 		intakeButton: 4,
-		outtakeButton: 5
+		outtakeButton: 5,
+		climbButton: 3
 	}
 });
 

@@ -7,22 +7,35 @@ impl SphereRuntime {
             let robot = effective_robot(&arena.robot, &player.mech);
             let ground_offset_y = -arena.robot.height_m * 0.5;
             let intake_zone = self.robot_definition.as_ref().and_then(|definition| {
-                definition.zones.iter().find(|zone| {
-                    zone.kind == RobotSemanticKind::Intake
-                }).map(|zone| robot_local_collider(
-                    &zone.collider,
-                    player.position,
-                    player.yaw,
-                    ground_offset_y,
-                ))
+                definition
+                    .zones
+                    .iter()
+                    .find(|zone| zone.kind == RobotSemanticKind::Intake)
+                    .map(|zone| {
+                        robot_local_collider_pose(
+                            &zone.collider,
+                            player.position,
+                            player.rotation,
+                            ground_offset_y,
+                        )
+                    })
             });
             let outtake_zone = self.robot_definition.as_ref().and_then(|definition| {
-                definition.zones.iter().find(|zone| {
-                    zone.kind == RobotSemanticKind::Outtake
-                }).map(|zone| (
-                    robot_local_collider(&zone.collider, player.position, player.yaw, ground_offset_y),
-                    rotate_robot_local(zone.direction, player.yaw),
-                ))
+                definition
+                    .zones
+                    .iter()
+                    .find(|zone| zone.kind == RobotSemanticKind::Outtake)
+                    .map(|zone| {
+                        (
+                            robot_local_collider_pose(
+                                &zone.collider,
+                                player.position,
+                                player.rotation,
+                                ground_offset_y,
+                            ),
+                            rotate_robot_local_pose(zone.direction, player.rotation),
+                        )
+                    })
             });
 
             // Intake capture.
@@ -30,8 +43,8 @@ impl SphereRuntime {
                 && robot.storage_capacity > 0
                 && robot.intake_rate_bps > 0.0
             {
-                let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
-                let right = [-forward[2], 0.0, forward[0]];
+                let forward = rotate_robot_local_pose([0.0, 0.0, 1.0], player.rotation);
+                let right = rotate_robot_local_pose([-1.0, 0.0, 0.0], player.rotation);
                 player.intake_accumulator = (player.intake_accumulator
                     + robot.intake_rate_bps * player.intake_power * dt)
                     .min(120.0);
@@ -46,7 +59,8 @@ impl SphereRuntime {
                         if sphere_authored_obb_contact(ball.position, radius, zone).is_none() {
                             continue;
                         }
-                        self.intake_candidates.push((length_sq(sub(ball.position, zone.center)), index));
+                        self.intake_candidates
+                            .push((length_sq(sub(ball.position, zone.center)), index));
                         continue;
                     }
                     let delta = sub(ball.position, player.position);
@@ -99,8 +113,8 @@ impl SphereRuntime {
                 && robot.outtake_rate_bps > 0.0
                 && robot.outtake_velocity_mps > 0.0
             {
-                let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
-                let right = [-forward[2], 0.0, forward[0]];
+                let forward = rotate_robot_local_pose([0.0, 0.0, 1.0], player.rotation);
+                let right = rotate_robot_local_pose([-1.0, 0.0, 0.0], player.rotation);
                 player.outtake_accumulator += robot.outtake_rate_bps * player.outtake_power * dt;
                 let pitch = robot.outtake_angle_deg.to_radians();
                 let horizontal = robot.outtake_velocity_mps * pitch.cos();
@@ -113,18 +127,25 @@ impl SphereRuntime {
                     let jitter =
                         (((index as u32).wrapping_mul(2654435761u32)) as f32 / 4294967296.0) - 0.5;
                     let (exit, launch_forward) = if let Some((zone, direction)) = &outtake_zone {
-                        (
-                            add(zone.center, mul(*direction, radius + 0.01)),
-                            *direction,
-                        )
+                        (add(zone.center, mul(*direction, radius + 0.01)), *direction)
                     } else {
                         (
-                            add(add(player.position, mul(forward, robot.outtake_forward_offset_m)), mul(right, jitter * robot.flywheel_width_m)),
+                            add(
+                                add(
+                                    player.position,
+                                    mul(forward, robot.outtake_forward_offset_m),
+                                ),
+                                mul(right, jitter * robot.flywheel_width_m),
+                            ),
                             forward,
                         )
                     };
                     let ball = &mut self.balls[index];
-                    ball.position = [exit[0], exit[1] + jitter * robot.flywheel_width_m * 0.15, exit[2]];
+                    ball.position = [
+                        exit[0],
+                        exit[1] + jitter * robot.flywheel_width_m * 0.15,
+                        exit[2],
+                    ];
                     ball.velocity = [
                         launch_forward[0] * horizontal + player.velocity[0],
                         vertical + player.velocity[1],

@@ -17,10 +17,11 @@ pub(super) fn encode_state(
     const SEMANTIC_EVENTS: u16 = 7;
     const DRIVE: u16 = 8;
     const SCORE: u16 = 9;
+    const PLAYER_PHYSICS: u16 = 10;
     let mut output = Vec::with_capacity(1024 + state.object_positions.count as usize * 12);
     output.extend_from_slice(b"FGS1");
     put_u16(&mut output, 1);
-    put_u16(&mut output, 4);
+    put_u16(&mut output, 5);
     put_u16(&mut output, 1); // StateSnapshot
     put_u16(&mut output, 0);
     put_u32(&mut output, 0);
@@ -79,6 +80,30 @@ pub(super) fn encode_state(
             }
             put_u32(bytes, player.stored_balls as u32);
             put_u32(bytes, player.capacity as u32);
+            put_u8(bytes, player.brace_zone.unwrap_or_default());
+            put_f32(bytes, player.brace_multiplier);
+        }
+    });
+    section(&mut output, PLAYER_PHYSICS, |bytes| {
+        put_u32(bytes, state.players.len() as u32);
+        for player in &state.players {
+            put_string(bytes, &player.id);
+            for value in [
+                player.rotation_x,
+                player.rotation_y,
+                player.rotation_z,
+                player.rotation_w,
+                player.angular_velocity_x,
+                player.angular_velocity_y,
+                player.angular_velocity_z,
+                player.brace_support_impulse,
+                player.climb_wheel_angle,
+                player.climb_wheel_radps,
+            ] {
+                put_f32(bytes, value);
+            }
+            put_u8(bytes, u8::from(player.floor_supported));
+            put_u8(bytes, u8::from(player.brace_contact));
         }
     });
     section(&mut output, OBJECTS, |bytes| {

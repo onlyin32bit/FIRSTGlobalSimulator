@@ -35,6 +35,26 @@ pub struct PackRobotManifest {
     pub physics: Option<String>,
     pub semantics: Option<String>,
     pub behavior: Option<String>,
+    pub climber: Option<RobotClimberConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RobotClimberConfig {
+    pub wheel_parts: Vec<String>,
+    #[serde(default)]
+    pub support_parts: Vec<String>,
+    pub axle: [f32; 3],
+    pub wheel_mass_kg: f32,
+    pub groove_root_radius_m: f32,
+    pub groove_outer_radius_m: f32,
+    pub max_climb_speed_mps: f32,
+    pub free_speed_radps: f32,
+    pub stall_torque_nm: f32,
+    pub brake_torque_nm: f32,
+    pub static_friction: f32,
+    pub dynamic_friction: f32,
+    pub contact_skin_m: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -443,7 +463,12 @@ impl PackLoader {
                         "Runtime snapshot is missing collision or semantics for default robot {id}"
                     ))
                 })?;
-                load_robot_definition(id, &assets.physics, &assets.semantics)
+                let climber = snapshot
+                    .manifest
+                    .robots
+                    .get(id)
+                    .and_then(|robot| robot.climber.clone());
+                load_robot_definition(id, &assets.physics, &assets.semantics, climber)
             })
             .transpose()?;
         Ok(GamePackMetadata {
@@ -507,15 +532,13 @@ impl PackLoader {
             })
             .map(|(id, physics, semantics)| {
                 let physics = serde_json::from_str(
-                    &std::fs::read_to_string(root.join(physics)).map_err(|error| {
-                        GameError::ManifestParseError(error.to_string())
-                    })?,
+                    &std::fs::read_to_string(root.join(physics))
+                        .map_err(|error| GameError::ManifestParseError(error.to_string()))?,
                 )
                 .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
                 let semantics = serde_json::from_str(
-                    &std::fs::read_to_string(root.join(semantics)).map_err(|error| {
-                        GameError::ManifestParseError(error.to_string())
-                    })?,
+                    &std::fs::read_to_string(root.join(semantics))
+                        .map_err(|error| GameError::ManifestParseError(error.to_string()))?,
                 )
                 .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
                 Ok((id.clone(), RobotRuntimeAssets { physics, semantics }))
@@ -534,8 +557,8 @@ impl PackLoader {
 mod field;
 use field::load_field_definition;
 mod robot;
-pub use robot::{RobotDefinition, RobotSemanticKind};
 use robot::load_robot_definition;
+pub use robot::{RobotDefinition, RobotSemanticKind};
 
 #[cfg(test)]
 #[path = "pack_loader/tests.rs"]

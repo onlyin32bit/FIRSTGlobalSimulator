@@ -42,7 +42,7 @@ fn binary_state_has_versioned_header_and_compact_positions() {
     let encoded = encode_state(&state, ProcessMetrics::default(), false);
     assert_eq!(&encoded[..4], b"FGS1");
     assert_eq!(u16::from_le_bytes(encoded[4..6].try_into().unwrap()), 1);
-    assert_eq!(u16::from_le_bytes(encoded[6..8].try_into().unwrap()), 4);
+    assert_eq!(u16::from_le_bytes(encoded[6..8].try_into().unwrap()), 5);
     assert_eq!(u16::from_le_bytes(encoded[8..10].try_into().unwrap()), 1);
     assert_eq!(
         u32::from_le_bytes(encoded[12..16].try_into().unwrap()) as usize,

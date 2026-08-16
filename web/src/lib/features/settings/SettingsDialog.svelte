@@ -349,8 +349,17 @@
 										id="outtake-button"
 										class="w-full"
 										bind:value={preferences.controls.outtakeButton}
+									>{#each buttonNames as button, index}<option value={index}>{button}</option
+									>{/each}</NativeSelect
+								>
+								</div>
+								<div class="space-y-2">
+									<Label for="climb-button">Brace climb</Label><NativeSelect
+										id="climb-button"
+										class="w-full"
+										bind:value={preferences.controls.climbButton}
 										>{#each buttonNames as button, index}<option value={index}>{button}</option
-											>{/each}</NativeSelect
+										>{/each}</NativeSelect
 									>
 								</div>
 							</div>

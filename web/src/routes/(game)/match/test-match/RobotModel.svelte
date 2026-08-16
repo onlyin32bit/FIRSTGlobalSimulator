@@ -3,6 +3,7 @@
 	import { HTML } from '@threlte/extras';
 	import type { MatchPhysics, MatchPlayer } from './match-protocol';
 	import StarterBotModel from './StarterBotModel.svelte';
+	import RobotDebug from './RobotDebug.svelte';
 
 	let {
 		player,
@@ -11,7 +12,12 @@
 		visualAsset,
 		detailVisualAsset,
 		isIntaking = false,
-		isOuttaking = false
+		isOuttaking = false,
+		debug = false,
+		physicsAsset,
+		semanticsAsset,
+		climber,
+		isClimbing = false
 	}: {
 		player: MatchPlayer;
 		physics: MatchPhysics;
@@ -20,16 +26,25 @@
 		detailVisualAsset?: string;
 		isIntaking?: boolean;
 		isOuttaking?: boolean;
+		debug?: boolean;
+		physicsAsset?: string;
+		semanticsAsset?: string;
+		climber?: {
+			wheelParts: string[];
+			grooveRootRadiusM: number;
+			grooveOuterRadiusM: number;
+		};
+		isClimbing?: boolean;
 	} = $props();
 
 	let intakeRotation = $state(0);
 	let flywheelRotation = $state(0);
 
 	useTask((delta) => {
-		if (isIntaking || (player as any).intakePower > 0) {
+		if (isIntaking) {
 			intakeRotation += delta * 20;
 		}
-		if (isOuttaking || (player as any).outtakePower > 0) {
+		if (isOuttaking) {
 			flywheelRotation += delta * 45;
 		}
 	});
@@ -66,11 +81,19 @@
 	);
 </script>
 
-<T.Group position={[player.x, player.y, player.z]} rotation={[0, player.yaw, 0]}>
+<T.Group
+	position={[player.x, player.y, player.z]}
+	quaternion={[player.rotationX, player.rotationY, player.rotationZ, player.rotationW]}
+>
 	{#if visualAsset}
 		<!-- Player poses are chassis-centred; the imported model is ground-authored. -->
 		<T.Group position={[0, -physics.robotHeightM * 0.5, 0]} rotation={[0, Math.PI, 0]}>
-			<StarterBotModel assetUrl={visualAsset} detailAssetUrl={detailVisualAsset} />
+			<StarterBotModel
+				assetUrl={visualAsset}
+				detailAssetUrl={detailVisualAsset}
+				climbing={isClimbing}
+				wheelAngle={player.climbWheelAngle}
+			/>
 		</T.Group>
 	{:else}
 		<T.Mesh castShadow receiveShadow>
@@ -175,6 +198,14 @@
 				/>
 			</T.Mesh>
 		{/each}
+	{/if}
+	{#if debug}
+		<RobotDebug
+			physicsUrl={physicsAsset}
+			semanticsUrl={semanticsAsset}
+			{climber}
+			height={physics.robotHeightM}
+		/>
 	{/if}
 
 	<HTML position={[0, physics.robotHeightM * 0.5 + 0.45, 0]} center>

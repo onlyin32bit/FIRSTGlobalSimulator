@@ -3,7 +3,17 @@
 	import { useGltf, useMeshopt } from '@threlte/extras';
 	import { Box3, FrontSide, LOD, Mesh, MeshStandardMaterial, Object3D, Vector3 } from 'three';
 
-	let { assetUrl, detailAssetUrl }: { assetUrl: string; detailAssetUrl?: string } = $props();
+	let {
+		assetUrl,
+		detailAssetUrl,
+		climbing = false,
+		wheelAngle = 0
+	}: {
+		assetUrl: string;
+		detailAssetUrl?: string;
+		climbing?: boolean;
+		wheelAngle?: number;
+	} = $props();
 	const meshoptDecoder = useMeshopt();
 	const robotGltf = useGltf(assetUrl, { meshoptDecoder });
 	const detailGltf = useGltf(detailAssetUrl ?? assetUrl, { meshoptDecoder });
@@ -11,6 +21,7 @@
 	const bounds = new Box3();
 	const center = new Vector3();
 	let model = $state<Object3D | null>(null);
+	let renderedWheelAngle = 0;
 
 	function prepareModel(scene: Object3D) {
 		const instance = scene.clone(true);
@@ -39,6 +50,7 @@
 
 		if (!detailAssetUrl) {
 			model = prepareModel(scene);
+			renderedWheelAngle = 0;
 			return;
 		}
 
@@ -49,10 +61,23 @@
 		lod.addLevel(prepareModel(detailScene), 0);
 		lod.addLevel(prepareModel(scene), 2.2);
 		model = lod;
+		renderedWheelAngle = 0;
 	});
 
-	useTask(() => {
+	useTask((delta) => {
 		if (model instanceof LOD) model.update(camera.current);
+		if (!model) return;
+		const targetAngle = Number.isFinite(wheelAngle)
+			? wheelAngle
+			: climbing
+				? renderedWheelAngle + delta * 28
+				: renderedWheelAngle;
+		const angleDelta = targetAngle - renderedWheelAngle;
+		if (Math.abs(angleDelta) < 1e-5) return;
+		model.traverse((object) => {
+			if (object.name.startsWith('ClimbWheel')) object.rotateX(angleDelta);
+		});
+		renderedWheelAngle = targetAngle;
 	});
 </script>
 

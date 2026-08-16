@@ -412,6 +412,13 @@ export class APIClient {
 			lod1?: string;
 			physics?: string;
 			semantics?: string;
+			climber?: {
+				wheelParts: string[];
+				supportParts?: string[];
+				grooveRootRadiusM: number;
+				grooveOuterRadiusM: number;
+				maxClimbSpeedMps: number;
+			};
 		}>(`/api/game-packs/${encodeURIComponent(id)}/robots/${encodeURIComponent(robotId)}/assets`);
 	}
 

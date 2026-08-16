@@ -44,6 +44,8 @@ pub struct ScoreState {
     pub blue_score: i32,
     pub red_score: i32,
     pub global_score: i32,
+    pub blue_su_score: i32,
+    pub red_su_score: i32,
     pub breakdown: HashMap<String, i32>,
 }
 
@@ -67,10 +69,36 @@ pub struct PlayerSnapshot {
     pub velocity_z: f32,
     #[serde(rename = "angularVelocityY")]
     pub angular_velocity_y: f32,
+    #[serde(rename = "rotationX")]
+    pub rotation_x: f32,
+    #[serde(rename = "rotationY")]
+    pub rotation_y: f32,
+    #[serde(rename = "rotationZ")]
+    pub rotation_z: f32,
+    #[serde(rename = "rotationW")]
+    pub rotation_w: f32,
+    #[serde(rename = "angularVelocityX")]
+    pub angular_velocity_x: f32,
+    #[serde(rename = "angularVelocityZ")]
+    pub angular_velocity_z: f32,
     pub color: String,
     #[serde(rename = "storedBalls")]
     pub stored_balls: usize,
     pub capacity: usize,
+    #[serde(rename = "braceZone")]
+    pub brace_zone: Option<u8>,
+    #[serde(rename = "braceMultiplier")]
+    pub brace_multiplier: f32,
+    #[serde(rename = "floorSupported")]
+    pub floor_supported: bool,
+    #[serde(rename = "braceContact")]
+    pub brace_contact: bool,
+    #[serde(rename = "braceSupportImpulse")]
+    pub brace_support_impulse: f32,
+    #[serde(rename = "climbWheelAngle")]
+    pub climb_wheel_angle: f32,
+    #[serde(rename = "climbWheelRadps")]
+    pub climb_wheel_radps: f32,
 }
 
 struct PlayerBody {
@@ -477,9 +505,22 @@ impl MatchRuntime {
                         velocity_y: velocity.y,
                         velocity_z: velocity.z,
                         angular_velocity_y: angular_velocity.y,
+                        rotation_x: r.x,
+                        rotation_y: r.y,
+                        rotation_z: r.z,
+                        rotation_w: r.w,
+                        angular_velocity_x: angular_velocity.x,
+                        angular_velocity_z: angular_velocity.z,
                         color: player.color.to_string(),
                         stored_balls: 0,
                         capacity: self.storage_capacity,
+                        brace_zone: None,
+                        brace_multiplier: 1.0,
+                        floor_supported: true,
+                        brace_contact: false,
+                        brace_support_impulse: 0.0,
+                        climb_wheel_angle: 0.0,
+                        climb_wheel_radps: 0.0,
                     }
                 })
             })

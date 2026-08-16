@@ -23,7 +23,6 @@ fn starter_bot_uses_authored_intake_semantics() {
     runtime.ball_release_elapsed = Some(arena.spawn_release_seconds);
     runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
     let player = runtime.players.get_mut("p").unwrap();
-    player.position = [0.0, runtime.field_floor_y + arena.robot.height_m * 0.5, 0.0];
     player.intake_power = 1.0;
     let definition = runtime.robot_definition.as_ref().unwrap();
     let intake = definition
@@ -42,7 +41,7 @@ fn starter_bot_uses_authored_intake_semantics() {
     runtime.balls[0].position = mouth.center;
     runtime.balls[0].previous_position = mouth.center;
     for _ in 0..30 {
-        runtime.tick(1.0 / 60.0);
+        runtime.step_mechanics(&arena, 1.0 / 60.0);
     }
     assert_eq!(runtime.players["p"].stored.len(), 1);
     assert_eq!(runtime.players["p"].stored[0], 0);
@@ -110,13 +109,50 @@ fn pack_spawn_supports_the_robot_on_the_authored_riser_surface() {
         Some("red-driver-1"),
         &arena,
     );
-
     let player = &runtime.player_snapshots()[0];
     assert!(
         (player.y - (pack.field_definition.floor_height_m + arena.robot.height_m * 0.5)).abs()
             < 1.0e-5
     );
     assert!(player.y > arena.robot.height_m * 0.5);
+}
+
+#[test]
+fn starter_bot_can_drive_from_an_authored_spawn_surface() {
+    let mut arena = arena();
+    arena.object_count = 0;
+    let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut runtime = SphereRuntime::new("spawn-drive".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.add_player(
+        "red-driver".into(),
+        "Driver".into(),
+        "red".into(),
+        Some("red-driver-1"),
+        &arena,
+    );
+    let start = runtime.players["red-driver"].position;
+    runtime.set_player_input("red-driver", 0.0, 1.0, 0.0, 0.0, 1);
+    let mut supported_ticks = 0;
+    for _ in 0..120 {
+        runtime.tick(1.0 / 60.0);
+        supported_ticks += usize::from(runtime.players["red-driver"].floor_supported);
+    }
+
+    let player = &runtime.players["red-driver"];
+    let displacement =
+        ((player.position[0] - start[0]).powi(2) + (player.position[2] - start[2]).powi(2)).sqrt();
+    assert!(
+        displacement > 1.0,
+        "starter bot stayed stuck at spawn: start={start:?} final={:?} supported={} supported_ticks={supported_ticks}",
+        player.position,
+        player.floor_supported
+    );
+    assert!(supported_ticks >= 100);
+    assert!(player.rotation[0].abs() < 0.1 && player.rotation[2].abs() < 0.1);
 }
 
 #[test]

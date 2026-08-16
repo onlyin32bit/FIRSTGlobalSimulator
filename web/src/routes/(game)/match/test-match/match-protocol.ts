@@ -12,8 +12,21 @@ export type MatchPlayer = {
 	velocityY: number;
 	velocityZ: number;
 	angularVelocityY: number;
+	rotationX: number;
+	rotationY: number;
+	rotationZ: number;
+	rotationW: number;
+	angularVelocityX: number;
+	angularVelocityZ: number;
 	storedBalls: number;
 	capacity: number;
+	braceZone: number | null;
+	braceMultiplier: number;
+	floorSupported: boolean;
+	braceContact: boolean;
+	braceSupportImpulse: number;
+	climbWheelAngle: number;
+	climbWheelRadps: number;
 };
 
 export type MatchPhysics = {
@@ -76,13 +89,12 @@ export type MatchPhysics = {
 };
 
 export interface MatchSnapshot {
-	tick: bigint;
+	tick: number;
 	gamePackId: string;
 	gamePackVersion: string;
 	objectId: string;
 	objectColor: string;
 	objectRadius: number;
-	positions: Float32Array;
 	matchClock: number;
 	matchDurationSeconds: number;
 	preMatchRemainingSeconds: number;
@@ -114,7 +126,7 @@ export interface MatchSnapshot {
 		global: number;
 		breakdown: Record<string, number>;
 	};
-};
+}
 
 const decoder = new TextDecoder();
 
@@ -306,11 +318,57 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 						velocityY: section.f32(),
 						velocityZ: section.f32(),
 						angularVelocityY: section.f32(),
+						rotationX: 0,
+						rotationY: 0,
+						rotationZ: 0,
+						rotationW: 1,
+						angularVelocityX: 0,
+						angularVelocityZ: 0,
 						storedBalls: section.u32(),
-						capacity: section.u32()
+						capacity: section.u32(),
+						braceZone: section.offset < sectionEnd ? section.u8() || null : null,
+						braceMultiplier: section.offset + 4 <= sectionEnd ? section.f32() : 1,
+						floorSupported: true,
+						braceContact: false,
+						braceSupportImpulse: 0,
+						climbWheelAngle: 0,
+						climbWheelRadps: 0
 					});
 				}
 				snapshot.players = players;
+				break;
+			}
+			case 10: {
+				const count = section.u32();
+				const playersById = new Map(snapshot.players.map((player) => [player.id, player]));
+				for (let index = 0; index < count; index += 1) {
+					const player = playersById.get(section.string());
+					const rotationX = section.f32();
+					const rotationY = section.f32();
+					const rotationZ = section.f32();
+					const rotationW = section.f32();
+					const angularVelocityX = section.f32();
+					const angularVelocityY = section.f32();
+					const angularVelocityZ = section.f32();
+					const braceSupportImpulse = section.f32();
+					const climbWheelAngle = section.f32();
+					const climbWheelRadps = section.f32();
+					const floorSupported = section.u8() !== 0;
+					const braceContact = section.u8() !== 0;
+					if (!player) continue;
+					player.rotationX = rotationX;
+					player.rotationY = rotationY;
+					player.rotationZ = rotationZ;
+					player.rotationW = rotationW;
+					player.angularVelocityX = angularVelocityX;
+					player.angularVelocityY = angularVelocityY;
+					player.angularVelocityZ = angularVelocityZ;
+					player.braceSupportImpulse = braceSupportImpulse;
+					player.climbWheelAngle = climbWheelAngle;
+					player.climbWheelRadps = climbWheelRadps;
+					player.floorSupported = floorSupported;
+					player.braceContact = braceContact;
+				}
 				break;
 			}
 			case 7: {

@@ -5,6 +5,9 @@ import type { Bindings } from '../types'
 
 const PACK_ID = 'fgc-2026'
 const ALLOWED_ASSETS = new Set(['field.glb', 'field.physics.json', 'field.semantics.json', 'scoreboard.html', 'topdown.webp'])
+// Long rails are excluded from ordinary client prediction to avoid mirroring
+// large field shells. These two are driveable gameplay constraints, though.
+const CLIENT_PREDICTION_COLLIDERS = new Set(['Cylinder.002', 'Cylinder.003'])
 
 type RobotAssetKind = 'visual' | 'lod1' | 'physics' | 'semantics'
 const ROBOT_ASSET_KINDS: RobotAssetKind[] = ['visual', 'lod1', 'physics', 'semantics']
@@ -40,6 +43,13 @@ type Manifest = {
     physics?: string
     semantics?: string
     behavior?: string
+    climber?: {
+      wheelParts: string[]
+      supportParts?: string[]
+      grooveRootRadiusM: number
+      grooveOuterRadiusM: number
+      maxClimbSpeedMps: number
+    }
   }>
 }
 
@@ -84,6 +94,7 @@ function robotAssetUrls(robotId: string, robot: NonNullable<Manifest['robots']>[
     lod1: paths.lod1 ? `${prefix}/lod1` : undefined,
     physics: paths.physics ? `${prefix}/physics` : undefined,
     semantics: paths.semantics ? `${prefix}/semantics` : undefined,
+    climber: robot.climber,
   }
 }
 
@@ -184,7 +195,11 @@ function buildPublicFieldDefinition(physics: any, semantics: any, manifest: any)
   const authored = physicsNodes.map((node: any) => orientedBoundsForNode(node, physics)).filter(Boolean) as OrientedBounds[]
   const riser = authored.find((bounds) => bounds.id === 'RISER.001')
   const colliders = authored
-    .filter(({ id, min, max }) => id !== 'GUARD_RAIL.001' && id !== 'RISER.001' && max[0] - min[0] <= 2.5 && max[2] - min[2] <= 2.5)
+    .filter(({ id, min, max }) =>
+      id !== 'GUARD_RAIL.001' &&
+      id !== 'RISER.001' &&
+      (CLIENT_PREDICTION_COLLIDERS.has(id) || (max[0] - min[0] <= 2.5 && max[2] - min[2] <= 2.5)),
+    )
     .map(extrudeThinBounds)
   const anchors: Record<string, [number, number, number]> = {}
   const semanticAreas: Record<string, Bounds> = {}

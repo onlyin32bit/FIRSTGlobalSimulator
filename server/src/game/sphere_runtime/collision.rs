@@ -29,9 +29,14 @@ pub(super) fn length_sq(value: Vec3) -> f32 {
     dot(value, value)
 }
 
+#[cfg(test)]
 pub(super) fn robot_planar_extents(robot: &RobotPhysicsConfig, yaw: f32) -> (f32, f32) {
     robot_planar_extents_from_half(
-        [robot.width_m * 0.5, robot.height_m * 0.5, robot.length_m * 0.5],
+        [
+            robot.width_m * 0.5,
+            robot.height_m * 0.5,
+            robot.length_m * 0.5,
+        ],
         yaw,
     )
 }
@@ -42,6 +47,79 @@ pub(super) fn robot_planar_extents_from_half(robot_half: Vec3, yaw: f32) -> (f32
     let cos = yaw.cos().abs();
     let sin = yaw.sin().abs();
     (half_x * cos + half_z * sin, half_x * sin + half_z * cos)
+}
+
+pub(super) fn project_robot_boundary(
+    player: &mut PlayerBody,
+    robot_half: Vec3,
+    robot_definition: Option<&RobotDefinition>,
+    ground_offset_y: f32,
+    boundary: &FieldBoundary,
+) -> Option<Vec3> {
+    let (min_x, max_x, min_z, max_z) = if let Some(definition) = robot_definition {
+        let bounds = robot_local_collider(
+            &definition.bounds,
+            player.position,
+            player.yaw,
+            ground_offset_y,
+        );
+        (bounds.min[0], bounds.max[0], bounds.min[2], bounds.max[2])
+    } else {
+        let (extent_x, extent_z) = robot_planar_extents_from_half(robot_half, player.yaw);
+        (
+            player.position[0] - extent_x,
+            player.position[0] + extent_x,
+            player.position[2] - extent_z,
+            player.position[2] + extent_z,
+        )
+    };
+
+    let mut corrected_min_x = min_x;
+    let mut corrected_max_x = max_x;
+    let mut corrected_min_z = min_z;
+    let mut corrected_max_z = max_z;
+    if min_x < boundary.min[0] {
+        let correction = boundary.min[0] - min_x;
+        player.position[0] += correction;
+        corrected_min_x += correction;
+        corrected_max_x += correction;
+    } else if max_x > boundary.max[0] {
+        let correction = boundary.max[0] - max_x;
+        player.position[0] += correction;
+        corrected_min_x += correction;
+        corrected_max_x += correction;
+    }
+    if min_z < boundary.min[2] {
+        let correction = boundary.min[2] - min_z;
+        player.position[2] += correction;
+        corrected_min_z += correction;
+        corrected_max_z += correction;
+    } else if max_z > boundary.max[2] {
+        let correction = boundary.max[2] - max_z;
+        player.position[2] += correction;
+        corrected_min_z += correction;
+        corrected_max_z += correction;
+    }
+
+    const CONTACT_SLOP_M: f32 = 1.0e-5;
+    let normal = if corrected_min_x <= boundary.min[0] + CONTACT_SLOP_M {
+        Some([1.0, 0.0, 0.0])
+    } else if corrected_max_x >= boundary.max[0] - CONTACT_SLOP_M {
+        Some([-1.0, 0.0, 0.0])
+    } else if corrected_min_z <= boundary.min[2] + CONTACT_SLOP_M {
+        Some([0.0, 0.0, 1.0])
+    } else if corrected_max_z >= boundary.max[2] - CONTACT_SLOP_M {
+        Some([0.0, 0.0, -1.0])
+    } else {
+        None
+    };
+    if let Some(normal) = normal {
+        let into_surface = dot(player.velocity, normal);
+        if into_surface < 0.0 {
+            player.velocity = sub(player.velocity, mul(normal, into_surface));
+        }
+    }
+    normal
 }
 
 pub(super) fn project_static_position(
@@ -333,8 +411,21 @@ pub(super) fn sphere_collider_contact(
 pub(super) fn project_robot_field_colliders(
     player: &mut PlayerBody,
     robot_half: Vec3,
+    robot_definition: Option<&RobotDefinition>,
+    ground_offset_y: f32,
     field_colliders: &[FieldCollider],
+    climbing: bool,
 ) -> (usize, Option<Vec3>) {
+    if let Some(definition) = robot_definition {
+        return project_authored_robot_field_colliders(
+            player,
+            definition,
+            ground_offset_y,
+            field_colliders,
+            climbing,
+        );
+    }
+
     let half_x = robot_half[0];
     let half_z = robot_half[2];
     let robot_min_y = player.position[1] - robot_half[1];
@@ -343,16 +434,19 @@ pub(super) fn project_robot_field_colliders(
     let mut contact_normal = None;
 
     for collider in field_colliders {
+        // The climb motor constrains both wheels to its authored rail. Letting
+        // the generic chassis solver fight any of the brace subparts causes a
+        // one-tick nudge that drops the attachment.
+        if climbing && collider.id.starts_with("Cylinder") {
+            continue;
+        }
         if robot_max_y <= collider.min[1] || robot_min_y >= collider.max[1] {
             continue;
         }
         if collider.half_extents.iter().any(|extent| *extent > 1.0e-6) {
-            if let Some((normal, penetration)) = robot_field_obb_contact(
-                player.position,
-                player.yaw,
-                robot_half,
-                collider,
-            ) {
+            if let Some((normal, penetration)) =
+                robot_field_obb_contact(player.position, player.yaw, robot_half, collider)
+            {
                 player.position = add(player.position, mul(normal, penetration));
                 let into_surface = dot(player.velocity, normal);
                 if into_surface < 0.0 {
@@ -401,33 +495,76 @@ pub(super) fn project_robot_field_colliders(
     (contacts, contact_normal)
 }
 
-/// Return the minimum-translation contact for the rotated robot box against
-/// one authored field OBB. The offline scene gets this rotation from Rapier's
-/// rigid body; using SAT here keeps the server's planar solver in the same
-/// coordinate space instead of testing a permanently axis-aligned chassis.
-pub(super) fn robot_field_obb_contact(
-    robot_center: Vec3,
-    robot_yaw: f32,
-    robot_half: Vec3,
-    collider: &FieldCollider,
-) -> Option<(Vec3, f32)> {
-    let sin = robot_yaw.sin();
-    let cos = robot_yaw.cos();
-    let robot_axes = [[cos, 0.0, -sin], [0.0, 1.0, 0.0], [sin, 0.0, cos]];
-    let collider_axes = collider.axes;
+fn project_authored_robot_field_colliders(
+    player: &mut PlayerBody,
+    definition: &RobotDefinition,
+    ground_offset_y: f32,
+    field_colliders: &[FieldCollider],
+    climbing: bool,
+) -> (usize, Option<Vec3>) {
+    let mut contacts = 0;
+    let mut contact_normal = None;
+    let mut envelope = robot_local_collider(
+        &definition.bounds,
+        player.position,
+        player.yaw,
+        ground_offset_y,
+    );
+
+    for field in field_colliders {
+        if climbing && field.id.starts_with("Cylinder") {
+            continue;
+        }
+        if !collider_bounds_overlap(&envelope, field) {
+            continue;
+        }
+
+        let contact = definition
+            .colliders
+            .iter()
+            .filter_map(|local| {
+                let robot =
+                    robot_local_collider(local, player.position, player.yaw, ground_offset_y);
+                collider_bounds_overlap(&robot, field)
+                    .then(|| obb_obb_contact(&robot, field))
+                    .flatten()
+            })
+            .max_by(|left, right| left.1.total_cmp(&right.1));
+
+        let Some((normal, penetration)) = contact else {
+            continue;
+        };
+        player.position = add(player.position, mul(normal, penetration));
+        let into_surface = dot(player.velocity, normal);
+        if into_surface < 0.0 {
+            player.velocity = sub(player.velocity, mul(normal, into_surface));
+        }
+        contacts += 1;
+        contact_normal = Some(normal);
+        envelope = robot_local_collider(
+            &definition.bounds,
+            player.position,
+            player.yaw,
+            ground_offset_y,
+        );
+    }
+    (contacts, contact_normal)
+}
+
+fn collider_bounds_overlap(left: &FieldCollider, right: &FieldCollider) -> bool {
+    (0..3).all(|axis| left.min[axis] <= right.max[axis] && left.max[axis] >= right.min[axis])
+}
+
+pub(super) fn obb_obb_contact(left: &FieldCollider, right: &FieldCollider) -> Option<(Vec3, f32)> {
     let mut axes = [[0.0; 3]; 15];
     let mut axis_count = 0;
-    for axis in robot_axes
-        .iter()
-        .copied()
-        .chain(collider_axes.iter().copied())
-    {
+    for axis in left.axes.iter().copied().chain(right.axes.iter().copied()) {
         axes[axis_count] = axis;
         axis_count += 1;
     }
-    for robot_axis in robot_axes.iter().copied() {
-        for collider_axis in collider_axes.iter().copied() {
-            let candidate = cross(robot_axis, collider_axis);
+    for left_axis in left.axes.iter().copied() {
+        for right_axis in right.axes.iter().copied() {
+            let candidate = cross(left_axis, right_axis);
             let length = length_sq(candidate).sqrt();
             if length <= 1.0e-5 {
                 continue;
@@ -437,17 +574,17 @@ pub(super) fn robot_field_obb_contact(
         }
     }
 
-    let center_delta = sub(robot_center, collider.center);
+    let center_delta = sub(left.center, right.center);
     let mut minimum_penetration = f32::INFINITY;
     let mut minimum_normal = [0.0, 1.0, 0.0];
     for axis in axes.into_iter().take(axis_count) {
-        let robot_radius = (0..3)
-            .map(|index| robot_half[index] * dot(axis, robot_axes[index]).abs())
+        let left_radius = (0..3)
+            .map(|index| left.half_extents[index] * dot(axis, left.axes[index]).abs())
             .sum::<f32>();
-        let collider_radius = (0..3)
-            .map(|index| collider.half_extents[index] * dot(axis, collider_axes[index]).abs())
+        let right_radius = (0..3)
+            .map(|index| right.half_extents[index] * dot(axis, right.axes[index]).abs())
             .sum::<f32>();
-        let penetration = robot_radius + collider_radius - dot(center_delta, axis).abs();
+        let penetration = left_radius + right_radius - dot(center_delta, axis).abs();
         if penetration <= 0.0 {
             return None;
         }
@@ -461,6 +598,30 @@ pub(super) fn robot_field_obb_contact(
         }
     }
     Some((minimum_normal, minimum_penetration))
+}
+
+/// Return the minimum-translation contact for the rotated robot box against
+/// one authored field OBB. The offline scene gets this rotation from Rapier's
+/// rigid body; using SAT here keeps the server's planar solver in the same
+/// coordinate space instead of testing a permanently axis-aligned chassis.
+pub(super) fn robot_field_obb_contact(
+    robot_center: Vec3,
+    robot_yaw: f32,
+    robot_half: Vec3,
+    collider: &FieldCollider,
+) -> Option<(Vec3, f32)> {
+    let sin = robot_yaw.sin();
+    let cos = robot_yaw.cos();
+    let robot_axes = [[cos, 0.0, -sin], [0.0, 1.0, 0.0], [sin, 0.0, cos]];
+    let robot = FieldCollider {
+        id: "robot-envelope".into(),
+        min: [0.0; 3],
+        max: [0.0; 3],
+        center: robot_center,
+        half_extents: robot_half,
+        axes: robot_axes,
+    };
+    obb_obb_contact(&robot, collider)
 }
 
 pub(super) fn boundary_blocks_motion(
@@ -487,6 +648,7 @@ pub(super) fn resolve_ball_robot_position(
     alpha: f32,
     max_correction: f32,
     field_boundary: &FieldBoundary,
+    robot_fully_dynamic: bool,
 ) {
     let ball_inverse_mass = if boundary_blocks_motion(ball.position, normal, radius, field_boundary)
     {
@@ -496,9 +658,13 @@ pub(super) fn resolve_ball_robot_position(
     } else {
         inverse_ball_mass
     };
-    // Carpet supports the robot vertically; it only responds in X/Z and yaw.
     let planar_normal_sq = normal[0] * normal[0] + normal[2] * normal[2];
-    let robot_effective_inverse_mass = inverse_robot_mass * planar_normal_sq;
+    let robot_effective_inverse_mass = inverse_robot_mass
+        * if robot_fully_dynamic {
+            1.0
+        } else {
+            planar_normal_sq
+        };
     let inverse_mass_sum = ball_inverse_mass + robot_effective_inverse_mass;
     if inverse_mass_sum <= 0.0 {
         return;
@@ -509,6 +675,9 @@ pub(super) fn resolve_ball_robot_position(
     ball.position = add(ball.position, mul(normal, ball_correction));
     player.position[0] -= normal[0] * robot_correction;
     player.position[2] -= normal[2] * robot_correction;
+    if robot_fully_dynamic {
+        player.position[1] -= normal[1] * robot_correction;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -685,7 +854,9 @@ pub(super) fn sphere_authored_obb_contact(
     ];
     let delta = sub(local, closest);
     let distance_sq = length_sq(delta);
-    if distance_sq >= radius * radius { return None; }
+    if distance_sq >= radius * radius {
+        return None;
+    }
     let (local_normal, penetration) = if distance_sq > 1.0e-12 {
         let distance = distance_sq.sqrt();
         (mul(delta, 1.0 / distance), radius - distance)
@@ -695,13 +866,22 @@ pub(super) fn sphere_authored_obb_contact(
             collider.half_extents[1] - local[1].abs(),
             collider.half_extents[2] - local[2].abs(),
         ];
-        let axis = if gaps[0] <= gaps[1] && gaps[0] <= gaps[2] { 0 } else if gaps[1] <= gaps[2] { 1 } else { 2 };
+        let axis = if gaps[0] <= gaps[1] && gaps[0] <= gaps[2] {
+            0
+        } else if gaps[1] <= gaps[2] {
+            1
+        } else {
+            2
+        };
         let mut normal = [0.0; 3];
         normal[axis] = if local[axis] >= 0.0 { 1.0 } else { -1.0 };
         (normal, radius + gaps[axis])
     };
     let normal = add(
-        add(mul(collider.axes[0], local_normal[0]), mul(collider.axes[1], local_normal[1])),
+        add(
+            mul(collider.axes[0], local_normal[0]),
+            mul(collider.axes[1], local_normal[1]),
+        ),
         mul(collider.axes[2], local_normal[2]),
     );
     Some((normal, penetration))
@@ -713,19 +893,32 @@ pub(super) fn robot_local_collider(
     yaw: f32,
     ground_offset_y: f32,
 ) -> FieldCollider {
-    let sin = yaw.sin();
-    let cos = yaw.cos();
-    let rotate = |vector: Vec3| -> Vec3 {
-        [
-            cos * vector[0] + sin * vector[2],
-            vector[1],
-            -sin * vector[0] + cos * vector[2],
-        ]
-    };
-    let local_center = [local.center[0], local.center[1] + ground_offset_y, local.center[2]];
-    let offset = rotate(local_center);
+    robot_local_collider_pose(
+        local,
+        player_position,
+        [0.0, (yaw * 0.5).sin(), 0.0, (yaw * 0.5).cos()],
+        ground_offset_y,
+    )
+}
+
+pub(super) fn robot_local_collider_pose(
+    local: &FieldCollider,
+    player_position: Vec3,
+    rotation: [f32; 4],
+    ground_offset_y: f32,
+) -> FieldCollider {
+    let local_center = [
+        local.center[0],
+        local.center[1] + ground_offset_y,
+        local.center[2],
+    ];
+    let offset = rotate_robot_local_pose(local_center, rotation);
     let center = add(player_position, offset);
-    let axes = [rotate(local.axes[0]), rotate(local.axes[1]), rotate(local.axes[2])];
+    let axes = [
+        rotate_robot_local_pose(local.axes[0], rotation),
+        rotate_robot_local_pose(local.axes[1], rotation),
+        rotate_robot_local_pose(local.axes[2], rotation),
+    ];
     let mut min = center;
     let mut max = center;
     for world_axis in 0..3 {
@@ -746,13 +939,19 @@ pub(super) fn robot_local_collider(
 }
 
 pub(super) fn rotate_robot_local(vector: Vec3, yaw: f32) -> Vec3 {
-    let sin = yaw.sin();
-    let cos = yaw.cos();
-    [
-        cos * vector[0] + sin * vector[2],
-        vector[1],
-        -sin * vector[0] + cos * vector[2],
-    ]
+    rotate_robot_local_pose(vector, [0.0, (yaw * 0.5).sin(), 0.0, (yaw * 0.5).cos()])
+}
+
+pub(super) fn rotate_robot_local_pose(vector: Vec3, rotation: [f32; 4]) -> Vec3 {
+    // Blender's robot forward is opposite the runtime frame.
+    let vector = [-vector[0], vector[1], -vector[2]];
+    rotate_quaternion(vector, rotation)
+}
+
+fn rotate_quaternion(vector: Vec3, rotation: [f32; 4]) -> Vec3 {
+    let q = [rotation[0], rotation[1], rotation[2]];
+    let t = mul(cross(q, vector), 2.0);
+    add(vector, add(mul(t, rotation[3]), cross(q, t)))
 }
 
 pub(super) fn ramp_contact(
