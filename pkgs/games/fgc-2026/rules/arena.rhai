@@ -120,22 +120,26 @@ fn arena_config() {
             intake_radius_m: 0.045,
             intake_forward_offset_m: 0.38,
             intake_center_height_m: 0.075,
-            intake_surface_speed_mps: 3.0,
+            intake_surface_speed_mps: 1.0,
             intake_friction: 0.90,
-            intake_normal_force_n: 8.0,
+            intake_normal_force_n: 5.0,
             intake_restitution_curve: #{
                 low_speed: 0.22,
                 high_speed: 0.10,
                 transition_speed_mps: 1.50,
                 exponent: 0.70
             },
+            // Transfer mechanism (conveyor / hopper path)
+            transfer_surface_speed_mps: 0.5,
+            transfer_normal_force_n: 3.0,
             // Hopper storage + wide flywheel outtake. The flywheel spans 3.5
             // WILDFIRE widths so the mouth accepts a spread of incoming balls
             // and launches them across a matching opening.
             storage_capacity: 40.0,
             intake_rate_bps: 6.0,
             outtake_rate_bps: 3.0,
-            outtake_velocity_mps: 8.0,
+            outtake_velocity_mps: 10.0,
+            outtake_normal_force_n: 25.0,
             outtake_angle_deg: 35.0,
             flywheel_width_m: 0.35,
             outtake_forward_offset_m: 0.0,

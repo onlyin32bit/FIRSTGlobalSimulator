@@ -20,6 +20,23 @@ impl SphereRuntime {
                         )
                     })
             });
+            let _transfer_zone = self.robot_definition.as_ref().and_then(|definition| {
+                definition
+                    .zones
+                    .iter()
+                    .find(|zone| zone.kind == RobotSemanticKind::Transfer)
+                    .map(|zone| {
+                        (
+                            robot_local_collider_pose(
+                                &zone.collider,
+                                player.position,
+                                player.rotation,
+                                ground_offset_y,
+                            ),
+                            rotate_robot_local_pose(zone.direction, player.rotation),
+                        )
+                    })
+            });
             let outtake_zone = self.robot_definition.as_ref().and_then(|definition| {
                 definition
                     .zones
@@ -40,7 +57,6 @@ impl SphereRuntime {
 
             // Intake capture.
             if player.intake_power > 0.0
-                && robot.storage_capacity > 0
                 && robot.intake_rate_bps > 0.0
             {
                 let forward = rotate_robot_local_pose([0.0, 0.0, 1.0], player.rotation);
@@ -51,12 +67,24 @@ impl SphereRuntime {
                 self.intake_candidates.clear();
                 let intake_world_y =
                     (player.position[1] - robot.height_m * 0.5) + robot.intake_center_height_m;
+                let robot_envelope = self.robot_definition.as_ref().map(|definition| {
+                    robot_local_collider_pose(
+                        &definition.bounds,
+                        player.position,
+                        player.rotation,
+                        ground_offset_y,
+                    )
+                });
                 for (index, ball) in self.balls.iter().enumerate() {
                     if !ball.active {
                         continue;
                     }
                     if let Some(zone) = &intake_zone {
-                        if sphere_authored_obb_contact(ball.position, radius, zone).is_none() {
+                        let in_zone = sphere_authored_obb_contact(ball.position, radius, zone).is_some();
+                        let in_env = robot_envelope
+                            .as_ref()
+                            .is_some_and(|env| sphere_authored_obb_contact(ball.position, radius, env).is_some());
+                        if !in_zone && !in_env {
                             continue;
                         }
                         self.intake_candidates
@@ -90,75 +118,79 @@ impl SphereRuntime {
                     if player.intake_accumulator < 1.0 {
                         break;
                     }
-                    if player.stored.len() >= robot.storage_capacity {
-                        break;
-                    }
                     if !self.balls[index].active {
                         continue;
                     }
-                    self.balls[index].active = false;
-                    player.stored.push_back(index);
-                    player.intake_accumulator -= 1.0;
-                    self.semantic_events.push(SemanticEvent {
-                        kind: "intake",
-                        target_id: player_id.clone(),
-                        entity_id: format!("ball:{index}"),
-                    });
+                    if !player.stored.contains(&index) {
+                        player.stored.push_back(index);
+                        player.intake_accumulator -= 1.0;
+                        self.semantic_events.push(SemanticEvent {
+                            kind: "intake",
+                            target_id: player_id.clone(),
+                            entity_id: format!("ball:{index}"),
+                        });
+                    }
                 }
             }
 
             // Wide flywheel outtake.
             if player.outtake_power > 0.0
-                && !player.stored.is_empty()
                 && robot.outtake_rate_bps > 0.0
                 && robot.outtake_velocity_mps > 0.0
             {
                 let forward = rotate_robot_local_pose([0.0, 0.0, 1.0], player.rotation);
                 let right = rotate_robot_local_pose([-1.0, 0.0, 0.0], player.rotation);
-                player.outtake_accumulator += robot.outtake_rate_bps * player.outtake_power * dt;
-                let pitch = robot.outtake_angle_deg.to_radians();
-                let horizontal = robot.outtake_velocity_mps * pitch.cos();
-                let vertical = robot.outtake_velocity_mps * pitch.sin();
-                while player.outtake_accumulator >= 1.0 && !player.stored.is_empty() {
+                player.outtake_accumulator = (player.outtake_accumulator
+                    + robot.outtake_rate_bps * player.outtake_power * dt)
+                    .min(2.0);
+                while player.outtake_accumulator >= 1.0 {
+                    let Some(index) = player.stored.pop_front() else {
+                        player.outtake_accumulator = 0.0;
+                        break;
+                    };
                     player.outtake_accumulator -= 1.0;
-                    let index = player.stored.pop_front().unwrap();
-                    // Deterministic hash spread so the wide mouth actually
-                    // spits across its width without breaking replayability.
-                    let jitter =
-                        (((index as u32).wrapping_mul(2654435761u32)) as f32 / 4294967296.0) - 0.5;
-                    let (exit, launch_forward) = if let Some((zone, direction)) = &outtake_zone {
-                        (add(zone.center, mul(*direction, radius + 0.01)), *direction)
+
+                    let (exit_offset, launch_dir) = if let Some((zone, direction)) = &outtake_zone {
+                        (zone.center, *direction)
                     } else {
+                        let pitch = robot.outtake_angle_deg.to_radians();
+                        let horiz = pitch.cos();
+                        let vert = pitch.sin();
                         (
                             add(
-                                add(
-                                    player.position,
-                                    mul(forward, robot.outtake_forward_offset_m),
-                                ),
-                                mul(right, jitter * robot.flywheel_width_m),
+                                player.position,
+                                mul(forward, robot.outtake_forward_offset_m),
                             ),
-                            forward,
+                            [forward[0] * horiz, vert, forward[2] * horiz],
                         )
                     };
                     let ball = &mut self.balls[index];
-                    ball.position = [
-                        exit[0],
-                        exit[1] + jitter * robot.flywheel_width_m * 0.15,
-                        exit[2],
-                    ];
-                    ball.velocity = [
-                        launch_forward[0] * horizontal + player.velocity[0],
-                        vertical + player.velocity[1],
-                        launch_forward[2] * horizontal + player.velocity[2],
-                    ];
-                    ball.pre_solve_velocity = ball.velocity;
-                    // Realistic flywheel backspin (spin axis along right vector)
-                    let spin_rate = horizontal / arena.ball.radius_m().max(0.01);
-                    ball.angular_velocity = mul(right, -spin_rate);
+                    if self.robot_definition.is_none() {
+                        if ball.position[1] < exit_offset[1] {
+                            ball.position[1] = exit_offset[1];
+                        }
+                        if !ball.active {
+                            ball.position = [
+                                exit_offset[0],
+                                exit_offset[1],
+                                exit_offset[2],
+                            ];
+                            ball.active = true;
+                        }
+                        let launch_speed = robot.outtake_velocity_mps * player.outtake_power;
+                        ball.velocity = [
+                            launch_dir[0] * launch_speed + player.velocity[0],
+                            launch_dir[1] * launch_speed + player.velocity[1],
+                            launch_dir[2] * launch_speed + player.velocity[2],
+                        ];
+                        ball.pre_solve_velocity = ball.velocity;
+                        ball.previous_position = sub(ball.position, mul(ball.velocity, dt));
+                        let spin_rate = launch_speed / arena.ball.radius_m().max(0.01);
+                        ball.angular_velocity = mul(right, -spin_rate);
+                    }
                     ball.quiet_ticks = 0;
                     ball.sleeping = false;
                     ball.grounded = false;
-                    ball.active = true;
                     ball.last_outtake_alliance = Some(player.team_name.clone());
                     self.semantic_events.push(SemanticEvent {
                         kind: "outtake",

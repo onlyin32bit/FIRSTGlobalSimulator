@@ -1343,6 +1343,13 @@
 			>
 				Flip to {cameraDirection === 'north' ? 'south' : 'north'}
 			</Button>
+			<Button
+				variant="outline"
+				class="border-cyan-300/30 bg-black/40 text-cyan-100 hover:bg-cyan-300/10"
+				onclick={() => (robotCameraDistance = 1.0)}
+			>
+				1m Zoom
+			</Button>
 			<label
 				class="flex h-10 items-center gap-2 rounded-md border border-white/20 bg-black/40 px-3 text-xs text-white/75"
 				for="robot-camera-distance"
@@ -1351,7 +1358,7 @@
 				<input
 					id="robot-camera-distance"
 					type="range"
-					min="2.5"
+					min="1.0"
 					max="18"
 					step="0.5"
 					bind:value={robotCameraDistance}

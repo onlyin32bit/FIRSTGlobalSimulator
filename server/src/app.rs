@@ -836,7 +836,7 @@ async fn handle_socket(
                             outtake_velocity_mps,
                             outtake_angle_deg,
                             flywheel_width_m,
-                            intake_surface_speed_mps: None,
+                            ..Default::default()
                         } }).await;
                     }
                     Ok(ClientMessage::ContinuePractice) => {

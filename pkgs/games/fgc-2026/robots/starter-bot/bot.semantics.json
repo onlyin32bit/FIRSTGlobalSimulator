@@ -25,6 +25,27 @@
 		]
 		,"children": [
 			{
+				 "name": "IntakeTarget"
+				,"transformation": [
+					 1
+					,0
+					,0
+					,0
+					,0
+					,1
+					,0
+					,0.135006
+					,0
+					,0
+					,1
+					,0.0164192
+					,0
+					,0
+					,0
+					,1
+				]
+			}
+			,{
 				 "name": "IntakeZone"
 				,"transformation": [
 					 -4.38871e-09
@@ -49,6 +70,27 @@
 				]
 			}
 			,{
+				 "name": "OuttakeTarget"
+				,"transformation": [
+					 1
+					,0
+					,0
+					,0
+					,0
+					,1
+					,0
+					,0.271605
+					,0
+					,0
+					,1
+					,-0.173893
+					,0
+					,0
+					,0
+					,1
+				]
+			}
+			,{
 				 "name": "OuttakeZone"
 				,"transformation": [
 					 -5.62033e-09
@@ -70,6 +112,27 @@
 				]
 				,"meshes": [
 					 1
+				]
+			}
+			,{
+				 "name": "TransferTarget"
+				,"transformation": [
+					 1
+					,0
+					,0
+					,0
+					,0
+					,1
+					,0
+					,0.117326
+					,0
+					,0
+					,1
+					,-0.0921085
+					,0
+					,0
+					,0
+					,1
 				]
 			}
 			,{

@@ -119,20 +119,47 @@ pub(super) fn load_robot_definition(
             }
         }
     }
+    let node_positions = assimp_node_positions(semantics);
     let zones = assimp_obb_nodes(semantics)
         .into_iter()
         .filter_map(|collider| {
-            let kind = match collider.id.as_str() {
-                "IntakeZone" => RobotSemanticKind::Intake,
-                "TransferZone" => RobotSemanticKind::Transfer,
-                "OuttakeZone" => RobotSemanticKind::Outtake,
+            let (kind, target_name) = match collider.id.as_str() {
+                "IntakeZone" => (RobotSemanticKind::Intake, Some("IntakeTarget")),
+                "TransferZone" => (RobotSemanticKind::Transfer, Some("TransferTarget")),
+                "OuttakeZone" => (RobotSemanticKind::Outtake, Some("OuttakeTarget")),
                 _ => return None,
             };
-            let direction = [
-                -collider.axes[2][0],
-                -collider.axes[2][1],
-                -collider.axes[2][2],
-            ];
+            let direction = if let Some(target_name) = target_name {
+                if let Some(&target_pos) = node_positions.get(target_name) {
+                    let delta = [
+                        target_pos[0] - collider.center[0],
+                        target_pos[1] - collider.center[1],
+                        target_pos[2] - collider.center[2],
+                    ];
+                    let len = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+                    if len > 1.0e-6 {
+                        [delta[0] / len, delta[1] / len, delta[2] / len]
+                    } else {
+                        [
+                            -collider.axes[2][0],
+                            -collider.axes[2][1],
+                            -collider.axes[2][2],
+                        ]
+                    }
+                } else {
+                    [
+                        -collider.axes[2][0],
+                        -collider.axes[2][1],
+                        -collider.axes[2][2],
+                    ]
+                }
+            } else {
+                [
+                    -collider.axes[2][0],
+                    -collider.axes[2][1],
+                    -collider.axes[2][2],
+                ]
+            };
             Some(RobotSemanticZone {
                 id: collider.id.clone(),
                 kind,
@@ -167,6 +194,22 @@ pub(super) fn load_robot_definition(
         bounds,
         zones,
     })
+}
+
+fn assimp_node_positions(scene: &serde_json::Value) -> std::collections::BTreeMap<String, [f32; 3]> {
+    scene
+        .get("rootnode")
+        .and_then(|node| node.get("children"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| {
+            let id = node.get("name")?.as_str()?.to_string();
+            let matrix = assimp_matrix(node)?;
+            let position = transform_point(&matrix, [0.0, 0.0, 0.0]);
+            Some((id, position))
+        })
+        .collect()
 }
 
 fn assimp_obb_nodes(scene: &serde_json::Value) -> Vec<FieldCollider> {

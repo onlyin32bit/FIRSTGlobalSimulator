@@ -119,8 +119,12 @@ pub struct MechSpec {
     pub capacity: Option<usize>,
     pub intake_rate_bps: Option<f32>,
     pub intake_surface_speed_mps: Option<f32>,
+    pub intake_normal_force_n: Option<f32>,
+    pub transfer_surface_speed_mps: Option<f32>,
+    pub transfer_normal_force_n: Option<f32>,
     pub outtake_rate_bps: Option<f32>,
     pub outtake_velocity_mps: Option<f32>,
+    pub outtake_normal_force_n: Option<f32>,
     pub outtake_angle_deg: Option<f32>,
     pub flywheel_width_m: Option<f32>,
 }
@@ -144,11 +148,23 @@ fn effective_robot<'a>(base: &'a RobotPhysicsConfig, mech: &MechSpec) -> RobotPh
     if let Some(speed) = mech.intake_surface_speed_mps {
         robot.intake_surface_speed_mps = speed;
     }
+    if let Some(force) = mech.intake_normal_force_n {
+        robot.intake_normal_force_n = force;
+    }
+    if let Some(speed) = mech.transfer_surface_speed_mps {
+        robot.transfer_surface_speed_mps = speed;
+    }
+    if let Some(force) = mech.transfer_normal_force_n {
+        robot.transfer_normal_force_n = force;
+    }
     if let Some(rate) = mech.outtake_rate_bps {
         robot.outtake_rate_bps = rate;
     }
     if let Some(velocity) = mech.outtake_velocity_mps {
         robot.outtake_velocity_mps = velocity;
+    }
+    if let Some(force) = mech.outtake_normal_force_n {
+        robot.outtake_normal_force_n = force;
     }
     if let Some(angle) = mech.outtake_angle_deg {
         robot.outtake_angle_deg = angle;
@@ -924,6 +940,34 @@ impl SphereRuntime {
                         )
                     })
             });
+            let transfer_mouth = robot_definition.as_ref().and_then(|definition| {
+                definition
+                    .zones
+                    .iter()
+                    .find(|zone| zone.kind == RobotSemanticKind::Transfer)
+                    .map(|zone| {
+                        robot_local_collider_pose(
+                            &zone.collider,
+                            player.position,
+                            player.rotation,
+                            -arena.robot.height_m * 0.5,
+                        )
+                    })
+            });
+            let outtake_mouth = robot_definition.as_ref().and_then(|definition| {
+                definition
+                    .zones
+                    .iter()
+                    .find(|zone| zone.kind == RobotSemanticKind::Outtake)
+                    .map(|zone| {
+                        robot_local_collider_pose(
+                            &zone.collider,
+                            player.position,
+                            player.rotation,
+                            -arena.robot.height_m * 0.5,
+                        )
+                    })
+            });
             if arena.robot.intake_enabled && robot_definition.is_none() {
                 for ball in &mut self.balls {
                     if !ball.active {
@@ -959,10 +1003,19 @@ impl SphereRuntime {
                 if !ball.active {
                     continue;
                 }
-                if player.intake_power > 0.0
-                    && intake_mouth.as_ref().is_some_and(|mouth| {
-                        sphere_authored_obb_contact(ball.position, radius, mouth).is_some()
-                    })
+                let touches_intake = intake_mouth.as_ref().is_some_and(|mouth| {
+                    sphere_authored_obb_contact(ball.position, radius, mouth).is_some()
+                });
+                let touches_transfer = transfer_mouth.as_ref().is_some_and(|mouth| {
+                    sphere_authored_obb_contact(ball.position, radius, mouth).is_some()
+                });
+                let touches_outtake = outtake_mouth.as_ref().is_some_and(|mouth| {
+                    sphere_authored_obb_contact(ball.position, radius, mouth).is_some()
+                });
+
+                if (player.intake_power > 0.0 && touches_intake)
+                    || ((player.intake_power > 0.0 || player.outtake_power > 0.0) && touches_transfer)
+                    || (player.outtake_power > 0.0 && touches_outtake)
                 {
                     continue;
                 }
@@ -1381,20 +1434,58 @@ impl SphereRuntime {
         }
 
         for player in self.players.values_mut() {
-            let intake_mouth = robot_definition.as_ref().and_then(|definition| {
-                definition
+            let ground_offset_y = -arena.robot.height_m * 0.5;
+            let intake_zone_info = robot_definition.as_ref().and_then(|definition| {
+                let zone = definition
                     .zones
                     .iter()
-                    .find(|zone| zone.kind == RobotSemanticKind::Intake)
-                    .map(|zone| {
-                        robot_local_collider_pose(
-                            &zone.collider,
-                            player.position,
-                            player.rotation,
-                            -arena.robot.height_m * 0.5,
-                        )
-                    })
+                    .find(|zone| zone.kind == RobotSemanticKind::Intake)?;
+                let mouth = robot_local_collider_pose(
+                    &zone.collider,
+                    player.position,
+                    player.rotation,
+                    ground_offset_y,
+                );
+                let dir_world = rotate_robot_local_pose(zone.direction, player.rotation);
+                let envelope = robot_local_collider_pose(
+                    &definition.bounds,
+                    player.position,
+                    player.rotation,
+                    ground_offset_y,
+                );
+                Some((mouth, dir_world, envelope))
             });
+
+            let transfer_zone_info = robot_definition.as_ref().and_then(|definition| {
+                let zone = definition
+                    .zones
+                    .iter()
+                    .find(|zone| zone.kind == RobotSemanticKind::Transfer)?;
+                let mouth = robot_local_collider_pose(
+                    &zone.collider,
+                    player.position,
+                    player.rotation,
+                    ground_offset_y,
+                );
+                let dir_world = rotate_robot_local_pose(zone.direction, player.rotation);
+                Some((mouth, dir_world))
+            });
+
+            let outtake_zone_info = robot_definition.as_ref().and_then(|definition| {
+                let zone = definition
+                    .zones
+                    .iter()
+                    .find(|zone| zone.kind == RobotSemanticKind::Outtake)?;
+                let mouth = robot_local_collider_pose(
+                    &zone.collider,
+                    player.position,
+                    player.rotation,
+                    ground_offset_y,
+                );
+                let dir_world = rotate_robot_local_pose(zone.direction, player.rotation);
+                Some((mouth, dir_world))
+            });
+
             if arena.robot.intake_enabled && robot_definition.is_none() {
                 for ball in &mut self.balls {
                     if !ball.active {
@@ -1444,11 +1535,116 @@ impl SphereRuntime {
                 if !ball.active {
                     continue;
                 }
-                if player.intake_power > 0.0
-                    && intake_mouth.as_ref().is_some_and(|mouth| {
-                        sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth)
-                            .is_some()
-                    })
+                let (touches_intake_mouth, inside_robot) = if let Some((mouth, _, envelope)) = &intake_zone_info {
+                    let in_mouth = sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth).is_some();
+                    let in_env = sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), envelope).is_some();
+                    (in_mouth, in_env)
+                } else {
+                    (false, false)
+                };
+
+                let touches_transfer = if let Some((mouth, _)) = &transfer_zone_info {
+                    sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth).is_some()
+                } else {
+                    false
+                };
+
+                let touches_outtake = if let Some((mouth, _)) = &outtake_zone_info {
+                    sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth).is_some()
+                } else {
+                    false
+                };
+
+                // Intake physical force
+                if player.intake_power > 0.0 {
+                    let intake_dir = if let Some((_, dir_world, _)) = &intake_zone_info {
+                        Some(*dir_world)
+                    } else if arena.robot.intake_enabled {
+                        Some(rotate_robot_local_pose([0.0, 0.0, 1.0], player.rotation))
+                    } else {
+                        None
+                    };
+
+                    if let Some(dir_world) = intake_dir {
+                        if touches_intake_mouth || inside_robot {
+                            let target_speed = robot.intake_surface_speed_mps * player.intake_power;
+                            let force_n = (robot.intake_normal_force_n * player.intake_power * 4.0).max(10.0 * player.intake_power);
+                            let mass = arena.ball.mass_kg.max(0.001);
+                            let rel_vel = sub(ball.velocity, player.velocity);
+                            let current_speed = dot(rel_vel, dir_world);
+
+                            if current_speed < target_speed {
+                                let speed_needed = target_speed - current_speed;
+                                let dv = (force_n / mass * dt).min(speed_needed);
+                                ball.velocity = add(ball.velocity, mul(dir_world, dv));
+                            }
+
+                            let perp_vel = sub(rel_vel, mul(dir_world, dot(rel_vel, dir_world)));
+                            let damp_factor = (1.0 - 6.0 * dt).max(0.0);
+                            ball.velocity = sub(ball.velocity, mul(perp_vel, 1.0 - damp_factor));
+
+                            ball.sleeping = false;
+                            ball.quiet_ticks = 0;
+                        }
+                    }
+                }
+
+                // Transfer physical force
+                if (player.intake_power > 0.0 || player.outtake_power > 0.0) && (touches_transfer || inside_robot) {
+                    if let Some((_, dir_world)) = &transfer_zone_info {
+                        let power = player.intake_power.max(player.outtake_power);
+                        let target_speed = robot.transfer_surface_speed_mps * power;
+                        let force_n = (robot.transfer_normal_force_n * power * 4.0).max(10.0 * power);
+                        let mass = arena.ball.mass_kg.max(0.001);
+                        let rel_vel = sub(ball.velocity, player.velocity);
+                        let current_speed = dot(rel_vel, *dir_world);
+
+                        if current_speed < target_speed {
+                            let speed_needed = target_speed - current_speed;
+                            let dv = (force_n / mass * dt).min(speed_needed);
+                            ball.velocity = add(ball.velocity, mul(*dir_world, dv));
+                        }
+
+                        let perp_vel = sub(rel_vel, mul(*dir_world, dot(rel_vel, *dir_world)));
+                        let damp_factor = (1.0 - 6.0 * dt).max(0.0);
+                        ball.velocity = sub(ball.velocity, mul(perp_vel, 1.0 - damp_factor));
+
+                        ball.sleeping = false;
+                        ball.quiet_ticks = 0;
+                    }
+                }
+
+                // Outtake physical force: affects balls touching OuttakeZone
+                if player.outtake_power > 0.0 && touches_outtake {
+                    let outtake_dir = if let Some((_, dir_world)) = &outtake_zone_info {
+                        *dir_world
+                    } else {
+                        rotate_robot_local_pose([0.0, 0.0, 1.0], player.rotation)
+                    };
+                    let target_speed = robot.outtake_velocity_mps * player.outtake_power;
+                    let force_n = (robot.outtake_normal_force_n * player.outtake_power * 4.0).max(10.0 * player.outtake_power);
+                    let mass = arena.ball.mass_kg.max(0.001);
+                    let rel_vel = sub(ball.velocity, player.velocity);
+                    let current_speed = dot(rel_vel, outtake_dir);
+
+                    if current_speed < target_speed {
+                        let speed_needed = target_speed - current_speed;
+                        let dv = (force_n / mass * dt).min(speed_needed);
+                        ball.velocity = add(ball.velocity, mul(outtake_dir, dv));
+                    }
+
+                    let perp_vel = sub(rel_vel, mul(outtake_dir, dot(rel_vel, outtake_dir)));
+                    let damp_factor = (1.0 - 6.0 * dt).max(0.0);
+                    ball.velocity = sub(ball.velocity, mul(perp_vel, 1.0 - damp_factor));
+
+                    ball.last_outtake_alliance = Some(player.team_name.clone());
+                    ball.sleeping = false;
+                    ball.quiet_ticks = 0;
+                }
+
+                if (player.intake_power > 0.0 && touches_intake_mouth)
+                    || ((player.intake_power > 0.0 || player.outtake_power > 0.0) && touches_transfer)
+                    || (player.outtake_power > 0.0 && touches_outtake)
                 {
                     continue;
                 }
@@ -1489,7 +1685,7 @@ impl SphereRuntime {
                 // Allow balls entering the intake opening when intake is enabled to pass into the hopper
                 if robot_definition.is_none()
                     && arena.robot.intake_enabled
-                    && (player.intake_power > 0.0 || player.stored.len() < robot.storage_capacity)
+                    && player.intake_power > 0.0
                 {
                     let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
                     let right = [-forward[2], 0.0, forward[0]];

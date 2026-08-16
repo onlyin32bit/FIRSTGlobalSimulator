@@ -225,6 +225,9 @@ impl RhaiEngine {
                 .map(|number| number as f32)
                 .map_err(|_| format!("arena_config.{section}.{key} must be a number"))
         };
+        let nested_number_opt = |map: &Map, key: &str| {
+            map.get(key).and_then(|v| v.as_float().ok().map(|n| n as f32))
+        };
         let nested_bool = |map: &Map, section: &str, key: &str| {
             map.get(key)
                 .ok_or_else(|| format!("arena_config.{section} is missing {key}"))?
@@ -387,11 +390,17 @@ impl RhaiEngine {
                     &intake_restitution,
                     "robot.intake_restitution_curve",
                 )?,
+                transfer_surface_speed_mps: nested_number_opt(&robot, "transfer_surface_speed_mps")
+                    .unwrap_or(nested_number(&robot, "robot", "intake_surface_speed_mps")?),
+                transfer_normal_force_n: nested_number_opt(&robot, "transfer_normal_force_n")
+                    .unwrap_or(nested_number(&robot, "robot", "intake_normal_force_n")?),
                 storage_capacity: nested_number(&robot, "robot", "storage_capacity")?.max(0.0)
                     as usize,
                 intake_rate_bps: nested_number(&robot, "robot", "intake_rate_bps")?,
                 outtake_rate_bps: nested_number(&robot, "robot", "outtake_rate_bps")?,
                 outtake_velocity_mps: nested_number(&robot, "robot", "outtake_velocity_mps")?,
+                outtake_normal_force_n: nested_number_opt(&robot, "outtake_normal_force_n")
+                    .unwrap_or(15.0),
                 outtake_angle_deg: nested_number(&robot, "robot", "outtake_angle_deg")?,
                 flywheel_width_m: nested_number(&robot, "robot", "flywheel_width_m")?,
                 outtake_forward_offset_m: nested_number(
