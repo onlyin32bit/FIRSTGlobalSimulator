@@ -17,7 +17,9 @@
 		physicsAsset,
 		semanticsAsset,
 		climber,
-		isClimbing = false
+		isClimbing = false,
+		ballContacts = [],
+		ballPositions = new Float32Array()
 	}: {
 		player: MatchPlayer;
 		physics: MatchPhysics;
@@ -35,6 +37,8 @@
 			grooveOuterRadiusM: number;
 		};
 		isClimbing?: boolean;
+		ballContacts?: string[][];
+		ballPositions?: Float32Array;
 	} = $props();
 
 	let intakeRotation = $state(0);
@@ -204,6 +208,10 @@
 			physicsUrl={physicsAsset}
 			semanticsUrl={semanticsAsset}
 			{climber}
+			{ballContacts}
+			ballPositions={ballPositions}
+			robotPosition={[player.x, player.y, player.z]}
+			robotQuaternion={[player.rotationX, player.rotationY, player.rotationZ, player.rotationW]}
 			height={physics.robotHeightM}
 		/>
 	{/if}

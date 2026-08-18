@@ -275,12 +275,20 @@ pub(super) fn inside_obb_exit_face(
         dot(previous_delta, collider.axes[1]),
         dot(previous_delta, collider.axes[2]),
     ];
+    obb_entry_face(previous_local, local_position, collider.half_extents)
+}
 
+/// Choose the OBB face a sphere whose centre is inside the box should be
+/// expelled through. Returns `(axis, sign, face_distance)`. If the sphere
+/// crossed a face this tick, that entry face is retained so a fast ball cannot
+/// pass the midpoint and tunnel out the far side; otherwise the nearest face
+/// is used.
+fn obb_entry_face(previous_local: Vec3, local: Vec3, half_extents: Vec3) -> (usize, f32, f32) {
     let mut crossed_axis = None;
     let mut entry_time = f32::NEG_INFINITY;
     for axis in 0..3 {
-        let previous_distance = previous_local[axis].abs() - collider.half_extents[axis];
-        let movement_toward_face = previous_local[axis].abs() - local_position[axis].abs();
+        let previous_distance = previous_local[axis].abs() - half_extents[axis];
+        let movement_toward_face = previous_local[axis].abs() - local[axis].abs();
         if previous_distance > 0.0 && movement_toward_face > 1.0e-6 {
             // For a diagonal path, the last slab boundary crossed is the
             // actual entry face of the OBB.
@@ -297,23 +305,19 @@ pub(super) fn inside_obb_exit_face(
         } else {
             1.0
         };
-        return (
-            axis,
-            sign,
-            collider.half_extents[axis] - local_position[axis].abs(),
-        );
+        return (axis, sign, half_extents[axis] - local[axis].abs());
     }
 
     let mut nearest_axis = 0;
     let mut nearest_distance = f32::INFINITY;
     for axis in 0..3 {
-        let distance = collider.half_extents[axis] - local_position[axis].abs();
+        let distance = half_extents[axis] - local[axis].abs();
         if distance < nearest_distance {
             nearest_distance = distance;
             nearest_axis = axis;
         }
     }
-    let sign = if local_position[nearest_axis] < 0.0 {
+    let sign = if local[nearest_axis] < 0.0 {
         -1.0
     } else {
         1.0
@@ -670,7 +674,12 @@ pub(super) fn resolve_ball_robot_position(
         return;
     }
     let lambda = penetration / (inverse_mass_sum + alpha);
-    let ball_correction = (ball_inverse_mass * lambda).min(max_correction);
+    // The depenetration cap is tuned for dense 500-ball stacks, where one full
+    // correction per frame would explode a wedged pile across the field. A ball
+    // contacting a robot is a rare, low-contact case: push it fully out of the
+    // chassis in a single iteration so it never lags half-embedded behind a
+    // moving robot. The heavy robot still takes its capped share.
+    let ball_correction = ball_inverse_mass * lambda;
     let robot_correction = (inverse_robot_mass * lambda).min(max_correction);
     ball.position = add(ball.position, mul(normal, ball_correction));
     player.position[0] -= normal[0] * robot_correction;
@@ -885,6 +894,127 @@ pub(super) fn sphere_authored_obb_contact(
         mul(collider.axes[2], local_normal[2]),
     );
     Some((normal, penetration))
+}
+
+/// Sphere contact against a robot OBB that preserves the face the ball
+/// approached from. `sphere_authored_obb_contact` selects the nearest face when
+/// the centre is inside, which flips once a fast ball crosses the OBB midpoint
+/// and makes it warp through the chassis. Only a handful of balls are ever
+/// inside a robot, so the extra swept test is cheap.
+pub(super) fn sphere_robot_obb_contact(
+    position: Vec3,
+    previous_position: Vec3,
+    radius: f32,
+    collider: &FieldCollider,
+) -> Option<(Vec3, f32)> {
+    let relative = sub(position, collider.center);
+    let local = [
+        dot(relative, collider.axes[0]),
+        dot(relative, collider.axes[1]),
+        dot(relative, collider.axes[2]),
+    ];
+    if (0..3).all(|axis| local[axis].abs() <= collider.half_extents[axis] + 1.0e-6) {
+        let previous_relative = sub(previous_position, collider.center);
+        let previous_local = [
+            dot(previous_relative, collider.axes[0]),
+            dot(previous_relative, collider.axes[1]),
+            dot(previous_relative, collider.axes[2]),
+        ];
+        let (axis, sign, face_distance) =
+            obb_entry_face(previous_local, local, collider.half_extents);
+        let normal = mul(collider.axes[axis], sign);
+        return Some((normal, radius + face_distance));
+    }
+
+    // A discrete overlap check misses a ball which traverses an entire thin
+    // panel in one tick: both its previous and current centres can be outside
+    // the OBB. Sweep the centre through the OBB expanded by the ball radius
+    // (Minkowski sum) and return the entry face in that case. The positional
+    // solver then puts the ball back on that face instead of letting it emerge
+    // from the opposite side.
+    let previous_relative = sub(previous_position, collider.center);
+    let previous_local = [
+        dot(previous_relative, collider.axes[0]),
+        dot(previous_relative, collider.axes[1]),
+        dot(previous_relative, collider.axes[2]),
+    ];
+    let movement = sub(local, previous_local);
+    let mut entry_time = f32::NEG_INFINITY;
+    let mut exit_time = f32::INFINITY;
+    let mut entry_axis = 0;
+    let mut entry_sign = 1.0;
+    for axis in 0..3 {
+        let limit = collider.half_extents[axis] + radius;
+        let speed = movement[axis];
+        if speed.abs() <= 1.0e-8 {
+            if previous_local[axis] < -limit || previous_local[axis] > limit {
+                return sphere_authored_obb_contact(position, radius, collider);
+            }
+            continue;
+        }
+        let near = (-limit - previous_local[axis]) / speed;
+        let far = (limit - previous_local[axis]) / speed;
+        let (axis_entry, axis_exit, sign) = if near <= far {
+            (near, far, -1.0)
+        } else {
+            (far, near, 1.0)
+        };
+        if axis_entry > entry_time {
+            entry_time = axis_entry;
+            entry_axis = axis;
+            entry_sign = sign;
+        }
+        exit_time = exit_time.min(axis_exit);
+    }
+    if entry_time <= exit_time && (0.0..=1.0).contains(&entry_time) {
+        let limit = collider.half_extents[entry_axis] + radius;
+        let penetration = (local[entry_axis] - entry_sign * limit) * -entry_sign;
+        if penetration > 0.0 {
+            return Some((
+                mul(collider.axes[entry_axis], entry_sign),
+                penetration,
+            ));
+        }
+    }
+    sphere_authored_obb_contact(position, radius, collider)
+}
+
+/// Entry-face-aware sphere/box contact for the planar-chassis fallback path
+/// used when no authored robot definition is loaded.
+pub(super) fn sphere_robot_box_contact(
+    sphere: Vec3,
+    previous_sphere: Vec3,
+    radius: f32,
+    center: Vec3,
+    yaw: f32,
+    half: Vec3,
+) -> Option<(Vec3, f32)> {
+    let sin = yaw.sin();
+    let cos = yaw.cos();
+    let relative = sub(sphere, center);
+    let local = [
+        cos * relative[0] - sin * relative[2],
+        relative[1],
+        sin * relative[0] + cos * relative[2],
+    ];
+    if (0..3).all(|axis| local[axis].abs() <= half[axis] + 1.0e-6) {
+        let previous_relative = sub(previous_sphere, center);
+        let previous_local = [
+            cos * previous_relative[0] - sin * previous_relative[2],
+            previous_relative[1],
+            sin * previous_relative[0] + cos * previous_relative[2],
+        ];
+        let (axis, sign, face_distance) = obb_entry_face(previous_local, local, half);
+        let mut normal = [0.0; 3];
+        normal[axis] = sign;
+        let world_normal = [
+            cos * normal[0] + sin * normal[2],
+            normal[1],
+            -sin * normal[0] + cos * normal[2],
+        ];
+        return Some((world_normal, radius + face_distance));
+    }
+    sphere_obb_contact(sphere, radius, center, yaw, half)
 }
 
 pub(super) fn robot_local_collider(

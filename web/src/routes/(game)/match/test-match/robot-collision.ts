@@ -9,11 +9,47 @@ export type AssimpScene = {
 const length = (value: [number, number, number]) => Math.hypot(...value);
 
 export function parseRobotColliders(scene: AssimpScene): FieldCollider[] {
-	return (scene.rootnode?.children ?? []).flatMap((node) => {
+	const allNodes: Array<{ node: AssimpNode; absMatrix: number[] }> = [];
+
+	function traverse(node?: { children?: AssimpNode[] } & AssimpNode, parentMat?: number[]) {
+		if (!node) return;
+
+		let localMat = [
+			1, 0, 0, 0,
+			0, 1, 0, 0,
+			0, 0, 1, 0,
+			0, 0, 0, 1
+		];
+		if (node.transformation && node.transformation.length === 16) {
+			localMat = node.transformation;
+		}
+
+		let absMat = localMat;
+		if (parentMat) {
+			const m = new Array(16).fill(0);
+			for (let i = 0; i < 4; i++) {
+				for (let j = 0; j < 4; j++) {
+					m[i * 4 + j] = parentMat[i * 4 + 0]! * localMat[0 * 4 + j]! +
+						parentMat[i * 4 + 1]! * localMat[1 * 4 + j]! +
+						parentMat[i * 4 + 2]! * localMat[2 * 4 + j]! +
+						parentMat[i * 4 + 3]! * localMat[3 * 4 + j]!;
+				}
+			}
+			absMat = m;
+		}
+
+		allNodes.push({ node, absMatrix: absMat });
+
+		if (node.children) {
+			node.children.forEach((c) => traverse(c, absMat));
+		}
+	}
+	traverse(scene.rootnode);
+
+	return allNodes.flatMap(({ node, absMatrix: matrix }) => {
 		const meshIndex = node.meshes?.[0];
 		const vertices = Number.isInteger(meshIndex) ? scene.meshes?.[meshIndex!]!.vertices : undefined;
-		const matrix = node.transformation;
-		if (!node.name || !vertices?.length || !matrix || matrix.length < 16) return [];
+		if (!node.name || !vertices?.length) return [];
 
 		const localMin = [Infinity, Infinity, Infinity];
 		const localMax = [-Infinity, -Infinity, -Infinity];

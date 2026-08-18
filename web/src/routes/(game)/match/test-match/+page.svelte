@@ -21,8 +21,10 @@
 	import {
 		decodeMatchSnapshot,
 		type MatchPhysics as PhysicsModel,
-		type MatchPlayer as Player
+		type MatchPlayer as Player,
+		type TransferDebugEntry
 	} from './match-protocol';
+	import TransferDebugHUD from './TransferDebugHUD.svelte';
 	import {
 		DrivePredictor,
 		type DriveParams,
@@ -37,6 +39,8 @@
 		positions: Float32Array;
 		radius: number;
 		color: string;
+		ballDebug: Uint8Array;
+		ballContacts: string[][];
 	};
 	type PerformanceWithMemory = Performance & {
 		memory?: {
@@ -51,13 +55,17 @@
 		objectId: 'object',
 		positions: new Float32Array(),
 		radius: 0.05,
-		color: '#f97316'
+		color: '#f97316',
+		ballDebug: new Uint8Array(),
+		ballContacts: []
 	});
 	let renderedObjectFrame = $state.raw<ObjectFrame>({
 		objectId: 'object',
 		positions: new Float32Array(),
 		radius: 0.05,
-		color: '#f97316'
+		color: '#f97316',
+		ballDebug: new Uint8Array(),
+		ballContacts: []
 	});
 	let physics = $state.raw<PhysicsModel>({
 		ballMaterial: 'closed-cell polyurethane foam',
@@ -181,12 +189,14 @@
 	let fieldDefinition = $state<FieldDefinition | null>(null);
 	let fieldDebugOpen = $state(false);
 	let robotDebugOpen = $state(false);
+	let transferDebugOpen = $state(false);
 	let predictedBraceColliders = $derived(
 		(fieldDefinition?.colliders ?? [])
 			.map((collider) => collider.id)
 			.filter((id) => id === 'Cylinder.002' || id === 'Cylinder.003')
 	);
 	let semanticEvents = $state<string[]>([]);
+	let transferDebug = $state<TransferDebugEntry[]>([]);
 	let activeTriggerIds = $derived(
 		new Set(
 			semanticEvents
@@ -533,11 +543,12 @@
 		}
 
 		const keyboardActive = keyboardDrive !== 0 || keyboardTurn !== 0;
+		const outtakeVal = pressed.has('e') ? 1 : gamepadOuttake;
 		return {
 			drive: keyboardActive ? keyboardDrive : gamepadDrive,
 			turn: keyboardActive ? keyboardTurn : gamepadTurn,
-			intake: pressed.has(' ') ? 1 : gamepadIntake,
-			outtake: pressed.has('e') ? 1 : gamepadOuttake,
+			intake: outtakeVal > 0 ? outtakeVal : (pressed.has(' ') ? 1 : gamepadIntake),
+			outtake: outtakeVal,
 			climb: pressed.has('q') ? 1 : gamepadClimb,
 			source: (keyboardActive ? 'keyboard' : gamepad ? 'gamepad' : 'keyboard') as
 				'keyboard' | 'gamepad'
@@ -604,9 +615,7 @@
 			]);
 			starterBotColliders = parseRobotColliders(physicsAsset);
 			robotDebugSummary = {
-				colliders: (physicsAsset.rootnode?.children ?? []).flatMap((node) =>
-					node.name?.startsWith('ClimbWheel') ? [node.name] : []
-				),
+				colliders: starterBotColliders.map(c => c.id),
 				collisionCount: starterBotColliders.length,
 				semantics: (semanticAsset.rootnode?.children ?? []).flatMap((node) =>
 					node.name ? [node.name] : []
@@ -1101,12 +1110,14 @@
 								const localServer = message.players.find((player) => player.id === localId);
 								if (localServer) reconcileLocal(localServer);
 							}
-							objectFrame = {
-								objectId: message.objectId,
-								positions: message.positions,
-								radius: message.objectRadius,
-								color: message.objectColor
-							};
+objectFrame = {
+							objectId: message.objectId,
+							positions: message.positions,
+							radius: message.objectRadius,
+							color: message.objectColor,
+							ballDebug: message.ballDebug,
+							ballContacts: message.ballContacts
+						};
 							contacts = message.contacts;
 							if (message.matchRunning && receivedMatchState && !matchRunning) {
 								startCueVisible = true;
@@ -1160,6 +1171,7 @@
 							}
 							packVersion = `${message.gamePackId} · v${message.gamePackVersion}`;
 							semanticEvents = message.semanticEvents;
+							transferDebug = message.transferDebug;
 							return;
 						}
 						const message = JSON.parse(event.data);
@@ -1409,6 +1421,15 @@
 			onclick={() => (robotDebugOpen = !robotDebugOpen)}
 		>
 			{robotDebugOpen ? 'Hide robot debug' : 'Robot debug'}
+		</Button>
+		<Button
+			variant="outline"
+			class={transferDebugOpen
+				? 'border-amber-300/60 bg-amber-300/15 text-amber-100 hover:bg-amber-300/25'
+				: 'border-amber-300/30 bg-black/40 text-amber-100 hover:bg-amber-300/10'}
+			onclick={() => (transferDebugOpen = !transferDebugOpen)}
+		>
+			{transferDebugOpen ? 'Hide transfer debug' : 'Transfer debug'}
 		</Button>
 		<Button
 			variant="outline"
@@ -1837,7 +1858,7 @@
 				{activeTriggerIds}
 			/>
 		{/if}
-		<ScriptedObjects frame={renderedObjectFrame} {potatoMode} />
+		<ScriptedObjects frame={renderedObjectFrame} {potatoMode} debug={transferDebugOpen} />
 		<T.Group>
 			{#each renderedPlayers as player (player.id)}
 				<RobotModel
@@ -1855,8 +1876,13 @@
 					physicsAsset={starterBotPhysics ?? undefined}
 					semanticsAsset={starterBotSemantics ?? undefined}
 					climber={starterBotClimber ?? undefined}
+					ballContacts={renderedObjectFrame?.ballContacts}
+					ballPositions={renderedObjectFrame?.positions}
 				/>
 			{/each}
 		</T.Group>
 	</Canvas>
+	{#if transferDebugOpen}
+		<TransferDebugHUD entries={transferDebug} ballDebug={objectFrame?.ballDebug} />
+	{/if}
 </main>

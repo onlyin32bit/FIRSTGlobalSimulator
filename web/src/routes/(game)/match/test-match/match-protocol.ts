@@ -88,6 +88,22 @@ export type MatchPhysics = {
 	outtakeHeightM: number;
 };
 
+export type TransferDebugEntry = {
+	playerName: string;
+	hasBall: boolean;
+	transferPowerOk: boolean;
+	insideRobot: boolean;
+	touchesOuttake: boolean;
+	hasTransferZone: boolean;
+	hasRobotDefinition: boolean;
+	intakePower: number;
+	outtakePower: number;
+	outtakeForceN: number;
+	outtakeTargetSpeedMps: number;
+	outtakeContactBalls: number;
+	maxOuttakeContactSpeedMps: number;
+};
+
 export interface MatchSnapshot {
 	tick: number;
 	gamePackId: string;
@@ -126,6 +142,10 @@ export interface MatchSnapshot {
 		global: number;
 		breakdown: Record<string, number>;
 	};
+	transferDebug: TransferDebugEntry[];
+	ballDebug: Uint8Array;
+	/** Authored robot collider ids each active ball is touching, indexed like `ballDebug`. */
+	ballContacts: string[][];
 }
 
 const decoder = new TextDecoder();
@@ -241,7 +261,10 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 		players: [],
 		positions: new Float32Array(),
 		semanticEvents: [],
-		score: { blue: 0, red: 0, global: 0, breakdown: {} }
+		score: { blue: 0, red: 0, global: 0, breakdown: {} },
+		transferDebug: [],
+		ballDebug: new Uint8Array(),
+		ballContacts: []
 	};
 
 	const view = new DataView(buffer);
@@ -548,6 +571,54 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					breakdown[category] = section.i32();
 				}
 				snapshot.score = { blue, red, global, breakdown };
+				break;
+			}
+			case 11: {
+				const count = section.u8();
+				const entries: TransferDebugEntry[] = [];
+				for (let i = 0; i < count && section.offset < sectionEnd; i++) {
+					const playerName = section.string();
+					const flags = section.u8();
+					const intakePower = section.f32();
+					const outtakePower = section.f32();
+					const outtakeForceN = section.f32();
+					const outtakeTargetSpeedMps = section.f32();
+					const outtakeContactBalls = section.u16();
+					const maxOuttakeContactSpeedMps = section.f32();
+					entries.push({
+						playerName,
+						hasBall: (flags & 1) !== 0,
+						transferPowerOk: (flags & 2) !== 0,
+						insideRobot: (flags & 4) !== 0,
+						touchesOuttake: (flags & 8) !== 0,
+						hasTransferZone: (flags & 16) !== 0,
+						hasRobotDefinition: (flags & 32) !== 0,
+						intakePower,
+						outtakePower,
+						outtakeForceN,
+						outtakeTargetSpeedMps,
+						outtakeContactBalls,
+						maxOuttakeContactSpeedMps
+					});
+				}
+				snapshot.transferDebug = entries;
+				break;
+			}
+			case 12: {
+				const count = section.u16();
+				const flags = new Uint8Array(count);
+				const contacts: string[][] = new Array(count);
+				for (let i = 0; i < count && section.offset < sectionEnd; i++) {
+					flags[i] = section.u8();
+					const contactCount = section.u8();
+					const ids: string[] = [];
+					for (let j = 0; j < contactCount && section.offset < sectionEnd; j++) {
+						ids.push(section.string());
+					}
+					contacts[i] = ids;
+				}
+				snapshot.ballDebug = flags;
+				snapshot.ballContacts = contacts;
 				break;
 			}
 		}

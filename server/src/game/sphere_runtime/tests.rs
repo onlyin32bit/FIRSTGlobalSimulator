@@ -508,7 +508,7 @@ fn overlapping_balls_separate_and_rebound() {
 fn harder_ball_impacts_use_less_restitution() {
     fn rebound_ratio(mut arena: ArenaConfig, speed: f32) -> f32 {
         arena.object_count = 2;
-        arena.gravity_scale = 0.0;
+    arena.gravity_scale = 1.0;
         arena.ball.drag_coefficient = 0.0;
         arena.ball.linear_damping = 0.0;
         arena.ball.angular_damping = 0.0;
@@ -546,6 +546,8 @@ fn carpet_friction_converts_sliding_to_spin() {
         sleeping: false,
         grounded: true,
         on_ramp: false,
+        transfer_stall_ticks: 0,
+        transfer_lift_pulse: 0,
         active: true,
         release_at_seconds: 0.0,
         released: true,
@@ -701,6 +703,8 @@ fn outtake_launches_a_stored_ball_through_the_wide_flywheel() {
     let player = runtime.players.get_mut("p").unwrap();
     player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
     player.yaw = 0.0;
+    // Pin the outtake drain rate so the test is robust to pack arena tuning.
+    player.mech.outtake_rate_bps = Some(3.0);
     player.stored.push_back(0);
     runtime.set_player_input("p", 0.0, 0.0, 0.0, 1.0, 1);
     for _ in 0..25 {
@@ -823,8 +827,8 @@ fn transfer_and_outtake_target_semantics_apply_directional_forces() {
         .find(|z| z.kind == RobotSemanticKind::Transfer)
         .expect("starter-bot must have TransferZone");
     assert!(
-        transfer_zone.direction[2] < 0.0 || transfer_zone.direction[1] < 0.0,
-        "TransferZone direction should point along transfer path: {:?}",
+        transfer_zone.direction[2] < -0.5,
+        "TransferZone direction should point backward toward the outtake/shooter: {:?}",
         transfer_zone.direction
     );
 
@@ -838,4 +842,1218 @@ fn transfer_and_outtake_target_semantics_apply_directional_forces() {
         "OuttakeZone direction vector should have an upward launch pitch toward OuttakeTarget: {:?}",
         outtake_zone.direction
     );
+}
+
+#[test]
+fn outtake_applies_force_to_only_one_ball_at_a_time() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 2;
+    arena.ramp.enabled = false;
+    arena.gravity_scale = 0.0;
+    let mut runtime = SphereRuntime::new("outtake-single-ball-test".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.context.phase = MatchPhase::Teleop;
+    runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+
+    let definition = runtime.robot_definition.as_ref().unwrap();
+    let outtake_zone = definition
+        .zones
+        .iter()
+        .find(|z| z.kind == RobotSemanticKind::Outtake)
+        .unwrap();
+
+    let player = runtime.players.get_mut("p").unwrap();
+    player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+    player.yaw = 0.0;
+    player.outtake_power = 1.0;
+
+    let mouth = robot_local_collider(
+        &outtake_zone.collider,
+        player.position,
+        0.0,
+        -arena.robot.height_m * 0.5,
+    );
+    let dir = rotate_robot_local_pose(outtake_zone.direction, player.rotation);
+
+    // Ball 0 is foremost (closer to exit along outtake direction)
+    runtime.balls[0].active = true;
+    runtime.balls[0].position = [
+        mouth.center[0] + dir[0] * 0.01,
+        mouth.center[1] + dir[1] * 0.01,
+        mouth.center[2] + dir[2] * 0.01,
+    ];
+    runtime.balls[0].previous_position = runtime.balls[0].position;
+    runtime.balls[0].velocity = [0.0; 3];
+
+    // Ball 1 is behind Ball 0, but still touching the OuttakeZone mouth
+    runtime.balls[1].active = true;
+    runtime.balls[1].position = [
+        mouth.center[0] - dir[0] * 0.01,
+        mouth.center[1] - dir[1] * 0.01,
+        mouth.center[2] - dir[2] * 0.01,
+    ];
+    runtime.balls[1].previous_position = runtime.balls[1].position;
+    runtime.balls[1].velocity = [0.0; 3];
+
+    // Verify both balls are in contact with the outtake mouth
+    assert!(
+        sphere_authored_obb_contact(runtime.balls[0].position, arena.ball.radius_m(), &mouth).is_some(),
+        "Ball 0 must touch outtake zone"
+    );
+    assert!(
+        sphere_authored_obb_contact(runtime.balls[1].position, arena.ball.radius_m(), &mouth).is_some(),
+        "Ball 1 must touch outtake zone"
+    );
+
+    // Run contact velocity solver tick
+    runtime.apply_contact_velocities(&arena, 1.0 / 60.0);
+
+    let speed_0 = dot(runtime.balls[0].velocity, dir);
+    let speed_1 = dot(runtime.balls[1].velocity, dir);
+
+    assert!(
+        speed_0 > 0.5,
+        "Foremost ball (Ball 0) should receive outtake launch force, speed={speed_0}"
+    );
+    assert!(
+        speed_1 < 0.01,
+        "Trailing ball (Ball 1) should NOT receive outtake launch force while foremost ball is in outtake, speed={speed_1}"
+    );
+}
+
+#[test]
+fn transfer_operates_within_robot_only_during_outtake() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 3;
+    arena.ramp.enabled = false;
+    arena.gravity_scale = 0.0;
+    let mut runtime = SphereRuntime::new("transfer-zone-isolation-test".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.context.phase = MatchPhase::Teleop;
+    runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+
+    let definition = runtime.robot_definition.as_ref().unwrap();
+    let transfer_zone = definition
+        .zones
+        .iter()
+        .find(|z| z.kind == RobotSemanticKind::Transfer)
+        .unwrap();
+    let outtake_zone = definition
+        .zones
+        .iter()
+        .find(|z| z.kind == RobotSemanticKind::Outtake)
+        .unwrap();
+
+    let player = runtime.players.get_mut("p").unwrap();
+    player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+    player.yaw = 0.0;
+    player.rotation = [0.0, 0.0, 0.0, 1.0];
+    player.intake_power = 1.0;
+    player.outtake_power = 0.0;
+
+    let outtake_mouth = robot_local_collider(
+        &outtake_zone.collider,
+        player.position,
+        0.0,
+        -arena.robot.height_m * 0.5,
+    );
+    let transfer_dir = rotate_robot_local_pose(transfer_zone.direction, player.rotation);
+
+    // Ball 0: inside the robot bounds (at front intake area, not touching OuttakeZone)
+    runtime.balls[0].active = true;
+    runtime.balls[0].position = [player.position[0], player.position[1], player.position[2] - 0.15];
+    runtime.balls[0].previous_position = runtime.balls[0].position;
+    runtime.balls[0].velocity = [0.0; 3];
+
+    // Ball 1: touching OuttakeZone
+    runtime.balls[1].active = true;
+    runtime.balls[1].position = outtake_mouth.center;
+    runtime.balls[1].previous_position = outtake_mouth.center;
+    runtime.balls[1].velocity = [0.0; 3];
+
+    // Ball 2: outside the robot
+    runtime.balls[2].active = true;
+    runtime.balls[2].position = [player.position[0] + 1.0, player.position[1], player.position[2]];
+    runtime.balls[2].previous_position = runtime.balls[2].position;
+    runtime.balls[2].velocity = [0.0; 3];
+
+    assert!(
+        sphere_authored_obb_contact(runtime.balls[0].position, arena.ball.radius_m(), &outtake_mouth).is_none(),
+        "Ball 0 must NOT touch OuttakeZone, ball0={:?}, outtake_mouth={:?}",
+        runtime.balls[0].position,
+        outtake_mouth
+    );
+    assert!(
+        sphere_authored_obb_contact(runtime.balls[1].position, arena.ball.radius_m(), &outtake_mouth).is_some(),
+        "Ball 1 must touch OuttakeZone"
+    );
+
+    // Intake must not power the transfer, even for a ball already inside the
+    // robot envelope.
+    runtime.apply_contact_velocities(&arena, 1.0 / 60.0);
+
+    let intake_speed_0 = dot(runtime.balls[0].velocity, transfer_dir);
+    assert!(
+        intake_speed_0.abs() < 0.001,
+        "intake must not apply transfer force, got speed={intake_speed_0}"
+    );
+
+    runtime.balls[0].velocity = [0.0; 3];
+    runtime.balls[1].velocity = [0.0; 3];
+    runtime.balls[2].velocity = [0.0; 3];
+    let player = runtime.players.get_mut("p").unwrap();
+    player.intake_power = 0.0;
+    player.outtake_power = 1.0;
+
+    // Transfer activates only for the outtake command.
+    runtime.apply_contact_velocities(&arena, 1.0 / 60.0);
+
+    let speed_0 = dot(runtime.balls[0].velocity, transfer_dir);
+    let speed_2 = dot(runtime.balls[2].velocity, transfer_dir);
+    let to_mouth = sub(outtake_mouth.center, runtime.balls[0].position);
+    let to_mouth_len = length_sq(to_mouth).sqrt();
+    let toward_mouth = dot(runtime.balls[0].velocity, to_mouth) / to_mouth_len.max(1.0e-6);
+
+    assert!(
+        speed_0 > 0.05,
+        "Ball 0 inside the robot must receive transfer force towards outtake, got speed={speed_0}"
+    );
+    assert!(
+        toward_mouth > 0.0,
+        "Transfer force must attract balls toward the outtake mouth, got velocity={:?}",
+        runtime.balls[0].velocity
+    );
+    assert!(
+        speed_2.abs() < 0.001,
+        "Ball 2 outside the robot must NOT receive transfer force, got speed={speed_2}"
+    );
+}
+
+#[test]
+#[ignore]
+fn dbg_wall_climb_probe() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    let mut runtime = SphereRuntime::new("dbg-wall-climb".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.context.phase = MatchPhase::Teleop;
+    runtime.add_player("p".into(), "Player".into(), "Team".into(), Some("red-driver-1"), &arena);
+    {
+        let player = runtime.players.get_mut("p").unwrap();
+        player.intake_power = 1.0;
+        player.outtake_power = 0.0;
+        player.position =
+            [0.0, runtime.field_floor_y + arena.robot.height_m * 0.5, 0.0];
+        player.yaw = 0.0;
+        player.rotation = [0.0, 0.0, 0.0, 1.0];
+    }
+    let definition = runtime.robot_definition.as_ref().unwrap();
+    let outtake_zone = definition
+        .zones
+        .iter()
+        .find(|z| z.kind == RobotSemanticKind::Outtake)
+        .unwrap();
+    let ground_offset_y = -arena.robot.height_m * 0.5;
+    let mouth = robot_local_collider(
+        &outtake_zone.collider,
+        runtime.players["p"].position,
+        0.0,
+        ground_offset_y,
+    );
+    println!(
+        "seat_y(world)={} ball_radius={}",
+        mouth.center[1] + arena.ball.radius_m(),
+        arena.ball.radius_m()
+    );
+
+    // Probe several hopper positions; each runs a fresh sim so state is clean.
+    let spawn_locals = [
+        [0.0_f32, 0.129, -0.10],
+        [0.0_f32, 0.129, 0.00],
+        [0.0_f32, 0.129, 0.06],
+        [0.0_f32, 0.129, -0.06],
+        [0.0_f32, 0.124, 0.03],
+        [0.16_f32, 0.124, 0.00],
+        [-0.16_f32, 0.124, 0.00],
+        [0.16_f32, 0.124, -0.15],
+        [-0.16_f32, 0.124, -0.15],
+    ];
+    for local in spawn_locals {
+        if local == spawn_locals[0] {
+            let mut r0 = SphereRuntime::new("probe".into(), "fgc-2026".into(), 0);
+            r0.create_field_arena(&arena, &pack.field_definition);
+            r0.set_robot_definition(pack.default_robot.as_ref());
+            r0.add_player("p".into(), "Player".into(), "Team".into(), Some("red-driver-1"), &arena);
+            let pp = r0.players["p"].position;
+            let pr = r0.players["p"].rotation;
+            let g = -arena.robot.height_m * 0.5;
+            println!("== transfer cfg: speed={} force={}", arena.robot.transfer_surface_speed_mps, arena.robot.transfer_normal_force_n);
+            println!("== hopper colliders (local, posed to player {pp:?}) ==");
+            for c in &definition.colliders {
+                let posed = robot_local_collider_pose(c, pp, pr, g);
+                println!(
+                    "  {:<12} center={:?} he={:?} posed={:?}",
+                    c.id, c.center, c.half_extents, posed.center
+                );
+            }
+            println!("== zones ==");
+            for z in &definition.zones {
+                println!(
+                    "  {:?} {:?} center={:?} dir={:?}",
+                    z.id, z.kind, z.collider.center, z.direction
+                );
+            }
+        }
+        let mut r = SphereRuntime::new("probe".into(), "fgc-2026".into(), 0);
+        r.create_field_arena(&arena, &pack.field_definition);
+        r.set_robot_definition(pack.default_robot.as_ref());
+        r.context.phase = MatchPhase::Teleop;
+        r.add_player("p".into(), "Player".into(), "Team".into(), Some("red-driver-1"), &arena);
+        {
+            let p = r.players.get_mut("p").unwrap();
+            p.intake_power = 1.0;
+            p.outtake_power = 0.0;
+        }
+        let player_pos = r.players["p"].position;
+        let player_rot = r.players["p"].rotation;
+        let world = add(
+            player_pos,
+            rotate_robot_local_pose([local[0], local[1] + ground_offset_y, local[2]], player_rot),
+        );
+        r.balls[0].active = true;
+        r.balls[0].released = true;
+        r.balls[0].velocity = [0.0; 3];
+        r.balls[0].position = world;
+        r.balls[0].previous_position = world;
+        let mut max_y = world[1];
+        let mut max_vy = 0.0_f32;
+        for t in 0..720 {
+            r.tick(1.0 / 60.0);
+            let b = &r.balls[0];
+            max_y = max_y.max(b.position[1]);
+            max_vy = max_vy.max(b.velocity[1]);
+            if local == [0.0_f32, 0.129, -0.10] && (t % 30 == 0 || t == 719) {
+                let rel = rotate_robot_local_pose(
+                    sub(b.position, r.players["p"].position),
+                    r.players["p"].rotation,
+                );
+                let flags = r.ball_debug[0];
+                println!(
+                    "  t={t:>3} pos=({:.3},{:.3},{:.3}) rel=({:.3},{:.3},{:.3}) vel=({:.2},{:.2},{:.2}) flags=0x{flags:02x}",
+                    b.position[0], b.position[1], b.position[2], rel[0], rel[1], rel[2], b.velocity[0], b.velocity[1], b.velocity[2]
+                );
+            }
+            if local == [0.0_f32, 0.124, 0.03] && t % 30 == 0 {
+                let rel = rotate_robot_local_pose(
+                    sub(b.position, r.players["p"].position),
+                    r.players["p"].rotation,
+                );
+                let mouth_world = robot_local_collider_pose(
+                    &outtake_zone.collider,
+                    r.players["p"].position,
+                    r.players["p"].rotation,
+                    ground_offset_y,
+                );
+                let to_mouth = sub(mouth_world.center, b.position);
+                let horiz_dist = length_sq([to_mouth[0], 0.0, to_mouth[2]]).sqrt();
+                let seat_y = mouth_world.center[1] + arena.ball.radius_m();
+                let flags = r.ball_debug[0];
+                let mut overlap_ids: Vec<String> = Vec::new();
+                for collider in &definition.colliders {
+                    let posed = robot_local_collider_pose(
+                        collider,
+                        r.players["p"].position,
+                        r.players["p"].rotation,
+                        ground_offset_y,
+                    );
+                    if sphere_robot_obb_contact(b.position, b.previous_position, arena.ball.radius_m(), &posed).is_some()
+                    {
+                        overlap_ids.push(collider.id.clone());
+                    }
+                }
+                println!(
+                    "  CLIMB t={t:>3} rel=({:.3},{:.3},{:.3}) y={:.3} seat={:.3} hdist={:.3} stall={} vy={:.2} flags=0x{flags:02x} ovl={} server_contacts={:?}",
+                    rel[0], rel[1], rel[2], b.position[1], seat_y, horiz_dist, b.transfer_stall_ticks, b.velocity[1], overlap_ids.join(","), r.ball_contact_collider_ids()[0]
+                );
+            }
+        }
+        let end = r.balls[0].position;
+        println!(
+            "spawn {local:?} robot={player_pos:?} maxY={:.3} maxVy={:.3} end=({:.3},{:.3},{:.3}) vy={:.3}",
+            max_y, max_vy, end[0], end[1], end[2], r.balls[0].velocity[1]
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn dbg_funnel_force_field_probe() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    let definition = pack.default_robot.as_ref().unwrap();
+    let ground_offset_y = -arena.robot.height_m * 0.5;
+
+    let spawn_locals = [
+        [0.0_f32, 0.11, 0.10],
+        [0.0_f32, 0.11, 0.06],
+        [0.0_f32, 0.11, 0.03],
+        [0.0_f32, 0.11, 0.00],
+        [0.055_f32, 0.11, 0.10],
+        [0.05_f32, 0.11, 0.06],
+        [-0.055_f32, 0.11, 0.10],
+        [-0.05_f32, 0.11, 0.06],
+        [0.06_f32, 0.11, 0.03],
+        [-0.06_f32, 0.11, 0.03],
+        [0.08_f32, 0.11, 0.10],
+        [-0.08_f32, 0.11, 0.10],
+        [0.00_f32, 0.05, 0.24],
+        [0.05_f32, 0.05, 0.24],
+        [-0.05_f32, 0.05, 0.24],
+        [0.09_f32, 0.05, 0.24],
+        [-0.09_f32, 0.05, 0.24],
+        [0.00_f32, 0.50, 0.06],
+        [0.04_f32, 0.50, 0.06],
+        [-0.04_f32, 0.50, 0.06],
+        [0.00_f32, 0.50, 0.09],
+        [0.04_f32, 0.50, 0.09],
+        [0.04_f32, 0.50, 0.03],
+        [0.00_f32, 0.11, 0.04],
+        [0.04_f32, 0.11, 0.04],
+        [-0.04_f32, 0.11, 0.04],
+        [0.00_f32, 0.11, 0.20],
+        [0.04_f32, 0.11, 0.20],
+        [-0.04_f32, 0.11, 0.20],
+        [0.08_f32, 0.11, 0.20],
+        [-0.08_f32, 0.11, 0.20],
+        [0.00_f32, 0.11, 0.15],
+        [0.06_f32, 0.11, 0.15],
+        [-0.06_f32, 0.11, 0.15],
+    ];
+    for local in spawn_locals {
+        let mut r = SphereRuntime::new("probe".into(), "fgc-2026".into(), 0);
+        r.create_field_arena(&arena, &pack.field_definition);
+        r.set_robot_definition(pack.default_robot.as_ref());
+        r.context.phase = MatchPhase::Teleop;
+        r.add_player("p".into(), "Player".into(), "Team".into(), Some("red-driver-1"), &arena);
+        {
+            let p = r.players.get_mut("p").unwrap();
+            p.intake_power = 1.0;
+            p.outtake_power = 0.0;
+        }
+        let player_pos = r.players["p"].position;
+        let player_rot = r.players["p"].rotation;
+        let world = add(
+            player_pos,
+            rotate_robot_local_pose([local[0], local[1] + ground_offset_y, local[2]], player_rot),
+        );
+        if local == spawn_locals[0] {
+            println!(
+                "player_pos={player_pos:?} player_rot={player_rot:?} ground_offset_y={ground_offset_y} spawn_local={local:?} spawn_world={world:?}"
+            );
+            let mut x = -0.14_f32;
+            while x <= 0.14 {
+                let mut row = String::new();
+                let mut z = 0.24_f32;
+                while z >= -0.12 {
+                    let ball = add(
+                        player_pos,
+                        rotate_robot_local_pose([x, 0.11 + ground_offset_y, z], player_rot),
+                    );
+                    let mut blocked = Vec::new();
+                    for collider in &definition.colliders {
+                        let posed = robot_local_collider_pose(
+                            collider,
+                            player_pos,
+                            player_rot,
+                            ground_offset_y,
+                        );
+                        if sphere_authored_obb_contact(ball, arena.ball.radius_m(), &posed).is_some()
+                        {
+                            blocked.push(
+                                collider
+                                    .id
+                                    .split('.')
+                                    .last()
+                                    .unwrap_or(&collider.id)
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    if blocked.is_empty() {
+                        row.push_str("    .");
+                    } else {
+                        row.push_str(&format!("{:>5}", blocked.join(",")));
+                    }
+                    z -= 0.02;
+                }
+                println!("  x={x:>6.2} {row}");
+                x += 0.02;
+            }
+            println!("== funnel colliders local min/max ==");
+            for collider in &definition.colliders {
+                if collider.id.starts_with("Plane")
+                    || collider.id == "Cylinder.004"
+                    || collider.id == "OuttakeRoller"
+                {
+                    println!(
+                        "{:<12} min=({:+.3},{:+.3},{:+.3}) max=({:+.3},{:+.3},{:+.3})",
+                        collider.id,
+                        collider.min[0],
+                        collider.min[1],
+                        collider.min[2],
+                        collider.max[0],
+                        collider.max[1],
+                        collider.max[2]
+                    );
+                }
+            }
+            println!("== zones ==");
+            for z in &definition.zones {
+                let posed = robot_local_collider_pose(
+                    &z.collider,
+                    player_pos,
+                    player_rot,
+                    ground_offset_y,
+                );
+                println!(
+                    "{:?} {:?} center=({:+.3},{:+.3},{:+.3}) he=({:+.3},{:+.3},{:+.3})",
+                    z.id,
+                    z.kind,
+                    z.collider.center[0],
+                    z.collider.center[1],
+                    z.collider.center[2],
+                    posed.half_extents[0],
+                    posed.half_extents[1],
+                    posed.half_extents[2]
+                );
+            }
+            println!("== posed inner-guider OBBs ==");
+            for id in ["Plane.009", "Plane.010"] {
+                if let Some(c) = definition.colliders.iter().find(|c| c.id == id) {
+                    let posed = robot_local_collider_pose(c, player_pos, player_rot, ground_offset_y);
+                    let mut world_min = posed.center;
+                    let mut world_max = posed.center;
+                    for world_axis in 0..3 {
+                        let radius = (0..3)
+                            .map(|axis| posed.axes[axis][world_axis].abs() * posed.half_extents[axis])
+                            .sum::<f32>();
+                        world_min[world_axis] -= radius;
+                        world_max[world_axis] += radius;
+                    }
+                    println!(
+                        "{id} x∈[{:+.3},{:+.3}] y∈[{:+.3},{:+.3}] z∈[{:+.3},{:+.3}] axes={:?}",
+                        world_min[0], world_max[0], world_min[1], world_max[1], world_min[2],
+                        world_max[2], posed.axes
+                    );
+                }
+            }
+        }
+        r.balls[0].active = true;
+        r.balls[0].released = true;
+        r.balls[0].velocity = [0.0; 3];
+        r.balls[0].position = world;
+        r.balls[0].previous_position = world;
+        if local[2] > 0.2 {
+            let forward = rotate_robot_local_pose([0.0, 0.0, 1.0], player_rot);
+            r.balls[0].velocity = mul(forward, -1.2);
+        }
+        if local[1] == 0.11 && local[2] == 0.04 {
+            let forward = rotate_robot_local_pose([0.0, 0.0, 1.0], player_rot);
+            let right = rotate_robot_local_pose([1.0, 0.0, 0.0], player_rot);
+            let lateral = if local[0] == 0.0 { 0.6 } else { local[0].signum() * 0.9 };
+            r.balls[0].velocity = add(mul(forward, -0.8), mul(right, lateral));
+        }
+        let mut passed = false;
+        let mut last_rel_z = local[2];
+        let mut stuck_at = 0.0_f32;
+        let mut last_contacts: Vec<String> = Vec::new();
+        for t in 0..480 {
+            r.tick(1.0 / 60.0);
+            let b = &r.balls[0];
+            let rel = rotate_robot_local_pose(
+                sub(b.position, r.players["p"].position),
+                r.players["p"].rotation,
+            );
+            if local == [0.0_f32, 0.11, 0.20] && t == 0 {
+                println!(
+                    "WORLD player={:?} rot={:?} ball_world={:?} rel={:?}",
+                    player_pos, player_rot, b.position, rel
+                );
+                for id in ["Plane.007", "Plane.008", "Plane.009", "Plane.010", "Plane.011", "Plane.012"] {
+                    if let Some(c) = definition.colliders.iter().find(|c| c.id == id) {
+                        let posed = robot_local_collider_pose(
+                            c, player_pos, player_rot, ground_offset_y,
+                        );
+                        let mut wmin = posed.center;
+                        let mut wmax = posed.center;
+                        for wa in 0..3 {
+                            let rad = (0..3)
+                                .map(|ax| posed.axes[ax][wa].abs() * posed.half_extents[ax])
+                                .sum::<f32>();
+                            wmin[wa] -= rad;
+                            wmax[wa] += rad;
+                        }
+                        println!(
+                            "  {id} world center=({:.3},{:.3},{:.3}) AABB x∈[{:.3},{:.3}] y∈[{:.3},{:.3}] z∈[{:.3},{:.3}]",
+                            posed.center[0], posed.center[1], posed.center[2],
+                            wmin[0], wmax[0], wmin[1], wmax[1], wmin[2], wmax[2]
+                        );
+                    }
+                }
+            }
+            if (local == [0.05_f32, 0.11, 0.06] || local == [0.05_f32, 0.11, 0.05])
+                && (t < 90)
+                && t % 3 == 0
+            {
+                println!(
+                    "  G t={t:>3} rel=({:.3},{:.3},{:.3}) vel=({:.2},{:.2},{:.2}) contacts={:?}",
+                    rel[0], rel[1], rel[2], b.velocity[0], b.velocity[1], b.velocity[2],
+                    r.ball_contact_collider_ids()[0]
+                );
+            }
+            if rel[2] < -0.02 && b.position[1] > 0.12 {
+                passed = true;
+            }
+            if rel[2] < 0.005 && rel[2] > last_rel_z {
+                stuck_at = rel[2];
+            }
+            last_rel_z = rel[2];
+            let contacts = r.ball_contact_collider_ids()[0].clone();
+            if !contacts.is_empty() {
+                last_contacts = contacts;
+            }
+            if t % 30 == 0 || t == 479 {
+                println!(
+                    "  t={t:>3} rel=({:.3},{:.3},{:.3}) vy={:.2} contacts={:?}",
+                    rel[0], rel[1], rel[2], b.velocity[1], r.ball_contact_collider_ids()[0]
+                );
+            }
+        }
+        println!(
+            "funnel spawn {local:?} passed={passed} stuck_at_z={stuck_at:.3} last_contacts={:?}",
+            last_contacts
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn dbg_guider_entry_probe() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    let ground_offset_y = -arena.robot.height_m * 0.5;
+
+    for &local_x in &[0.0_f32, 0.02, 0.04, 0.05, 0.055] {
+        let mut r = SphereRuntime::new("probe".into(), "fgc-2026".into(), 0);
+        r.create_field_arena(&arena, &pack.field_definition);
+        r.set_robot_definition(pack.default_robot.as_ref());
+        r.context.phase = MatchPhase::Teleop;
+        r.add_player("p".into(), "Player".into(), "Team".into(), Some("red-driver-1"), &arena);
+        {
+            let p = r.players.get_mut("p").unwrap();
+            p.intake_power = 0.0;
+            p.outtake_power = 0.0;
+        }
+        let player_pos = r.players["p"].position;
+        let player_rot = r.players["p"].rotation;
+        let local = [local_x, 0.11_f32, 0.04_f32];
+        let world = add(
+            player_pos,
+            rotate_robot_local_pose([local[0], local[1] + ground_offset_y, local[2]], player_rot),
+        );
+        r.balls[0].active = true;
+        r.balls[0].released = true;
+        r.balls[0].position = world;
+        r.balls[0].previous_position = world;
+        r.balls[0].velocity = mul(rotate_robot_local_pose([0.0, 0.0, -1.0], player_rot), 1.2);
+        let mut max_rel_z = -10.0_f32;
+        for t in 0..240 {
+            r.tick(1.0 / 60.0);
+            let b = &r.balls[0];
+            let rel = rotate_robot_local_pose(
+                sub(b.position, r.players["p"].position),
+                r.players["p"].rotation,
+            );
+            max_rel_z = max_rel_z.max(rel[2]);
+            if t < 45 && t % 5 == 0 {
+                println!(
+                    "  E x={local_x} t={t:>3} rel=({:.3},{:.3},{:.3}) vel=({:.2},{:.2},{:.2}) contacts={:?}",
+                    rel[0], rel[1], rel[2], b.velocity[0], b.velocity[1], b.velocity[2],
+                    r.ball_contact_collider_ids()[0]
+                );
+            }
+        }
+        let passed = max_rel_z > 0.045;
+        println!(
+            "guider-entry x={local_x} max_rel_z={max_rel_z:.3} passed={passed} end_contacts={:?}",
+            r.ball_contact_collider_ids()[0]
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn dbg_transfer_wall_climb_probe() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    let ground_offset_y = -arena.robot.height_m * 0.5;
+
+    for &local_x in &[0.055_f32, 0.04, 0.0, -0.04, -0.055] {
+        let mut r = SphereRuntime::new("probe".into(), "fgc-2026".into(), 0);
+        r.create_field_arena(&arena, &pack.field_definition);
+        r.set_robot_definition(pack.default_robot.as_ref());
+        r.context.phase = MatchPhase::Teleop;
+        r.add_player("p".into(), "Player".into(), "Team".into(), Some("red-driver-1"), &arena);
+        {
+            let p = r.players.get_mut("p").unwrap();
+            p.intake_power = 1.0;
+            p.outtake_power = 0.0;
+        }
+        let player_pos = r.players["p"].position;
+        let player_rot = r.players["p"].rotation;
+        let local = [local_x, 0.11_f32, 0.04_f32];
+        let world = add(
+            player_pos,
+            rotate_robot_local_pose([local[0], local[1] + ground_offset_y, local[2]], player_rot),
+        );
+        r.balls[0].active = true;
+        r.balls[0].released = true;
+        r.balls[0].position = world;
+        r.balls[0].previous_position = world;
+        let mut max_y = -10.0_f32;
+        let mut max_rel_z = -10.0_f32;
+        let mut seated = false;
+        for t in 0..600 {
+            r.tick(1.0 / 60.0);
+            let b = &r.balls[0];
+            let rel = rotate_robot_local_pose(
+                sub(b.position, r.players["p"].position),
+                r.players["p"].rotation,
+            );
+            max_y = max_y.max(rel[1]);
+            max_rel_z = max_rel_z.max(rel[2]);
+            if rel[1] > 0.0 && rel[2] > -0.03 && rel[2] < 0.05 {
+                seated = true;
+            }
+            if t % 60 == 0 {
+                println!(
+                    "  climb x={local_x} t={t:>3} rel=({:.3},{:.3},{:.3}) contacts={:?}",
+                    rel[0], rel[1], rel[2], r.ball_contact_collider_ids()[0]
+                );
+            }
+        }
+        println!(
+            "wall-climb x={local_x} max_rel_y={max_y:.3} max_rel_z={max_rel_z:.3} seated={seated} end_contacts={:?}",
+            r.ball_contact_collider_ids()[0]
+        );
+    }
+}
+
+#[test]
+fn robot_obb_contact_keeps_the_face_the_ball_entered_from() {
+    let collider = FieldCollider {
+        id: "chassis".into(),
+        min: [0.0; 3],
+        max: [0.0; 3],
+        center: [0.0, 0.0, 0.0],
+        half_extents: [0.25, 0.25, 0.25],
+        axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    };
+    let radius = 0.05;
+
+    // A fast ball crossed from -Z to PAST the Z midpoint in one tick. The
+    // naive nearest-face rule would now pick +Z and warp it out the back.
+    let previous = [0.0, 0.0, -0.35];
+    let current = [0.0, 0.0, 0.10];
+    let (normal, penetration) =
+        sphere_robot_obb_contact(current, previous, radius, &collider).unwrap();
+    assert!(
+        normal[2] < -0.99,
+        "entry-face contact must push the ball back out the -Z face, got {normal:?}"
+    );
+    assert!((penetration - (radius + 0.15)).abs() < 1.0e-4);
+
+    // Sanity check that the pre-existing helper really flips to the far face.
+    let (naive_normal, _) = sphere_authored_obb_contact(current, radius, &collider).unwrap();
+    assert!(
+        naive_normal[2] > 0.99,
+        "naive nearest-face should pick +Z for a ball past the midpoint"
+    );
+
+    // The final centre can also be completely beyond a thin wall. Continuous
+    // contact must still retain the entry face rather than missing the wall.
+    let traversed = [0.0, 0.0, 0.40];
+    let (swept_normal, swept_penetration) =
+        sphere_robot_obb_contact(traversed, previous, radius, &collider).unwrap();
+    assert!(
+        swept_normal[2] < -0.99,
+        "swept contact must retain the -Z entry face, got {swept_normal:?}"
+    );
+    assert!(
+        swept_penetration > 0.6,
+        "swept contact must return enough correction to put the ball back at the entry face"
+    );
+
+    // A ball already inside (no crossing) still exits through the nearest face.
+    let (resting_normal, _) =
+        sphere_robot_obb_contact(current, current, radius, &collider).unwrap();
+    assert!(resting_normal[2] > 0.99, "resting ball uses the nearest face");
+}
+
+#[test]
+fn ball_deep_inside_robot_is_held_by_collider_contacts() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    arena.gravity_scale = 0.0;
+    let mut runtime = SphereRuntime::new("expel-inside".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.add_player(
+        "p".into(),
+        "Player".into(),
+        "Team".into(),
+        Some("red-driver-1"),
+        &arena,
+    );
+
+    let (player_position, player_rotation) = {
+        let player = runtime.players.get("p").unwrap();
+        (player.position, player.rotation)
+    };
+
+    let definition = runtime.robot_definition.as_ref().unwrap();
+    let ground_offset_y = -arena.robot.height_m * 0.5;
+    let bounds = robot_local_collider_pose(
+        &definition.bounds,
+        player_position,
+        player_rotation,
+        ground_offset_y,
+    );
+    let radius = arena.ball.radius_m();
+    let floor_rest_y = runtime.field_floor_y + radius;
+    let colliders = definition.colliders.clone();
+
+    // A ball resting on the intake ramp must be held by the ramp colliders
+    // (multi-contact), never pushed sideways off the ramp by the deeper hopper
+    // funnel walls and never dropped to the field floor.
+    let ramp_colliders = [9usize, 10, 11, 12, 13, 14];
+    for &i in &ramp_colliders {
+        let posed = robot_local_collider_pose(
+            &colliders[i],
+            player_position,
+            player_rotation,
+            ground_offset_y,
+        );
+        let start_pos = [
+            posed.center[0],
+            posed.center[1] + posed.half_extents[1] + radius,
+            posed.center[2],
+        ];
+        runtime.balls[0].active = true;
+        runtime.balls[0].position = start_pos;
+        runtime.balls[0].previous_position = start_pos;
+        runtime.balls[0].velocity = [0.0; 3];
+        for _ in 0..180 {
+            runtime.tick(1.0 / 60.0);
+        }
+        let final_position = runtime.balls[0].position;
+        assert!(
+            final_position[1] > floor_rest_y + radius * 0.5,
+            "ball on ramp COLLIDER[{i}] fell through to the field floor: start={start_pos:?} final={final_position:?}",
+        );
+    }
+
+    // A ball that tunnelled deep into the chassis this tick (arriving from
+    // -Z and ending up at the envelope centre) must be pushed out by the
+    // collider contacts: it must be held off the field floor and must never
+    // warp through the robot to the far (+Z) side.
+    runtime.balls[0].active = true;
+    runtime.balls[0].position = bounds.center;
+    runtime.balls[0].previous_position = add(
+        bounds.center,
+        mul(bounds.axes[2], -(bounds.half_extents[2] + radius * 2.0)),
+    );
+    runtime.balls[0].velocity = [0.0; 3];
+
+    runtime.solve_positions(&arena, 1.0 / 60.0);
+
+    let final_position = runtime.balls[0].position;
+    assert!(
+        final_position[1] >= runtime.field_floor_y,
+        "a deep ball must never be pushed through the chassis to below the field floor: position={final_position:?}",
+    );
+    assert!(
+        final_position[2] < bounds.center[2] + bounds.half_extents[2],
+        "a ball arriving from -Z must never warp to the far side: position={final_position:?}",
+    );
+
+    // A ball just inside the -Z face that crossed in this tick must be pushed
+    // back out through that same -Z face, not flipped to the far side.
+    runtime.balls[0].position = add(
+        bounds.center,
+        mul(bounds.axes[2], -(bounds.half_extents[2] - radius * 0.5)),
+    );
+    runtime.balls[0].previous_position = add(
+        bounds.center,
+        mul(bounds.axes[2], -(bounds.half_extents[2] + radius * 2.0)),
+    );
+    runtime.balls[0].velocity = [0.0; 3];
+
+    runtime.solve_positions(&arena, 1.0 / 60.0);
+
+    let final_position = runtime.balls[0].position;
+    assert!(
+        final_position[2] < bounds.center[2] + bounds.half_extents[2],
+        "entry-face ball must never reach the far (+Z) face, position={final_position:?}",
+    );
+    assert!(
+        final_position[1] >= runtime.field_floor_y,
+        "entry-face ball must never fall through the chassis: position={final_position:?}",
+    );
+}
+
+#[test]
+fn authored_robot_driving_into_a_ball_does_not_tunnel_through() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    let mut runtime = SphereRuntime::new("no-tunnel".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.add_player(
+        "p".into(),
+        "Player".into(),
+        "Team".into(),
+        Some("red-driver-1"),
+        &arena,
+    );
+
+    // Place the ball ahead of the robot along its actual spawn-facing
+    // direction so the hybrid drivetrain drives head-on into it.
+    let spawn_player = runtime.players.get_mut("p").unwrap();
+    let forward = rotate_robot_local_pose([0.0, 0.0, -1.0], spawn_player.rotation);
+    let spawn = spawn_player.position;
+    runtime.balls[0].active = true;
+    runtime.balls[0].position = add(mul(forward, 0.40), spawn);
+    runtime.balls[0].position[1] = arena.ball.radius_m();
+    runtime.balls[0].previous_position = runtime.balls[0].position;
+    runtime.balls[0].velocity = [0.0; 3];
+    runtime.set_player_input("p", 0.0, 1.0, 0.0, 0.0, 1);
+
+    let bounds_collider = runtime.robot_definition.as_ref().unwrap().bounds.clone();
+    let ground_offset_y = -arena.robot.height_m * 0.5;
+    for _ in 0..180 {
+        runtime.tick(1.0 / 60.0);
+        let player = &runtime.players["p"];
+        let bounds = robot_local_collider_pose(
+            &bounds_collider,
+            player.position,
+            player.rotation,
+            ground_offset_y,
+        );
+        let ball = &runtime.balls[0];
+        if sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), &bounds).is_some() {
+            panic!(
+                "ball ended up embedded in the robot envelope: ball={:?} bounds={:?}",
+                ball.position, bounds
+            );
+        }
+        let behind = dot(sub(ball.position, player.position), forward);
+        assert!(
+            behind > -0.45,
+            "ball tunnelled far behind the robot: behind={behind} ball={:?} robot={:?}",
+            ball.position,
+            player.position
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn diagnostic_dump_robot_ramp_geometry() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    let mut runtime = SphereRuntime::new("ramp-diag".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.add_player(
+        "p".into(),
+        "Player".into(),
+        "Team".into(),
+        Some("red-driver-1"),
+        &arena,
+    );
+
+    let (position, rotation) = {
+        let player = runtime.players.get("p").unwrap();
+        (player.position, player.rotation)
+    };
+    println!("player.position={:?} rotation={rotation:?} floor_y={}", position, runtime.field_floor_y);
+    let ground_offset_y = -arena.robot.height_m * 0.5;
+    let definition = runtime.robot_definition.as_ref().unwrap();
+    let colliders = definition.colliders.clone();
+    let bounds = definition.bounds.clone();
+
+    println!("BOUNDS: center={:?} half={:?}", bounds.center, bounds.half_extents);
+    println!("field_boundary min={:?} max={:?}", runtime.field_boundary.min, runtime.field_boundary.max);
+    for (i, c) in colliders.iter().enumerate() {
+        if i != 9 && i != 20 && i != 21 && i != 2 && i != 8 {
+            continue;
+        }
+        let posed = robot_local_collider_pose(c, position, rotation, ground_offset_y);
+        println!(
+            "COLLIDER[{i}] id={} axes_orig={:?} center={:?} half={:?}",
+            c.id, c.axes, posed.center, posed.half_extents
+        );
+        println!("  posed_axes={:?}", posed.axes);
+    }
+    for (i, c) in colliders.iter().enumerate() {
+        let posed = robot_local_collider_pose(c, position, rotation, ground_offset_y);
+        println!(
+            "COLLIDER[{i}] center={:?} half={:?}",
+            posed.center, posed.half_extents
+        );
+    }
+
+    let ramp_colliders = [9usize, 10, 11, 12, 13, 14, 22, 27];
+    for &i in &ramp_colliders {
+        let posed = robot_local_collider_pose(
+            &colliders[i],
+            position,
+            rotation,
+            ground_offset_y,
+        );
+        let start_pos = [
+            posed.center[0],
+            posed.center[1] + posed.half_extents[1] + arena.ball.radius_m(),
+            posed.center[2],
+        ];
+        runtime.balls[0].active = true;
+        runtime.balls[0].position = start_pos;
+        runtime.balls[0].previous_position = start_pos;
+        runtime.balls[0].velocity = [0.0; 3];
+        for _ in 0..180 {
+            runtime.tick(1.0 / 60.0);
+        }
+        println!(
+"on COLLIDER[{i}] top: start={start_pos:?} final={:?}",
+            runtime.balls[0].position
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn dbg_transfer_flow2() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 3;
+    arena.ramp.enabled = false;
+    let mut runtime = SphereRuntime::new("dbg-transfer2".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.context.phase = MatchPhase::Teleop;
+    runtime.ball_release_elapsed = Some(arena.spawn_release_seconds);
+    runtime.add_player(
+        "p".into(),
+        "Player".into(),
+        "Team".into(),
+        Some("red-driver-1"),
+        &arena,
+    );
+    {
+        let player = runtime.players.get_mut("p").unwrap();
+        player.intake_power = 1.0;
+        player.outtake_power = 0.0;
+        println!(
+            "player.position={:?} yaw={} floor_y={}",
+            player.position, player.yaw, runtime.field_floor_y
+        );
+    }
+
+    let definition = runtime.robot_definition.as_ref().unwrap();
+    let bounds = definition.bounds.clone();
+    let outtake_collider = definition
+        .zones
+        .iter()
+        .find(|z| z.kind == RobotSemanticKind::Outtake)
+        .unwrap()
+        .collider
+        .clone();
+    for zone in &definition.zones {
+        println!(
+            "ZONE {} center={:?} dir={:?}",
+            zone.id, zone.collider.center, zone.direction
+        );
+    }
+    let ground_offset_y = -arena.robot.height_m * 0.5;
+    let player_pos = runtime.players["p"].position;
+    let player_rot = runtime.players["p"].rotation;
+    for collider in &definition.colliders {
+        let id = collider.id.as_str();
+        if !id.starts_with("Plane.0")
+            && id != "OuttakeRoller"
+            && id != "chassis"
+            && id != "CHASSIS"
+        {
+            continue;
+        }
+        let posed = robot_local_collider_pose(collider, player_pos, player_rot, ground_offset_y);
+        println!(
+            "COLLIDER {} local_center={:?} he={:?} world_center={:?}",
+            id, collider.center, collider.half_extents, posed.center
+        );
+    }
+    println!("ALL COLLIDERS:");
+    for collider in &definition.colliders {
+        println!(
+            "  {} center={:?} he={:?}",
+            collider.id, collider.center, collider.half_extents
+        );
+    }
+
+    let hopper = definition
+        .colliders
+        .iter()
+        .find(|c| c.id == "Plane.016")
+        .expect("hopper floor");
+    let hopper_world = robot_local_collider_pose(hopper, player_pos, player_rot, ground_offset_y);
+    let start = [
+        hopper_world.center[0],
+        hopper_world.center[1] + arena.ball.radius_m(),
+        hopper_world.center[2],
+    ];
+    println!("hopper world center={:?} he={:?} ball_start={:?}", hopper_world.center, hopper_world.half_extents, start);
+    let player_pos = runtime.players["p"].position;
+    let player_rot = runtime.players["p"].rotation;
+    let all_colliders = definition.colliders.clone();
+    let bounds = definition.bounds.clone();
+    let outtake_collider = definition
+        .zones
+        .iter()
+        .find(|z| z.kind == RobotSemanticKind::Outtake)
+        .unwrap()
+        .collider
+        .clone();
+    println!("\n== multi-ball flow: 3 balls resting over the hopper floor ==");
+    let spawn_locals = [[0.0_f32, 0.129, -0.10], [0.0_f32, 0.129, -0.02], [0.12_f32, 0.129, -0.10]];
+    for (i, local) in spawn_locals.iter().enumerate() {
+        let world = add(player_pos, rotate_robot_local_pose(
+            [local[0], local[1] + ground_offset_y, local[2]],
+            player_rot,
+        ));
+        runtime.balls[i].active = true;
+        runtime.balls[i].released = true;
+        runtime.balls[i].velocity = [0.0; 3];
+        runtime.balls[i].position = world;
+        runtime.balls[i].previous_position = world;
+    }
+    for t in 0..1200 {
+        {
+            let player = runtime.players.get_mut("p").unwrap();
+            player.intake_power = 1.0;
+            player.outtake_power = if t > 360 && (t / 150) % 2 == 0 { 1.0 } else { 0.0 };
+        }
+        runtime.tick(1.0 / 60.0);
+        if t % 150 == 0 {
+            let ot = runtime.players["p"].outtake_power;
+            print!("t={t:>3} ot={ot}");
+            for i in 0..3 {
+                let b = &runtime.balls[i];
+                let in_env = sphere_authored_obb_contact(
+                    b.position,
+                    arena.ball.radius_m(),
+                    &robot_local_collider_pose(
+                        &bounds,
+                        runtime.players["p"].position,
+                        runtime.players["p"].rotation,
+                        ground_offset_y,
+                    ),
+                )
+                .is_some();
+                print!(
+                    "  b{i} pos=({:.3},{:.3},{:.3}) vel=({:.2},{:.2},{:.2}) in_env={in_env}",
+                    b.position[0], b.position[1], b.position[2], b.velocity[0], b.velocity[1], b.velocity[2]
+                );
+            }
+            println!("  stored={}", runtime.players["p"].stored.len());
+        }
+        if t == 660 {
+            for i in 0..3 {
+                let b = &runtime.balls[i];
+                println!("  overlaps b{i} at pos={:?}:", b.position);
+                for collider in &all_colliders {
+                    let posed = robot_local_collider_pose(
+                        collider,
+                        runtime.players["p"].position,
+                        runtime.players["p"].rotation,
+                        ground_offset_y,
+                    );
+                    if sphere_authored_obb_contact(b.position, arena.ball.radius_m(), &posed).is_some() {
+                        println!(
+                            "    {} center={:?} he={:?}",
+                            collider.id, posed.center, posed.half_extents
+                        );
+                    }
+                }
+                if let Some(zone) = runtime.robot_definition.as_ref().unwrap().zones.iter().find(|z| z.kind == RobotSemanticKind::Outtake) {
+                    let posed = robot_local_collider_pose(
+                        &zone.collider,
+                        runtime.players["p"].position,
+                        runtime.players["p"].rotation,
+                        ground_offset_y,
+                    );
+                    println!("    OUTHOUSE mouth center={:?} he={:?}", posed.center, posed.half_extents);
+                }
+            }
+        }
+    }
 }

@@ -38,6 +38,9 @@ fn binary_state_has_versioned_header_and_compact_positions() {
         semantic_events: Vec::new(),
         score: ScoreState::default(),
         practice_running: false,
+        transfer_debug: Vec::new(),
+        ball_debug: Vec::new(),
+        ball_contact_colliders: Vec::new(),
     };
     let encoded = encode_state(&state, ProcessMetrics::default(), false);
     assert_eq!(&encoded[..4], b"FGS1");

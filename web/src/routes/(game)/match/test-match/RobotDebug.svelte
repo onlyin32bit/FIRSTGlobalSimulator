@@ -1,28 +1,32 @@
 <script lang="ts">
 	import { T, useThrelte } from '@threlte/core';
 	import { HTML } from '@threlte/extras';
-	import { Euler, Matrix4, Quaternion, Vector3 } from 'three';
+	import { Quaternion, Vector3, Matrix4 } from 'three';
+	import { parseRobotColliders } from './robot-collision';
 
 	type DebugBox = {
 		id: string;
 		center: [number, number, number];
 		size: [number, number, number];
-		rotation: [number, number, number];
-		quaternion?: [number, number, number, number];
+		quaternion: [number, number, number, number];
 		shape: 'box' | 'frustum';
 		innerRadius?: number;
 	};
 	type AssimpNode = { name?: string; meshes?: number[]; transformation?: number[] };
 	type AssimpScene = {
 		rootnode?: { children?: AssimpNode[] };
-		meshes?: Array<{ vertices?: number[] }>;
+		meshes?: Array<{ vertices?: number[]; faces?: number[][] }>;
 	};
 
 	let {
 		physicsUrl,
 		semanticsUrl,
 		height,
-		climber
+		climber,
+		ballContacts = [],
+		ballPositions = new Float32Array(),
+		robotPosition,
+		robotQuaternion
 	}: {
 		physicsUrl?: string;
 		semanticsUrl?: string;
@@ -32,6 +36,10 @@
 			grooveRootRadiusM: number;
 			grooveOuterRadiusM: number;
 		};
+		ballContacts?: string[][];
+		ballPositions?: Float32Array;
+		robotPosition: [number, number, number];
+		robotQuaternion: [number, number, number, number];
 	} = $props();
 
 	let colliders = $state<DebugBox[]>([]);
@@ -39,70 +47,52 @@
 	let hovered = $state<DebugBox | null>(null);
 	const { invalidate } = useThrelte();
 
+	// Collider ids the server reports a ball is touching this tick. A box lit
+	// red is exactly what a ball is resting on or wedged against.
+	const touchedIds = $derived(new Set(ballContacts.flat()));
+	const contactBalls = $derived.by(() => {
+		const inverseRobot = new Quaternion(...robotQuaternion).invert();
+		const correction = new Vector3(0, height * 0.5, 0);
+		const balls: Array<{ index: number; position: [number, number, number]; contacts: string[] }> = [];
+		for (let index = 0; index < ballContacts.length; index += 1) {
+			const contacts = ballContacts[index] ?? [];
+			const offset = index * 3;
+			if (!contacts.length || offset + 2 >= ballPositions.length) continue;
+			const local = new Vector3(
+				ballPositions[offset]! - robotPosition[0],
+				ballPositions[offset + 1]! - robotPosition[1],
+				ballPositions[offset + 2]! - robotPosition[2]
+			).applyQuaternion(inverseRobot).add(correction);
+			// The authored robot assets use the same 180-degree display correction
+			// as the collider group below.
+			local.x *= -1;
+			local.z *= -1;
+			balls.push({ index, position: [local.x, local.y, local.z], contacts });
+		}
+		return balls;
+	});
+
 	function asBoxes(scene: AssimpScene): DebugBox[] {
-		const boxes = (scene.rootnode?.children ?? []).flatMap((node) => {
-			const mesh = Number.isInteger(node.meshes?.[0]) ? scene.meshes?.[node.meshes![0]!] : null;
-			const values = mesh?.vertices;
-			if (!node.name || !values?.length) return [];
-			const min = [Infinity, Infinity, Infinity];
-			const max = [-Infinity, -Infinity, -Infinity];
-			for (let index = 0; index < values.length; index += 3) {
-				for (let axis = 0; axis < 3; axis += 1) {
-					min[axis] = Math.min(min[axis], values[index + axis]!);
-					max[axis] = Math.max(max[axis], values[index + axis]!);
-				}
-			}
-			const matrixValues = node.transformation;
-			if (!matrixValues || matrixValues.length < 16) return [];
-			const centerLocal = min.map((value, axis) => (value + max[axis]!) * 0.5) as [
-				number,
-				number,
-				number
-			];
-			const halfLocal = min.map((value, axis) => (max[axis]! - value) * 0.5) as [
-				number,
-				number,
-				number
-			];
-			const matrix = matrixValues;
-			const center: [number, number, number] = [
-				matrix[0]! * centerLocal[0] +
-					matrix[1]! * centerLocal[1] +
-					matrix[2]! * centerLocal[2] +
-					matrix[3]!,
-				matrix[4]! * centerLocal[0] +
-					matrix[5]! * centerLocal[1] +
-					matrix[6]! * centerLocal[2] +
-					matrix[7]!,
-				matrix[8]! * centerLocal[0] +
-					matrix[9]! * centerLocal[1] +
-					matrix[10]! * centerLocal[2] +
-					matrix[11]!
-			];
-			const axes = [
-				new Vector3(matrix[0], matrix[4], matrix[8]),
-				new Vector3(matrix[1], matrix[5], matrix[9]),
-				new Vector3(matrix[2], matrix[6], matrix[10])
-			];
-			const scale = axes.map((axis) => Math.max(axis.length(), 0.0001));
-			axes.forEach((axis) => axis.normalize());
-			const euler = new Euler().setFromRotationMatrix(
-				new Matrix4().makeBasis(axes[0]!, axes[1]!, axes[2]!)
+		// Use the exact OBB collision parser so that the extruded 0.01m minimum half-extents
+		// are accurately reflected in the debug view.
+		const parsedColliders = parseRobotColliders(scene);
+		const boxes = parsedColliders.map((collider) => {
+			const size = collider.halfExtents.map((e) => e * 2) as [number, number, number];
+			const matrix = new Matrix4().makeBasis(
+				new Vector3(...collider.axes[0]),
+				new Vector3(...collider.axes[1]),
+				new Vector3(...collider.axes[2])
 			);
-			return [
-				{
-					id: node.name,
-					center,
-					size: halfLocal.map((extent, axis) => Math.max(0.02, extent * scale[axis]! * 2)) as [
-						number,
-						number,
-						number
-					],
-					rotation: [euler.x, euler.y, euler.z] as [number, number, number],
-					shape: 'box' as const
-				}
-			];
+			const q = new Quaternion().setFromRotationMatrix(matrix);
+			return {
+				id: collider.id,
+				center: collider.center,
+				size,
+				quaternion: [q.x, q.y, q.z, q.w] as [number, number, number, number],
+				shape: 'box' as const
+			};
 		});
+		
 		const wheelParts = climber?.wheelParts ?? [];
 		const wheels = boxes.filter((box) => wheelParts.includes(box.id));
 		if (wheels.length < 2) return boxes;
@@ -124,7 +114,6 @@
 				shape: 'frustum' as const,
 				size: [outerRadius, box.size[axleIndex]!, outerRadius] as [number, number, number],
 				innerRadius,
-				rotation: [0, 0, 0] as [number, number, number],
 				quaternion: [orientation.x, orientation.y, orientation.z, orientation.w] as [
 					number,
 					number,
@@ -162,15 +151,16 @@
 	});
 </script>
 
-<!-- Match the imported model's ground origin and 180° display correction. -->
+	<!-- Match the imported model's ground origin and 180° display correction. -->
 <T.Group position={[0, -height * 0.5, 0]} rotation={[0, Math.PI, 0]}>
 	{#each colliders as collider (collider.id)}
+		{@const touched = touchedIds.has(collider.id)}
+		<!-- Filled volume: makes thin planes and internal panels visible in 3D. -->
 		<T.Mesh
 			position={collider.center}
-			rotation={collider.rotation}
 			quaternion={collider.quaternion}
 			scale={collider.shape === 'box' ? collider.size : [1, 1, 1]}
-			renderOrder={30}
+			renderOrder={touched ? 31 : 28}
 			frustumCulled={false}
 		>
 			{#if collider.shape === 'frustum'}
@@ -181,19 +171,71 @@
 				<T.BoxGeometry args={[1, 1, 1]} />
 			{/if}
 			<T.MeshBasicMaterial
-				color={collider.id.startsWith('ClimbWheel') ? '#facc15' : '#c084fc'}
-				wireframe
+				color={touched ? '#ef4444' : collider.id.startsWith('ClimbWheel') ? '#facc15' : '#0284c7'}
 				transparent
-				opacity={collider.id.startsWith('ClimbWheel') ? 0.95 : 0.5}
+				opacity={touched ? 0.55 : 0.16}
 				depthTest={false}
 				depthWrite={false}
 			/>
 		</T.Mesh>
+		<T.Mesh
+			position={collider.center}
+			quaternion={collider.quaternion}
+			scale={collider.shape === 'box' ? collider.size : [1, 1, 1]}
+			renderOrder={touched ? 32 : 30}
+			frustumCulled={false}
+		>
+			{#if collider.shape === 'frustum'}
+				<T.CylinderGeometry
+					args={[collider.innerRadius ?? 0.012, collider.size[0], collider.size[1], 20]}
+				/>
+			{:else}
+				<T.BoxGeometry args={[1, 1, 1]} />
+			{/if}
+			<T.MeshBasicMaterial
+				color={touched
+					? '#ef4444'
+					: collider.id.startsWith('ClimbWheel')
+						? '#facc15'
+						: '#0ea5e9'}
+			wireframe
+			transparent
+			opacity={touched ? 1 : collider.id.startsWith('ClimbWheel') ? 1 : 0.9}
+				depthTest={false}
+				depthWrite={false}
+			/>
+		</T.Mesh>
+		{#if touched}
+			<HTML position={collider.center} center>
+				<div
+					class="pointer-events-none rounded bg-red-600/90 px-1 py-0.5 font-mono text-[10px] font-bold text-white shadow"
+				>
+					{collider.id}
+				</div>
+			</HTML>
+		{/if}
+	{/each}
+	{#each contactBalls as ball (ball.index)}
+		<T.Mesh position={ball.position} renderOrder={40} frustumCulled={false}>
+			<T.SphereGeometry args={[0.075, 12, 8]} />
+			<T.MeshBasicMaterial
+				color="#f43f5e"
+				transparent
+				opacity={0.95}
+				depthTest={false}
+				depthWrite={false}
+			/>
+		</T.Mesh>
+		<HTML position={ball.position} center>
+			<div class="pointer-events-none rounded bg-rose-600/95 px-1 py-0.5 font-mono text-[10px] font-bold text-white shadow">
+				ball {ball.index} · {ball.contacts.join(', ')}
+			</div>
+		</HTML>
 	{/each}
 	{#each semantics as semantic (semantic.id)}
 		<T.Mesh
 			position={semantic.center}
-			rotation={semantic.rotation}
+			quaternion={semantic.quaternion}
 			scale={semantic.size}
 			renderOrder={31}
 			frustumCulled={false}

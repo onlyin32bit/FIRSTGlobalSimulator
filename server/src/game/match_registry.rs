@@ -9,7 +9,7 @@ use tracing::info;
 use super::match_runtime::{MatchRuntime, PlayerSnapshot, ScoreState};
 use super::pack_loader::{ArenaConfig, GamePackMetadata};
 use super::rhai_engine::RhaiEngine;
-use super::sphere_runtime::{MechSpec, SphereRuntime, StepMetrics};
+use super::sphere_runtime::{MechSpec, SphereRuntime, StepMetrics, TransferDebug, BallDebugFlag};
 
 pub struct MatchRegistry {
     matches: RwLock<HashMap<String, MatchHandle>>,
@@ -192,6 +192,12 @@ pub struct MatchStateSync {
     pub score: ScoreState,
     /// True while physics keeps running past the match clock for practice.
     pub practice_running: bool,
+    /// Transfer mechanism debug info for each player (nearest ball conditions).
+    pub transfer_debug: Vec<TransferDebug>,
+    /// Lightweight debug state per ball.
+    pub ball_debug: Vec<BallDebugFlag>,
+    /// Authored robot collider ids each ball is touching, per ball.
+    pub ball_contact_colliders: Vec<Vec<String>>,
 }
 
 /// Drivetrain model constants the client needs to reproduce the server's
@@ -414,6 +420,27 @@ impl RuntimeBackend {
         match self {
             Self::Rapier(_) => Vec::new(),
             Self::Sphere(runtime) => runtime.drain_semantic_events(),
+        }
+    }
+
+    fn transfer_debug(&self) -> Vec<TransferDebug> {
+        match self {
+            Self::Rapier(_) => Vec::new(),
+            Self::Sphere(runtime) => runtime.transfer_debug.clone(),
+        }
+    }
+
+    fn ball_debug(&self) -> Vec<BallDebugFlag> {
+        match self {
+            Self::Rapier(_) => Vec::new(),
+            Self::Sphere(runtime) => runtime.ball_debug.clone(),
+        }
+    }
+
+    fn ball_contact_colliders(&self) -> Vec<Vec<String>> {
+        match self {
+            Self::Rapier(_) => Vec::new(),
+            Self::Sphere(runtime) => runtime.ball_contact_collider_ids(),
         }
     }
 }
@@ -1000,6 +1027,9 @@ impl MatchRegistry {
                             semantic_events: recent_semantic_events.iter().cloned().collect(),
                             score: runtime.score_state(),
                             practice_running: practice_continue,
+                            transfer_debug: runtime.transfer_debug(),
+                            ball_debug: runtime.ball_debug(),
+                            ball_contact_colliders: runtime.ball_contact_colliders(),
                         };
                         if let Ok(mut slot) = latest_state.lock() {
                             *slot = Some(Arc::new(state));

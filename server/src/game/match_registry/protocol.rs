@@ -18,6 +18,8 @@ pub(super) fn encode_state(
     const DRIVE: u16 = 8;
     const SCORE: u16 = 9;
     const PLAYER_PHYSICS: u16 = 10;
+    const TRANSFER_DEBUG: u16 = 11;
+    const BALL_DEBUG: u16 = 12;
     let mut output = Vec::with_capacity(1024 + state.object_positions.count as usize * 12);
     output.extend_from_slice(b"FGS1");
     put_u16(&mut output, 1);
@@ -210,6 +212,56 @@ pub(super) fn encode_state(
             }
         });
     }
+    // Transfer debug section — always emitted so the client can diagnose issues.
+    // Format: u8 count, then per-player: string name, u8 flags, f32 intake, f32 outtake,
+    // f32 outtake force, f32 outtake target speed, u16 contact count, f32 contact speed.
+    // Flags bitmask: bit0=has_ball, bit1=transfer_power_ok, bit2=inside_robot,
+    //                bit3=touches_outtake, bit4=has_transfer_zone, bit5=has_robot_definition
+    section(&mut output, TRANSFER_DEBUG, |bytes| {
+        put_u8(bytes, state.transfer_debug.len() as u8);
+        for dbg in &state.transfer_debug {
+            put_string(bytes, &dbg.player_name);
+            let flags: u8 = (dbg.has_ball as u8)
+                | ((dbg.transfer_power_ok as u8) << 1)
+                | ((dbg.inside_robot as u8) << 2)
+                | ((dbg.touches_outtake as u8) << 3)
+                | ((dbg.has_transfer_zone as u8) << 4)
+                | ((dbg.has_robot_definition as u8) << 5);
+            put_u8(bytes, flags);
+            put_f32(bytes, dbg.intake_power);
+            put_f32(bytes, dbg.outtake_power);
+            put_f32(bytes, dbg.outtake_force_n);
+            put_f32(bytes, dbg.outtake_target_speed_mps);
+            put_u16(bytes, dbg.outtake_contact_balls);
+            put_f32(bytes, dbg.max_outtake_contact_speed_mps);
+        }
+    });
+    // Ball debug section — lightweight per-ball flags for rendering transfer vectors/collisions.
+    // Per active ball: u8 flags, u8 contact_count, then contact_count × string collider id
+    // (the authored robot collision box the ball is touching).
+    section(&mut output, BALL_DEBUG, |bytes| {
+        let count = state.object_positions.quantized_positions.len() / 3;
+        put_u16(bytes, count as u16);
+        for (i, active) in state.object_positions.active_mask.iter().enumerate() {
+            if *active != 0 {
+                if i < state.ball_debug.len() {
+                    put_u8(bytes, state.ball_debug[i]);
+                } else {
+                    put_u8(bytes, 0);
+                }
+                let contacts = state
+                    .ball_contact_colliders
+                    .get(i)
+                    .map(|ids| ids.as_slice())
+                    .unwrap_or(&[]);
+                let contact_count = contacts.len().min(8);
+                put_u8(bytes, contact_count as u8);
+                for id in contacts.iter().take(contact_count) {
+                    put_string(bytes, id);
+                }
+            }
+        }
+    });
     let payload_len = (output.len() - 16) as u32;
     output[12..16].copy_from_slice(&payload_len.to_le_bytes());
     output

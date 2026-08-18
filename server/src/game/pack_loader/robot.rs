@@ -213,17 +213,61 @@ fn assimp_node_positions(scene: &serde_json::Value) -> std::collections::BTreeMa
 }
 
 fn assimp_obb_nodes(scene: &serde_json::Value) -> Vec<FieldCollider> {
-    scene
-        .get("rootnode")
-        .and_then(|node| node.get("children"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|node| assimp_obb_node(node, scene))
-        .collect()
+    let mut nodes = Vec::new();
+    if let Some(root) = scene.get("rootnode") {
+        collect_nodes_recursive(root, scene, &mut nodes, None);
+    }
+    nodes
 }
 
-fn assimp_obb_node(node: &serde_json::Value, scene: &serde_json::Value) -> Option<FieldCollider> {
+fn collect_nodes_recursive(
+    node: &serde_json::Value,
+    scene: &serde_json::Value,
+    out: &mut Vec<FieldCollider>,
+    parent_matrix: Option<[f32; 16]>,
+) {
+    let mut local_matrix = match assimp_matrix(node) {
+        Some(m) => m,
+        None => [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ],
+    };
+
+    let abs_matrix = if let Some(parent) = parent_matrix {
+        // Multiply parent_matrix * local_matrix (row-major)
+        let mut m = [0.0; 16];
+        for i in 0..4 {
+            for j in 0..4 {
+                m[i * 4 + j] = parent[i * 4 + 0] * local_matrix[0 * 4 + j]
+                    + parent[i * 4 + 1] * local_matrix[1 * 4 + j]
+                    + parent[i * 4 + 2] * local_matrix[2 * 4 + j]
+                    + parent[i * 4 + 3] * local_matrix[3 * 4 + j];
+            }
+        }
+        m
+    } else {
+        local_matrix
+    };
+
+    if let Some(collider) = assimp_obb_node(node, scene, abs_matrix) {
+        out.push(collider);
+    }
+
+    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+        for child in children {
+            collect_nodes_recursive(child, scene, out, Some(abs_matrix));
+        }
+    }
+}
+
+fn assimp_obb_node(
+    node: &serde_json::Value,
+    scene: &serde_json::Value,
+    matrix: [f32; 16],
+) -> Option<FieldCollider> {
     let id = node.get("name")?.as_str()?.to_string();
     let mesh_index = node.get("meshes")?.as_array()?.first()?.as_u64()? as usize;
     let vertices = scene
@@ -232,7 +276,6 @@ fn assimp_obb_node(node: &serde_json::Value, scene: &serde_json::Value) -> Optio
         .get(mesh_index)?
         .get("vertices")?
         .as_array()?;
-    let matrix = assimp_matrix(node)?;
     let mut local_min = [f32::INFINITY; 3];
     let mut local_max = [f32::NEG_INFINITY; 3];
     for xyz in vertices.chunks_exact(3) {

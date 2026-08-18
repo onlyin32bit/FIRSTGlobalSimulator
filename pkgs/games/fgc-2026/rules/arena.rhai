@@ -14,7 +14,7 @@ fn arena_config() {
             // A 500-ball pile needs enough correction to restore one full
             // ball diameter in a frame instead of compressing into a goal.
             max_depenetration_speed_mps: 5.0,
-            max_ball_speed_mps: 12.0,
+            max_ball_speed_mps: 20.0,
             max_ball_angular_speed_radps: 240.0,
             sleep_linear_threshold_mps: 0.035,
             sleep_angular_threshold_radps: 0.20,
@@ -131,16 +131,16 @@ fn arena_config() {
             },
             // Transfer mechanism (conveyor / hopper path)
             transfer_surface_speed_mps: 0.5,
-            transfer_normal_force_n: 3.0,
+            transfer_normal_force_n: 2.0,
             // Hopper storage + wide flywheel outtake. The flywheel spans 3.5
             // WILDFIRE widths so the mouth accepts a spread of incoming balls
             // and launches them across a matching opening.
             storage_capacity: 40.0,
             intake_rate_bps: 6.0,
-            outtake_rate_bps: 3.0,
-            outtake_velocity_mps: 10.0,
-            outtake_normal_force_n: 25.0,
-            outtake_angle_deg: 35.0,
+            outtake_rate_bps: 1.0,
+            outtake_velocity_mps: 15.0,
+            outtake_normal_force_n: 200.0,
+            outtake_angle_deg: 80.0,
             flywheel_width_m: 0.35,
             outtake_forward_offset_m: 0.0,
             // Above the 50 cm chassis top so a launched ball clears the body.

@@ -1,14 +1,15 @@
 <script lang="ts">
 	import { T, useTask, useThrelte } from '@threlte/core';
-	import { DynamicDrawUsage, Sphere, Vector3, type InstancedMesh } from 'three';
+	import { DynamicDrawUsage, Sphere, Vector3, Color, type InstancedMesh } from 'three';
 
 	type ObjectFrame = {
 		positions: Float32Array;
 		radius: number;
 		color: string;
+		ballDebug?: Uint8Array;
 	};
 
-	let { frame, potatoMode = false }: { frame: ObjectFrame; potatoMode?: boolean } = $props();
+	let { frame, potatoMode = false, debug = false }: { frame: ObjectFrame; potatoMode?: boolean; debug?: boolean } = $props();
 	let meshRef: InstancedMesh | undefined = $state();
 	const MAX_INSTANCES = 1024;
 	const BASE_RADIUS = 0.05;
@@ -38,6 +39,10 @@
 		const count = Math.min(frame.positions.length / 3, MAX_INSTANCES);
 		const scale = frame.radius / BASE_RADIUS;
 
+		const baseColorObj = new Color(frame.color);
+		const redColor = new Color('#ef4444');
+		const orangeColor = new Color('#f97316');
+
 		for (let index = 0; index < count; index += 1) {
 			const positionOffset = index * 3;
 			const offset = index * 16;
@@ -60,10 +65,33 @@
 			matrices[offset + 13] = frame.positions[positionOffset + 1];
 			matrices[offset + 14] = frame.positions[positionOffset + 2];
 			matrices[offset + 15] = 1;
+
+			if (debug && frame.ballDebug && frame.ballDebug.length > index) {
+				const flags = frame.ballDebug[index];
+				const insideRobot = (flags & 1) !== 0;
+				const touchingOuttake = (flags & 2) !== 0;
+				const receivingForce = (flags & 4) !== 0;
+				const contactCount = (flags >> 4) & 15;
+
+				if (insideRobot) {
+					if (receivingForce && contactCount > 0) {
+						mesh.setColorAt(index, redColor);
+					} else if (touchingOuttake) {
+						mesh.setColorAt(index, orangeColor);
+					} else {
+						mesh.setColorAt(index, baseColorObj);
+					}
+				} else {
+					mesh.setColorAt(index, baseColorObj);
+				}
+			} else {
+				mesh.setColorAt(index, baseColorObj);
+			}
 		}
 
 		mesh.count = count;
 		mesh.instanceMatrix.needsUpdate = true;
+		if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 		invalidate();
 	});
 </script>

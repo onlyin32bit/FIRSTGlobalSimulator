@@ -67,24 +67,12 @@ impl SphereRuntime {
                 self.intake_candidates.clear();
                 let intake_world_y =
                     (player.position[1] - robot.height_m * 0.5) + robot.intake_center_height_m;
-                let robot_envelope = self.robot_definition.as_ref().map(|definition| {
-                    robot_local_collider_pose(
-                        &definition.bounds,
-                        player.position,
-                        player.rotation,
-                        ground_offset_y,
-                    )
-                });
                 for (index, ball) in self.balls.iter().enumerate() {
                     if !ball.active {
                         continue;
                     }
                     if let Some(zone) = &intake_zone {
-                        let in_zone = sphere_authored_obb_contact(ball.position, radius, zone).is_some();
-                        let in_env = robot_envelope
-                            .as_ref()
-                            .is_some_and(|env| sphere_authored_obb_contact(ball.position, radius, env).is_some());
-                        if !in_zone && !in_env {
+                        if sphere_authored_obb_contact(ball.position, radius, zone).is_none() {
                             continue;
                         }
                         self.intake_candidates
@@ -142,11 +130,11 @@ impl SphereRuntime {
                 let right = rotate_robot_local_pose([-1.0, 0.0, 0.0], player.rotation);
                 player.outtake_accumulator = (player.outtake_accumulator
                     + robot.outtake_rate_bps * player.outtake_power * dt)
-                    .min(2.0);
-                while player.outtake_accumulator >= 1.0 {
+                    .min(1.0);
+                if player.outtake_accumulator >= 1.0 {
                     let Some(index) = player.stored.pop_front() else {
                         player.outtake_accumulator = 0.0;
-                        break;
+                        continue;
                     };
                     player.outtake_accumulator -= 1.0;
 

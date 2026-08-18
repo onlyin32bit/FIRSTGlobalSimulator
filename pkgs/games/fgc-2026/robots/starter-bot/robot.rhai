@@ -15,14 +15,15 @@ fn robot_input(input) {
     let outtake_power = limit(input.outtake_power, 0.0, 1.0);
     let transfer_power = limit(input.transfer_power, 0.0, 1.0);
 
-    // The transfer path is one-way: shooting/transferring takes priority over collection.
-    let intake = if outtake_power > 0.01 || transfer_power > 0.01 { 0.0 } else { intake_power };
+    // Turn on intake and transfer when outtaking
+    let intake = if outtake_power > 0.01 { outtake_power } else if transfer_power > 0.01 { 0.0 } else { intake_power };
+    let transfer = if outtake_power > 0.01 { outtake_power } else { transfer_power };
 
     #{
         move_x: move_x,
         move_z: move_z,
         intake_power: intake,
         outtake_power: outtake_power,
-        transfer_power: transfer_power
+        transfer_power: transfer
     }
 }
