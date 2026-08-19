@@ -1596,6 +1596,13 @@ impl SphereRuntime {
                     false
                 };
 
+                // Sync balls inside the robot's mechanical zones to prevent them from falling back during fast movement
+                if inside_robot || touches_transfer || touches_outtake {
+                    let sync_factor = (15.0 * dt).min(1.0);
+                    ball.velocity[0] += (player.velocity[0] - ball.velocity[0]) * sync_factor;
+                    ball.velocity[2] += (player.velocity[2] - ball.velocity[2]) * sync_factor;
+                }
+
                 // Intake physical force
                 if player.intake_power > 0.0 {
                     let intake_dir = if let Some((_, dir_world, _)) = &intake_zone_info {
