@@ -27,8 +27,8 @@
 		const instance = scene.clone(true);
 		instance.updateMatrixWorld(true);
 		bounds.setFromObject(instance);
-		bounds.getCenter(center);
-		instance.position.set(-center.x, -bounds.min.y, -center.z);
+		// bounds.getCenter(center);
+		// instance.position.set(-center.x, -bounds.min.y, -center.z);
 		instance.traverse((object) => {
 			if (!(object instanceof Mesh)) return;
 			object.castShadow = false;
