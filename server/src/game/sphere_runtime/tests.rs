@@ -1095,6 +1095,8 @@ fn transfer_operates_within_robot_only_during_outtake() {
     let to_mouth_len = length_sq(to_mouth).sqrt();
     let toward_mouth = dot(runtime.balls[0].velocity, to_mouth) / to_mouth_len.max(1.0e-6);
 
+    println!("DEBUG TEST: ball0_vel={:?} transfer_dir={:?} outtake_mouth={:?}", runtime.balls[0].velocity, transfer_dir, outtake_mouth);
+
     assert!(
         speed_0 > 0.05,
         "Ball 0 inside the robot must receive transfer force towards outtake, got speed={speed_0}"

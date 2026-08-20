@@ -1663,7 +1663,13 @@ impl SphereRuntime {
                 // The transfer only feeds balls toward the shooter while the
                 // outtake is commanded. Intake runs its own roller path and
                 // must not also energize the internal transfer.
-                if player.outtake_power > 0.0 && (touches_transfer || inside_robot) {
+                let is_shooting_out = if let Some((_, outtake_dir)) = &outtake_zone_info {
+                    let rel_vel = sub(ball.velocity, player.velocity);
+                    dot(rel_vel, *outtake_dir) > 1.5
+                } else {
+                    false
+                };
+                if player.outtake_power > 0.0 && !touches_outtake && !is_shooting_out && (touches_transfer || inside_robot) {
                     if let Some((_, dir_world)) = &transfer_zone_info {
                         let power = player.outtake_power;
                         let target_speed = robot.transfer_surface_speed_mps * power;
