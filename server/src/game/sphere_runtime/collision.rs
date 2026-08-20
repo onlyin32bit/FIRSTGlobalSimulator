@@ -157,7 +157,18 @@ pub(super) fn project_static_position(
             contacts += 1;
         }
     }
+    let min_x = ball.position[0].min(ball.previous_position[0]) - radius;
+    let max_x = ball.position[0].max(ball.previous_position[0]) + radius;
+    let min_y = ball.position[1].min(ball.previous_position[1]) - radius;
+    let max_y = ball.position[1].max(ball.previous_position[1]) + radius;
+    let min_z = ball.position[2].min(ball.previous_position[2]) - radius;
+    let max_z = ball.position[2].max(ball.previous_position[2]) + radius;
     for collider in field_colliders {
+        if max_x < collider.min[0] || min_x > collider.max[0] ||
+           max_y < collider.min[1] || min_y > collider.max[1] ||
+           max_z < collider.min[2] || min_z > collider.max[2] {
+            continue;
+        }
         contacts += project_sphere_aabb(ball, collider, radius);
     }
     if let Some((normal, penetration)) = ramp_contact(ball.position, radius, &arena.ramp) {

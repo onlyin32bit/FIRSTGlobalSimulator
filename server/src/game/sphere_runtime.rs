@@ -1008,6 +1008,12 @@ impl SphereRuntime {
                     if !ball.active {
                         continue;
                     }
+                    let dx = ball.position[0] - player.position[0];
+                    let dy = ball.position[1] - player.position[1];
+                    let dz = ball.position[2] - player.position[2];
+                    if dx*dx + dy*dy + dz*dz > 2.0 {
+                        continue;
+                    }
                     if let Some((normal, penetration, _, _)) = roller_contact(
                         ball.position,
                         radius,
@@ -1036,6 +1042,12 @@ impl SphereRuntime {
             }
             for ball in &mut self.balls {
                 if !ball.active {
+                    continue;
+                }
+                let dx = ball.position[0] - player.position[0];
+                let dy = ball.position[1] - player.position[1];
+                let dz = ball.position[2] - player.position[2];
+                if dx*dx + dy*dy + dz*dz > 2.0 {
                     continue;
                 }
                 let touches_intake = intake_mouth.as_ref().is_some_and(|mouth| {
@@ -1301,9 +1313,15 @@ impl SphereRuntime {
             }
 
             // Resolve velocity, restitution (bouncing), and friction for all 3D field colliders (including SU goal walls)
+            let r = arena.ball.radius_m() * 1.01;
             for collider in &self.field_colliders {
+                if ball.position[0] + r < collider.min[0] || ball.position[0] - r > collider.max[0] ||
+                   ball.position[1] + r < collider.min[1] || ball.position[1] - r > collider.max[1] ||
+                   ball.position[2] + r < collider.min[2] || ball.position[2] - r > collider.max[2] {
+                    continue;
+                }
                 if let Some(normal) =
-                    sphere_collider_contact(ball.position, arena.ball.radius_m() * 1.01, collider)
+                    sphere_collider_contact(ball.position, r, collider)
                 {
                     let id_lower = collider.id.to_lowercase();
                     let surface = if id_lower.contains("su")
@@ -1552,6 +1570,12 @@ impl SphereRuntime {
                     if !ball.active {
                         continue;
                     }
+                    let dx = ball.position[0] - player.position[0];
+                    let dy = ball.position[1] - player.position[1];
+                    let dz = ball.position[2] - player.position[2];
+                    if dx*dx + dy*dy + dz*dz > 2.0 {
+                        continue;
+                    }
                     let Some((normal, _, roller_point, roller_axis)) = roller_contact(
                         ball.position,
                         arena.ball.radius_m() * 1.01,
@@ -1594,6 +1618,12 @@ impl SphereRuntime {
             let robot = effective_robot(&arena.robot, &player.mech);
             for ball in &mut self.balls {
                 if !ball.active {
+                    continue;
+                }
+                let dx = ball.position[0] - player.position[0];
+                let dy = ball.position[1] - player.position[1];
+                let dz = ball.position[2] - player.position[2];
+                if dx*dx + dy*dy + dz*dz > 2.0 {
                     continue;
                 }
                 let (touches_intake_mouth, inside_robot) = if let Some((mouth, _, envelope)) = &intake_zone_info {
