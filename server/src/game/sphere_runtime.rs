@@ -33,6 +33,14 @@ fn apply_control_deadband(value: f32) -> f32 {
     }
 }
 
+/// Semantic mechanism zones are intentionally non-solid so a ball can pass
+/// through a roller or flywheel. Restrict that exception to a collider whose
+/// own centre is inside the active zone; skipping every robot collider turns
+/// the whole chassis (including hopper ramps and walls) into a hole.
+fn collider_is_inside_mechanism_zone(collider: &FieldCollider, zone: &FieldCollider) -> bool {
+    sphere_authored_obb_contact(collider.center, 1.0e-5, zone).is_some()
+}
+
 
 #[derive(Debug, Clone)]
 pub struct TransferDebug {
@@ -1040,12 +1048,9 @@ impl SphereRuntime {
                     sphere_authored_obb_contact(ball.position, radius, mouth).is_some()
                 });
 
-                if (player.intake_power > 0.0 && touches_intake)
-                    || (player.outtake_power > 0.0 && touches_transfer)
-                    || (player.outtake_power > 0.0 && touches_outtake)
-                {
-                    continue;
-                }
+                let bypass_intake_collider = player.intake_power > 0.0 && touches_intake;
+                let bypass_transfer_collider = player.outtake_power > 0.0 && touches_transfer;
+                let bypass_outtake_collider = player.outtake_power > 0.0 && touches_outtake;
                 if let Some(definition) = &robot_definition {
                     // Resolve every authored physics OBB, not just the deepest
                     // overlap behind a coarse robot envelope. This preserves
@@ -1059,6 +1064,21 @@ impl SphereRuntime {
                             player.rotation,
                             ground_offset_y,
                         );
+                        if (bypass_intake_collider
+                            && intake_mouth.as_ref().is_some_and(|zone| {
+                                collider_is_inside_mechanism_zone(&collider, zone)
+                            }))
+                            || (bypass_transfer_collider
+                                && transfer_mouth.as_ref().is_some_and(|zone| {
+                                    collider_is_inside_mechanism_zone(&collider, zone)
+                                }))
+                            || (bypass_outtake_collider
+                                && outtake_mouth.as_ref().is_some_and(|zone| {
+                                    collider_is_inside_mechanism_zone(&collider, zone)
+                                }))
+                        {
+                            continue;
+                        }
                         if let Some((normal, penetration)) = sphere_robot_obb_contact(
                             ball.position,
                             ball.previous_position,
@@ -1695,12 +1715,9 @@ impl SphereRuntime {
                     ball.quiet_ticks = 0;
                 }
 
-                if (player.intake_power > 0.0 && touches_intake_mouth)
-                    || (player.outtake_power > 0.0 && touches_transfer)
-                    || (player.outtake_power > 0.0 && touches_outtake)
-                {
-                    continue;
-                }
+                let bypass_intake_collider = player.intake_power > 0.0 && touches_intake_mouth;
+                let bypass_transfer_collider = player.outtake_power > 0.0 && touches_transfer;
+                let bypass_outtake_collider = player.outtake_power > 0.0 && touches_outtake;
                 let authored_contact = robot_definition.as_ref().and_then(|definition| {
                     let ground_offset_y = -arena.robot.height_m * 0.5;
                     let envelope = robot_local_collider_pose(
@@ -1724,6 +1741,21 @@ impl SphereRuntime {
                                 player.rotation,
                                 ground_offset_y,
                             );
+                            if (bypass_intake_collider
+                                && intake_zone_info.as_ref().is_some_and(|(zone, _, _)| {
+                                    collider_is_inside_mechanism_zone(&collider, zone)
+                                }))
+                                || (bypass_transfer_collider
+                                    && transfer_zone_info.as_ref().is_some_and(|(zone, _)| {
+                                        collider_is_inside_mechanism_zone(&collider, zone)
+                                    }))
+                                || (bypass_outtake_collider
+                                    && outtake_zone_info.as_ref().is_some_and(|(zone, _)| {
+                                        collider_is_inside_mechanism_zone(&collider, zone)
+                                    }))
+                            {
+                                return None;
+                            }
                             sphere_authored_obb_contact(
                                 ball.position,
                                 arena.ball.radius_m() * 1.01,

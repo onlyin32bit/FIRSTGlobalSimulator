@@ -173,41 +173,175 @@ pub(super) fn project_static_position(
 /// converts every Assimp mesh into a tight oriented box once at startup, so the
 /// 60 Hz solver does not parse JSON or traverse CAD triangles.
 pub(super) fn project_sphere_aabb(ball: &mut Ball, collider: &FieldCollider, radius: f32) -> usize {
-    if collider.half_extents.iter().any(|extent| *extent > 1.0e-6) {
-        return project_sphere_obb(ball, collider, radius);
-    }
-    let closest = [
-        ball.position[0].clamp(collider.min[0], collider.max[0]),
-        ball.position[1].clamp(collider.min[1], collider.max[1]),
-        ball.position[2].clamp(collider.min[2], collider.max[2]),
-    ];
-    let delta = sub(ball.position, closest);
-    let distance_sq = length_sq(delta);
-    if distance_sq >= radius * radius {
-        return 0;
-    }
-    if distance_sq > 1.0e-10 {
-        let distance = distance_sq.sqrt();
-        ball.position = add(ball.position, mul(delta, (radius - distance) / distance));
-        return 1;
-    }
-    // Center is inside a volume: select the nearest face deterministically.
-    let candidates = [
-        (ball.position[0] - collider.min[0], [-1.0, 0.0, 0.0]),
-        (collider.max[0] - ball.position[0], [1.0, 0.0, 0.0]),
-        (ball.position[1] - collider.min[1], [0.0, -1.0, 0.0]),
-        (collider.max[1] - ball.position[1], [0.0, 1.0, 0.0]),
-        (ball.position[2] - collider.min[2], [0.0, 0.0, -1.0]),
-        (collider.max[2] - ball.position[2], [0.0, 0.0, 1.0]),
-    ];
-    if let Some((distance, normal)) = candidates
-        .into_iter()
-        .min_by(|left, right| left.0.total_cmp(&right.0))
-    {
-        ball.position = add(ball.position, mul(normal, radius + distance.max(0.0)));
+    let (center, half_extents, axes) =
+        if collider.half_extents.iter().any(|extent| *extent > 1.0e-6) {
+            (collider.center, collider.half_extents, collider.axes)
+        } else {
+            (
+                [
+                    (collider.min[0] + collider.max[0]) * 0.5,
+                    (collider.min[1] + collider.max[1]) * 0.5,
+                    (collider.min[2] + collider.max[2]) * 0.5,
+                ],
+                [
+                    (collider.max[0] - collider.min[0]).abs() * 0.5,
+                    (collider.max[1] - collider.min[1]).abs() * 0.5,
+                    (collider.max[2] - collider.min[2]).abs() * 0.5,
+                ],
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            )
+        };
+
+    // A final-position-only projection lets a fast ball cross a thin field
+    // panel completely between ticks. Use the same swept, entry-face-aware
+    // contact logic as robot colliders so an outtake cannot void through a
+    // wall simply because it moved more than the wall thickness this frame.
+    if let Some((normal, correction)) = sphere_box_contact_with_sweep(
+        ball.position,
+        ball.previous_position,
+        radius,
+        center,
+        axes,
+        half_extents,
+    ) {
+        ball.position = add(ball.position, mul(normal, correction));
         return 1;
     }
     0
+}
+
+/// Return a sphere/box contact while retaining continuous collision detection
+/// for a sphere that traverses the entire box in one simulation tick.
+///
+/// The returned correction is normally positive, but can be signed when a
+/// ball was already inside the swept volume at the beginning of the tick. In
+/// that case the correction puts it back on the nearest face instead of
+/// allowing it to exit through the opposite side.
+fn sphere_box_contact_with_sweep(
+    position: Vec3,
+    previous_position: Vec3,
+    radius: f32,
+    center: Vec3,
+    axes: [Vec3; 3],
+    half_extents: Vec3,
+) -> Option<(Vec3, f32)> {
+    let relative = sub(position, center);
+    let local = [
+        dot(relative, axes[0]),
+        dot(relative, axes[1]),
+        dot(relative, axes[2]),
+    ];
+    let previous_relative = sub(previous_position, center);
+    let previous_local = [
+        dot(previous_relative, axes[0]),
+        dot(previous_relative, axes[1]),
+        dot(previous_relative, axes[2]),
+    ];
+
+    // A centre inside the box is a discrete contact. Preserve the face the
+    // ball entered from; choosing the nearest face from the current position
+    // flips to the far side after a fast crossing.
+    if (0..3).all(|axis| local[axis].abs() <= half_extents[axis] + 1.0e-6) {
+        let (axis, sign, face_distance) = obb_entry_face(previous_local, local, half_extents);
+        return Some((mul(axes[axis], sign), radius + face_distance));
+    }
+
+    let movement = sub(local, previous_local);
+    let mut entry_time = f32::NEG_INFINITY;
+    let mut exit_time = f32::INFINITY;
+    let mut entry_axis = 0;
+    let mut entry_sign = 1.0;
+    let mut previous_inside_expanded = true;
+
+    for axis in 0..3 {
+        let limit = half_extents[axis] + radius;
+        previous_inside_expanded &= previous_local[axis].abs() <= limit;
+        let speed = movement[axis];
+        if speed.abs() <= 1.0e-8 {
+            if previous_local[axis] < -limit || previous_local[axis] > limit {
+                return sphere_box_discrete_contact(position, radius, center, axes, half_extents);
+            }
+            continue;
+        }
+        let near = (-limit - previous_local[axis]) / speed;
+        let far = (limit - previous_local[axis]) / speed;
+        let (axis_entry, axis_exit, sign) = if near <= far {
+            (near, far, -1.0)
+        } else {
+            (far, near, 1.0)
+        };
+        if axis_entry > entry_time {
+            entry_time = axis_entry;
+            entry_axis = axis;
+            entry_sign = sign;
+        }
+        exit_time = exit_time.min(axis_exit);
+    }
+
+    // If the previous point was already inside the expanded box and the
+    // current point is outside, keep the ball on its previous/nearest side.
+    // This handles a transfer impulse that starts while a ball is already
+    // slightly embedded in a wall.
+    let current_inside_expanded =
+        (0..3).all(|axis| local[axis].abs() <= half_extents[axis] + radius);
+    if previous_inside_expanded && !current_inside_expanded && entry_time < 0.0 {
+        let axis = (0..3)
+            .find(|axis| local[*axis].abs() > half_extents[*axis] + radius)
+            .unwrap_or(0);
+        let sign = if local[axis] < 0.0 { -1.0 } else { 1.0 };
+        let target = sign * (half_extents[axis] + radius);
+        let correction = target - local[axis] * sign;
+        return Some((mul(axes[axis], sign), correction));
+    }
+
+    if entry_time <= exit_time && (0.0..=1.0).contains(&entry_time) {
+        let limit = half_extents[entry_axis] + radius;
+        let correction = (local[entry_axis] - entry_sign * limit) * -entry_sign;
+        if correction > 0.0 {
+            return Some((mul(axes[entry_axis], entry_sign), correction));
+        }
+    }
+
+    sphere_box_discrete_contact(position, radius, center, axes, half_extents)
+}
+
+fn sphere_box_discrete_contact(
+    position: Vec3,
+    radius: f32,
+    center: Vec3,
+    axes: [Vec3; 3],
+    half_extents: Vec3,
+) -> Option<(Vec3, f32)> {
+    let relative = sub(position, center);
+    let local = [
+        dot(relative, axes[0]),
+        dot(relative, axes[1]),
+        dot(relative, axes[2]),
+    ];
+    let closest = [
+        local[0].clamp(-half_extents[0], half_extents[0]),
+        local[1].clamp(-half_extents[1], half_extents[1]),
+        local[2].clamp(-half_extents[2], half_extents[2]),
+    ];
+    let delta = sub(local, closest);
+    let distance_sq = length_sq(delta);
+    if distance_sq >= radius * radius {
+        return None;
+    }
+    let (local_normal, penetration) = if distance_sq > 1.0e-12 {
+        let distance = distance_sq.sqrt();
+        (mul(delta, 1.0 / distance), radius - distance)
+    } else {
+        let (axis, sign, face_distance) = obb_entry_face(local, local, half_extents);
+        let mut normal = [0.0; 3];
+        normal[axis] = sign;
+        (normal, radius + face_distance)
+    };
+    let normal = add(
+        add(mul(axes[0], local_normal[0]), mul(axes[1], local_normal[1])),
+        mul(axes[2], local_normal[2]),
+    );
+    Some((normal, penetration))
 }
 
 pub(super) fn project_sphere_obb(ball: &mut Ball, collider: &FieldCollider, radius: f32) -> usize {

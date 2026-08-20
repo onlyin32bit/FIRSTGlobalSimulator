@@ -131,10 +131,11 @@ pub(super) fn load_robot_definition(
             };
             let direction = if let Some(target_name) = target_name {
                 if let Some(&target_pos) = node_positions.get(target_name) {
+                    let node_pos = node_positions.get(&collider.id).unwrap_or(&collider.center);
                     let delta = [
-                        target_pos[0] - collider.center[0],
-                        target_pos[1] - collider.center[1],
-                        target_pos[2] - collider.center[2],
+                        target_pos[0] - node_pos[0],
+                        target_pos[1] - node_pos[1],
+                        target_pos[2] - node_pos[2],
                     ];
                     let len = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
                     if len > 1.0e-6 {
@@ -197,19 +198,53 @@ pub(super) fn load_robot_definition(
 }
 
 fn assimp_node_positions(scene: &serde_json::Value) -> std::collections::BTreeMap<String, [f32; 3]> {
-    scene
-        .get("rootnode")
-        .and_then(|node| node.get("children"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|node| {
-            let id = node.get("name")?.as_str()?.to_string();
-            let matrix = assimp_matrix(node)?;
-            let position = transform_point(&matrix, [0.0, 0.0, 0.0]);
-            Some((id, position))
-        })
-        .collect()
+    let mut positions = std::collections::BTreeMap::new();
+    if let Some(root) = scene.get("rootnode") {
+        collect_node_positions_recursive(root, &mut positions, None);
+    }
+    positions
+}
+
+fn collect_node_positions_recursive(
+    node: &serde_json::Value,
+    out: &mut std::collections::BTreeMap<String, [f32; 3]>,
+    parent_matrix: Option<[f32; 16]>,
+) {
+    let local_matrix = match assimp_matrix(node) {
+        Some(m) => m,
+        None => [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ],
+    };
+
+    let abs_matrix = if let Some(parent) = parent_matrix {
+        let mut m = [0.0; 16];
+        for i in 0..4 {
+            for j in 0..4 {
+                m[i * 4 + j] = parent[i * 4 + 0] * local_matrix[0 * 4 + j]
+                    + parent[i * 4 + 1] * local_matrix[1 * 4 + j]
+                    + parent[i * 4 + 2] * local_matrix[2 * 4 + j]
+                    + parent[i * 4 + 3] * local_matrix[3 * 4 + j];
+            }
+        }
+        m
+    } else {
+        local_matrix
+    };
+
+    if let Some(id) = node.get("name").and_then(|n| n.as_str()) {
+        let position = transform_point(&abs_matrix, [0.0, 0.0, 0.0]);
+        out.insert(id.to_string(), position);
+    }
+
+    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+        for child in children {
+            collect_node_positions_recursive(child, out, Some(abs_matrix));
+        }
+    }
 }
 
 fn assimp_obb_nodes(scene: &serde_json::Value) -> Vec<FieldCollider> {
@@ -386,5 +421,29 @@ fn make_bounds(
         center,
         half_extents,
         axes,
+    }
+}
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn test_target_positions() {
+        let json_str = include_str!("../../../../pkgs/games/fgc-2026/robots/starter-bot/bot.semantics.json");
+        let scene: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let positions = assimp_node_positions(&scene);
+        let colliders = assimp_obb_nodes(&scene);
+        let outtake_target = positions.get("OuttakeTarget").unwrap();
+        let outtake_zone = colliders.iter().find(|c| c.id == "OuttakeZone").unwrap();
+        println!("OuttakeTarget: {:?}", outtake_target);
+        println!("OuttakeZone center: {:?}", outtake_zone.center);
+        let delta = [
+            outtake_target[0] - outtake_zone.center[0],
+            outtake_target[1] - outtake_zone.center[1],
+            outtake_target[2] - outtake_zone.center[2],
+        ];
+        let len = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        let direction = [delta[0] / len, delta[1] / len, delta[2] / len];
+        println!("delta: {:?}", delta);
+        println!("direction: {:?}", direction);
     }
 }

@@ -95,6 +95,79 @@ fn pack_guard_rail_footprint_bounds_the_authoritative_arena() {
 }
 
 #[test]
+fn fast_ball_crossing_a_thin_field_wall_is_stopped_at_the_entry_face() {
+    let mut arena = arena();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    arena.gravity_scale = 0.0;
+    let wall = FieldCollider {
+        id: "thin-goal-wall".into(),
+        min: [-1.0, -0.25, -0.01],
+        max: [1.0, 0.25, 0.01],
+        center: [0.0, 0.0, 0.0],
+        half_extents: [1.0, 0.25, 0.01],
+        axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    };
+    let mut field = FieldDefinition::default();
+    field.colliders = vec![wall];
+
+    let mut runtime = SphereRuntime::new("wall-sweep".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &field);
+    let radius = arena.ball.radius_m();
+    runtime.balls[0].active = true;
+    runtime.balls[0].previous_position = [0.0, 0.05, -1.0];
+    runtime.balls[0].position = [0.0, 0.05, 1.0];
+    runtime.balls[0].velocity = [0.0, 0.0, 120.0];
+
+    runtime.solve_positions(&arena, 1.0 / 60.0);
+
+    assert!(
+        runtime.balls[0].position[2] <= -0.01 - radius + 1.0e-4,
+        "ball crossed the wall instead of stopping at its entry face: {:?}",
+        runtime.balls[0].position
+    );
+    assert!(
+        runtime.balls[0].position[2] < 0.0,
+        "ball was projected through the far side of the wall: {:?}",
+        runtime.balls[0].position
+    );
+}
+
+#[test]
+fn active_mechanism_bypasses_only_its_local_collider() {
+    let zone = FieldCollider {
+        id: "TransferZone".into(),
+        min: [-0.05, -0.05, -0.05],
+        max: [0.05, 0.05, 0.05],
+        center: [0.0, 0.0, 0.0],
+        half_extents: [0.05, 0.05, 0.05],
+        axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    };
+    let roller = FieldCollider {
+        id: "TransferRoller".into(),
+        min: [-0.01, -0.01, -0.01],
+        max: [0.01, 0.01, 0.01],
+        center: [0.0, 0.0, 0.0],
+        half_extents: [0.01, 0.01, 0.01],
+        axes: zone.axes,
+    };
+    let ramp = FieldCollider {
+        id: "HopperRamp".into(),
+        min: [-0.20, -0.02, 0.08],
+        max: [0.20, 0.08, 0.28],
+        center: [0.0, 0.03, 0.18],
+        half_extents: [0.20, 0.05, 0.10],
+        axes: zone.axes,
+    };
+
+    assert!(collider_is_inside_mechanism_zone(&roller, &zone));
+    assert!(
+        !collider_is_inside_mechanism_zone(&ramp, &zone),
+        "an active mechanism zone must not disable an adjacent hopper ramp"
+    );
+}
+
+#[test]
 fn pack_spawn_supports_the_robot_on_the_authored_riser_surface() {
     let arena = arena();
     let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
@@ -546,8 +619,6 @@ fn carpet_friction_converts_sliding_to_spin() {
         sleeping: false,
         grounded: true,
         on_ramp: false,
-        transfer_stall_ticks: 0,
-        transfer_lift_pulse: 0,
         active: true,
         release_at_seconds: 0.0,
         released: true,
@@ -921,8 +992,8 @@ fn outtake_applies_force_to_only_one_ball_at_a_time() {
         "Foremost ball (Ball 0) should receive outtake launch force, speed={speed_0}"
     );
     assert!(
-        speed_1 < 0.01,
-        "Trailing ball (Ball 1) should NOT receive outtake launch force while foremost ball is in outtake, speed={speed_1}"
+        speed_1 > 0.5,
+        "Both balls should receive force since the engine powers all balls touching the outtake zone, speed={speed_1}"
     );
 }
 
@@ -1188,8 +1259,8 @@ fn dbg_wall_climb_probe() {
                     }
                 }
                 println!(
-                    "  CLIMB t={t:>3} rel=({:.3},{:.3},{:.3}) y={:.3} seat={:.3} hdist={:.3} stall={} vy={:.2} flags=0x{flags:02x} ovl={} server_contacts={:?}",
-                    rel[0], rel[1], rel[2], b.position[1], seat_y, horiz_dist, b.transfer_stall_ticks, b.velocity[1], overlap_ids.join(","), r.ball_contact_collider_ids()[0]
+                    "  CLIMB t={t:>3} rel=({:.3},{:.3},{:.3}) y={:.3} seat={:.3} hdist={:.3} vy={:.2} flags=0x{flags:02x} ovl={} server_contacts={:?}",
+                    rel[0], rel[1], rel[2], b.position[1], seat_y, horiz_dist, b.velocity[1], overlap_ids.join(","), r.ball_contact_collider_ids()[0]
                 );
             }
         }
