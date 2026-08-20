@@ -270,7 +270,7 @@ fn sphere_box_contact_with_sweep(
         let speed = movement[axis];
         if speed.abs() <= 1.0e-8 {
             if previous_local[axis] < -limit || previous_local[axis] > limit {
-                return sphere_box_discrete_contact(position, radius, center, axes, half_extents);
+                return sphere_box_discrete_contact(position, previous_position, radius, center, axes, half_extents);
             }
             continue;
         }
@@ -313,11 +313,12 @@ fn sphere_box_contact_with_sweep(
         }
     }
 
-    sphere_box_discrete_contact(position, radius, center, axes, half_extents)
+    sphere_box_discrete_contact(position, previous_position, radius, center, axes, half_extents)
 }
 
 fn sphere_box_discrete_contact(
     position: Vec3,
+    previous_position: Vec3,
     radius: f32,
     center: Vec3,
     axes: [Vec3; 3],
@@ -328,6 +329,12 @@ fn sphere_box_discrete_contact(
         dot(relative, axes[0]),
         dot(relative, axes[1]),
         dot(relative, axes[2]),
+    ];
+    let previous_relative = sub(previous_position, center);
+    let previous_local = [
+        dot(previous_relative, axes[0]),
+        dot(previous_relative, axes[1]),
+        dot(previous_relative, axes[2]),
     ];
     let closest = [
         local[0].clamp(-half_extents[0], half_extents[0]),
@@ -340,10 +347,17 @@ fn sphere_box_discrete_contact(
         return None;
     }
     let (local_normal, penetration) = if distance_sq > 1.0e-12 {
-        let distance = distance_sq.sqrt();
-        (mul(delta, 1.0 / distance), radius - distance)
+        let (axis, sign, face_distance) = obb_entry_face(previous_local, local, half_extents);
+        if previous_local[axis] * local[axis] < 0.0 && previous_local[axis].abs() > half_extents[axis] {
+            let mut normal = [0.0; 3];
+            normal[axis] = sign;
+            (normal, radius + face_distance)
+        } else {
+            let distance = distance_sq.sqrt();
+            (mul(delta, 1.0 / distance), radius - distance)
+        }
     } else {
-        let (axis, sign, face_distance) = obb_entry_face(local, local, half_extents);
+        let (axis, sign, face_distance) = obb_entry_face(previous_local, local, half_extents);
         let mut normal = [0.0; 3];
         normal[axis] = sign;
         (normal, radius + face_distance)
