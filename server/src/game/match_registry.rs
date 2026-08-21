@@ -217,13 +217,13 @@ pub struct DriveSync {
 impl Default for DriveSync {
     fn default() -> Self {
         Self {
-            max_acceleration_mps2: 3.0,
-            max_deceleration_mps2: 4.0,
-            max_turn_rate_radps: 2.5,
-            max_angular_acceleration_radps2: 6.0,
-            lateral_grip_mps2: 6.0,
-            traction_friction: 0.85,
-            track_width_m: 0.4,
+            max_acceleration_mps2: 3.5,
+            max_deceleration_mps2: 5.0,
+            max_turn_rate_radps: 7.0,
+            max_angular_acceleration_radps2: 16.0,
+            lateral_grip_mps2: 12.0,
+            traction_friction: 1.05,
+            track_width_m: 0.42,
         }
     }
 }
@@ -738,7 +738,7 @@ impl MatchRegistry {
         }
 
         let (input_tx, mut input_rx) = mpsc::channel(256);
-        let (state_tx, _) = broadcast::channel(4);
+        let (state_tx, _) = broadcast::channel(16);
         let handle = MatchHandle {
             input_tx,
             state_tx: state_tx.clone(),
@@ -780,7 +780,7 @@ impl MatchRegistry {
         std::thread::Builder::new()
             .name(format!("match-publisher-{match_id}"))
             .spawn(move || {
-                let interval = Duration::from_millis(50);
+                let interval = Duration::from_millis(16);
                 let mut next_publish = Instant::now();
                 let mut next_process_sample = next_publish;
                 let mut process_sampler = ProcessSampler::default();

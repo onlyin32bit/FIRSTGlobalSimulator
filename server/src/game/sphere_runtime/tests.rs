@@ -134,6 +134,49 @@ fn fast_ball_crossing_a_thin_field_wall_is_stopped_at_the_entry_face() {
 }
 
 #[test]
+fn embedded_ball_pushed_through_thin_wall_is_returned_to_its_approach_side() {
+    let mut arena = arena();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    arena.gravity_scale = 0.0;
+    let wall = FieldCollider {
+        id: "thin-goal-wall".into(),
+        min: [-1.0, -0.25, -0.01],
+        max: [1.0, 0.25, 0.01],
+        center: [0.0, 0.0, 0.0],
+        half_extents: [1.0, 0.25, 0.01],
+        axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    };
+    let mut field = FieldDefinition::default();
+    field.colliders = vec![wall];
+
+    let mut runtime = SphereRuntime::new("embedded-wall-sweep".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &field);
+    let radius = arena.ball.radius_m();
+    // The ball begins the tick already overlapping the wall's inflated volume
+    // (embedded just beyond the -Z face) and is pushed by a robot past the far
+    // limit. It must come back out on the -Z side it approached from, never
+    // through the far face.
+    runtime.balls[0].active = true;
+    runtime.balls[0].previous_position = [0.0, 0.05, -0.05];
+    runtime.balls[0].position = [0.0, 0.05, 0.20];
+    runtime.balls[0].velocity = [0.0, 0.0, 0.0];
+
+    runtime.solve_positions(&arena, 1.0 / 60.0);
+
+    assert!(
+        runtime.balls[0].position[2] < 0.0,
+        "embedded ball pushed through the wall must return to its approach (-Z) side: {:?}",
+        runtime.balls[0].position
+    );
+    assert!(
+        runtime.balls[0].position[2] <= -0.01 - radius + 1.0e-4,
+        "ball must rest at the -Z entry face, not the far side: {:?}",
+        runtime.balls[0].position
+    );
+}
+
+#[test]
 fn active_mechanism_bypasses_only_its_local_collider() {
     let zone = FieldCollider {
         id: "TransferZone".into(),
@@ -1109,6 +1152,61 @@ fn transfer_operates_within_robot_only_during_outtake() {
     assert!(
         speed_2.abs() < 0.001,
         "Ball 2 outside the robot must NOT receive transfer force, got speed={speed_2}"
+    );
+}
+
+#[test]
+fn lowered_transfer_belt_speed_carries_balls_at_the_belt_speed() {
+    let loader = crate::game::pack_loader::PackLoader::new("0.1.0");
+    let pack = loader
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 1;
+    arena.ramp.enabled = false;
+    arena.gravity_scale = 0.0;
+    // A slow belt. The conveyor must still push at the full rated force so a
+    // ball inside the robot is carried through at the belt speed, never left
+    // to stall just because the target speed is low.
+    arena.robot.transfer_surface_speed_mps = 0.35;
+    arena.robot.transfer_normal_force_n = 60.0;
+    let mut runtime = SphereRuntime::new("slow-belt".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.context.phase = MatchPhase::Teleop;
+    runtime.add_player("p".into(), "Player".into(), "Team".into(), None, &arena);
+
+    let definition = runtime.robot_definition.as_ref().unwrap();
+    let transfer_zone = definition
+        .zones
+        .iter()
+        .find(|z| z.kind == RobotSemanticKind::Transfer)
+        .unwrap();
+    let player = runtime.players.get_mut("p").unwrap();
+    player.position = [0.0, arena.robot.height_m * 0.5, 0.0];
+    player.yaw = 0.0;
+    player.rotation = [0.0, 0.0, 0.0, 1.0];
+    player.outtake_power = 1.0;
+
+    let transfer_dir = rotate_robot_local_pose(transfer_zone.direction, player.rotation);
+
+    runtime.balls[0].active = true;
+    runtime.balls[0].position = [player.position[0], player.position[1], player.position[2] - 0.15];
+    runtime.balls[0].previous_position = runtime.balls[0].position;
+    runtime.balls[0].velocity = [0.0; 3];
+
+    runtime.apply_contact_velocities(&arena, 1.0 / 60.0);
+
+    let belt_speed = arena.robot.transfer_surface_speed_mps;
+    let speed = dot(runtime.balls[0].velocity, transfer_dir);
+    assert!(
+        (speed - belt_speed).abs() < 1.0e-3,
+        "a ball inside the robot must be carried at the (slower) belt speed, got {speed}"
+    );
+    let total_speed = length_sq(runtime.balls[0].velocity).sqrt();
+    assert!(
+        total_speed <= belt_speed + 1.0e-3,
+        "the transfer must never carry a ball faster than the belt, got {total_speed}"
     );
 }
 

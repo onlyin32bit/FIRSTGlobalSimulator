@@ -9,8 +9,8 @@ const ALLOWED_ASSETS = new Set(['field.glb', 'field.physics.json', 'field.semant
 // large field shells. These two are driveable gameplay constraints, though.
 const CLIENT_PREDICTION_COLLIDERS = new Set(['Cylinder.002', 'Cylinder.003'])
 
-type RobotAssetKind = 'visual' | 'lod1' | 'physics' | 'semantics'
-const ROBOT_ASSET_KINDS: RobotAssetKind[] = ['visual', 'lod1', 'physics', 'semantics']
+type RobotAssetKind = 'visual' | 'lod1' | 'physics' | 'semantics' | 'rollers'
+const ROBOT_ASSET_KINDS: RobotAssetKind[] = ['visual', 'lod1', 'physics', 'semantics', 'rollers']
 
 type Manifest = {
   id: string
@@ -43,6 +43,7 @@ type Manifest = {
     physics?: string
     semantics?: string
     behavior?: string
+    rollers?: string
     climber?: {
       wheelParts: string[]
       supportParts?: string[]
@@ -94,6 +95,7 @@ function robotAssetUrls(robotId: string, robot: NonNullable<Manifest['robots']>[
     lod1: paths.lod1 ? `${prefix}/lod1` : undefined,
     physics: paths.physics ? `${prefix}/physics` : undefined,
     semantics: paths.semantics ? `${prefix}/semantics` : undefined,
+    rollers: paths.rollers ? `${prefix}/rollers` : undefined,
     climber: robot.climber,
   }
 }
@@ -370,7 +372,7 @@ app.get('/:id/robots/:robot/assets/:asset', async (c) => {
     const response = await getPackAsset(c, path)
     if (!response.ok) return c.text('Robot asset not found.', response.status === 404 ? 404 : 503)
     const headers = new Headers(response.headers)
-    headers.set('cache-control', path.endsWith('.glb') ? 'public, max-age=86400' : 'public, max-age=300')
+    headers.set('cache-control', 'public, max-age=300')
     return new Response(response.body, { status: response.status, headers })
   } catch {
     return c.text('Robot asset service is unavailable.', 503)

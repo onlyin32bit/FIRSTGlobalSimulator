@@ -134,6 +134,8 @@ export interface MatchSnapshot {
 	serverRssMiB: number;
 	players: MatchPlayer[];
 	positions: Float32Array;
+	/** Per-ball velocity in m/s, same compacted order as positions. */
+	velocities: Float32Array;
 	physics?: MatchPhysics;
 	semanticEvents: string[];
 	score: {
@@ -211,6 +213,12 @@ class Reader {
 
 // Maintain persistent state for sleeping objects across snapshots
 let persistentPositions = new Float32Array(3000); // Max 1000 balls * 3
+// Slot-indexed velocity derived from frame-to-frame position delta ÷ measured snapshot Δt.
+// Keyed by the same ball slot i as persistentPositions so identity is stable across frames
+// even when the active/sleeping set changes (which shifts the dense compacted output index).
+let persistentVelocities = new Float32Array(3000);
+let persistentPrevPositions = new Float32Array(3000);
+let prevSnapshotTimeMs = 0;
 
 /**
  * Decode the FGS1 sectioned little-endian protocol. Unknown section tags are
@@ -260,6 +268,7 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 		serverRssMiB: 0,
 		players: [],
 		positions: new Float32Array(),
+		velocities: new Float32Array(),
 		semanticEvents: [],
 		score: { blue: 0, red: 0, global: 0, breakdown: {} },
 		transferDebug: [],
@@ -411,11 +420,28 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 				const movingMask = new Uint8Array(view.buffer, section.offset, maskBytes);
 				section.offset += maskBytes;
 
-				if (persistentPositions.length < count * 3) {
-					const newArr = new Float32Array(count * 3);
+				const needed = count * 3;
+				if (persistentPositions.length < needed) {
+					const newArr = new Float32Array(needed);
 					newArr.set(persistentPositions);
 					persistentPositions = newArr;
 				}
+				if (persistentVelocities.length < needed) {
+					const newArr = new Float32Array(needed);
+					newArr.set(persistentVelocities);
+					persistentVelocities = newArr;
+				}
+				if (persistentPrevPositions.length < needed) {
+					const newArr = new Float32Array(needed);
+					newArr.set(persistentPrevPositions);
+					persistentPrevPositions = newArr;
+				}
+
+				// Measure inter-snapshot interval for velocity calculation.
+				const nowMs = performance.now();
+				const snapDt = prevSnapshotTimeMs > 0 ? (nowMs - prevSnapshotTimeMs) / 1000 : 1 / 60;
+				const invDt = snapDt > 0.002 && snapDt < 0.5 ? 1 / snapDt : 60;
+				prevSnapshotTimeMs = nowMs;
 
 				let activeCount = 0;
 				for (let i = 0; i < count; i++) {
@@ -423,6 +449,7 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 				}
 
 				const positions = new Float32Array(activeCount * 3);
+				const velocities = new Float32Array(activeCount * 3);
 				let writeIndex = 0;
 				for (let i = 0; i < count; i++) {
 					const active = (activeMask[i >> 3] & (1 << (i & 7))) !== 0;
@@ -436,12 +463,41 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 						persistentPositions[i * 3 + 2] = unquantize(section.u16());
 					}
 
-					positions[writeIndex * 3] = persistentPositions[i * 3];
-					positions[writeIndex * 3 + 1] = persistentPositions[i * 3 + 1];
-					positions[writeIndex * 3 + 2] = persistentPositions[i * 3 + 2];
+					// Compute velocity per slot using slot-indexed prev/cur positions.
+					// This is correct even when ball count or active set changes frame-to-frame,
+					// because we diff slot i against slot i — always the same physical ball.
+					const px = persistentPositions[i * 3];
+					const py = persistentPositions[i * 3 + 1];
+					const pz = persistentPositions[i * 3 + 2];
+					const dx = px - persistentPrevPositions[i * 3];
+					const dy = py - persistentPrevPositions[i * 3 + 1];
+					const dz = pz - persistentPrevPositions[i * 3 + 2];
+					const dist = Math.hypot(dx, dy, dz);
+					if (prevSnapshotTimeMs > 0 && dist < 3.0) {
+						// Normal movement — derive velocity from positional delta
+						persistentVelocities[i * 3] = dx * invDt;
+						persistentVelocities[i * 3 + 1] = dy * invDt;
+						persistentVelocities[i * 3 + 2] = dz * invDt;
+					} else {
+						// Teleport or initial packet — zero out velocity
+						persistentVelocities[i * 3] = 0;
+						persistentVelocities[i * 3 + 1] = 0;
+						persistentVelocities[i * 3 + 2] = 0;
+					}
+					persistentPrevPositions[i * 3] = px;
+					persistentPrevPositions[i * 3 + 1] = py;
+					persistentPrevPositions[i * 3 + 2] = pz;
+
+					positions[writeIndex * 3] = px;
+					positions[writeIndex * 3 + 1] = py;
+					positions[writeIndex * 3 + 2] = pz;
+					velocities[writeIndex * 3] = persistentVelocities[i * 3];
+					velocities[writeIndex * 3 + 1] = persistentVelocities[i * 3 + 1];
+					velocities[writeIndex * 3 + 2] = persistentVelocities[i * 3 + 2];
 					writeIndex++;
 				}
 				snapshot.positions = positions;
+				snapshot.velocities = velocities;
 				break;
 			}
 			case 6: {
@@ -460,10 +516,10 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					robotHeightM: section.f32(),
 					robotLengthM: section.f32(),
 					robotMaxSpeedMps: section.f32(),
-					robotMaxAccelerationMps2: 3,
-					robotMaxDecelerationMps2: 4,
-					robotMaxTurnRateRadps: 2.5,
-					robotMaxAngularAccelerationRadps2: 6,
+					robotMaxAccelerationMps2: 3.5,
+					robotMaxDecelerationMps2: 5.0,
+					robotMaxTurnRateRadps: 7.0,
+					robotMaxAngularAccelerationRadps2: 16.0,
 					robotLateralGripMps2: 6,
 					robotTractionFriction: 0.85,
 					robotTrackWidthM: 0.4,

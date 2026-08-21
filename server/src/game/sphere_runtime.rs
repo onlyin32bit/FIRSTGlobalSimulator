@@ -10,7 +10,7 @@ use super::pack_loader::{
 };
 
 mod brace;
-mod collision;
+pub(crate) mod collision;
 mod hybrid_robot;
 mod mechanics;
 mod scoring;
@@ -37,7 +37,8 @@ fn apply_control_deadband(value: f32) -> f32 {
 /// through a roller or flywheel. Restrict that exception to a collider whose
 /// own centre is inside the active zone; skipping every robot collider turns
 /// the whole chassis (including hopper ramps and walls) into a hole.
-fn collider_is_inside_mechanism_zone(collider: &FieldCollider, zone: &FieldCollider) -> bool {
+#[allow(dead_code)]
+pub(crate) fn collider_is_inside_mechanism_zone(collider: &FieldCollider, zone: &FieldCollider) -> bool {
     sphere_authored_obb_contact(collider.center, 1.0e-5, zone).is_some()
 }
 
@@ -961,6 +962,24 @@ impl SphereRuntime {
         let robot_half = self.robot_collision_half_extents(arena);
         let field_boundary = self.field_boundary.clone();
         for player in self.players.values_mut() {
+            let ground_offset_y = -arena.robot.height_m * 0.5;
+            let world_robot_colliders: Vec<FieldCollider> = if let Some(definition) = &robot_definition {
+                definition
+                    .colliders
+                    .iter()
+                    .map(|local| {
+                        robot_local_collider_pose(
+                            local,
+                            player.position,
+                            player.rotation,
+                            ground_offset_y,
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             let intake_mouth = robot_definition.as_ref().and_then(|definition| {
                 definition
                     .zones
@@ -971,7 +990,7 @@ impl SphereRuntime {
                             &zone.collider,
                             player.position,
                             player.rotation,
-                            -arena.robot.height_m * 0.5,
+                            ground_offset_y,
                         )
                     })
             });
@@ -985,7 +1004,7 @@ impl SphereRuntime {
                             &zone.collider,
                             player.position,
                             player.rotation,
-                            -arena.robot.height_m * 0.5,
+                            ground_offset_y,
                         )
                     })
             });
@@ -999,7 +1018,7 @@ impl SphereRuntime {
                             &zone.collider,
                             player.position,
                             player.rotation,
-                            -arena.robot.height_m * 0.5,
+                            ground_offset_y,
                         )
                     })
             });
@@ -1060,34 +1079,38 @@ impl SphereRuntime {
                     sphere_authored_obb_contact(ball.position, radius, mouth).is_some()
                 });
 
+                let outtake_dir = robot_definition.as_ref().and_then(|definition| {
+                    definition
+                        .zones
+                        .iter()
+                        .find(|zone| zone.kind == RobotSemanticKind::Outtake)
+                        .map(|zone| rotate_robot_local_pose(zone.direction, player.rotation))
+                });
+                let is_shooting_out = if let Some(dir) = &outtake_dir {
+                    let rel_vel = sub(ball.velocity, player.velocity);
+                    dot(rel_vel, *dir) > 1.5
+                } else {
+                    false
+                };
+
                 let bypass_intake_collider = player.intake_power > 0.0 && touches_intake;
                 let bypass_transfer_collider = player.outtake_power > 0.0 && touches_transfer;
-                let bypass_outtake_collider = player.outtake_power > 0.0 && touches_outtake;
+                let bypass_outtake_collider = player.outtake_power > 0.0 && (touches_outtake || is_shooting_out);
                 if let Some(definition) = &robot_definition {
-                    // Resolve every authored physics OBB, not just the deepest
-                    // overlap behind a coarse robot envelope. This preserves
-                    // ramps and funnel walls as simultaneous contacts and makes
-                    // every surface in bot.physics.json a hard obstacle.
-                    let ground_offset_y = -arena.robot.height_m * 0.5;
-                    for local in &definition.colliders {
-                        let collider = robot_local_collider_pose(
-                            local,
-                            player.position,
-                            player.rotation,
-                            ground_offset_y,
-                        );
-                        if (bypass_intake_collider
-                            && intake_mouth.as_ref().is_some_and(|zone| {
-                                collider_is_inside_mechanism_zone(&collider, zone)
-                            }))
-                            || (bypass_transfer_collider
-                                && transfer_mouth.as_ref().is_some_and(|zone| {
-                                    collider_is_inside_mechanism_zone(&collider, zone)
-                                }))
-                            || (bypass_outtake_collider
-                                && outtake_mouth.as_ref().is_some_and(|zone| {
-                                    collider_is_inside_mechanism_zone(&collider, zone)
-                                }))
+                    // Resolve authored physics OBBs with broadphase AABB filtering.
+                    for (i, collider) in world_robot_colliders.iter().enumerate() {
+                        if (bypass_intake_collider && definition.is_intake_collider.get(i).copied().unwrap_or(false))
+                            || (bypass_transfer_collider && definition.is_transfer_collider.get(i).copied().unwrap_or(false))
+                            || (bypass_outtake_collider && definition.is_outtake_collider.get(i).copied().unwrap_or(false))
+                        {
+                            continue;
+                        }
+                        if ball.position[0] + radius < collider.min[0]
+                            || ball.position[0] - radius > collider.max[0]
+                            || ball.position[1] + radius < collider.min[1]
+                            || ball.position[1] - radius > collider.max[1]
+                            || ball.position[2] + radius < collider.min[2]
+                            || ball.position[2] - radius > collider.max[2]
                         {
                             continue;
                         }
@@ -1095,7 +1118,7 @@ impl SphereRuntime {
                             ball.position,
                             ball.previous_position,
                             radius,
-                            &collider,
+                            collider,
                         ) {
                             contacts += 1;
                             resolve_ball_robot_position(
@@ -1565,6 +1588,23 @@ impl SphereRuntime {
                 Some((mouth, dir_world))
             });
 
+            let world_robot_colliders: Vec<FieldCollider> = if let Some(definition) = &robot_definition {
+                definition
+                    .colliders
+                    .iter()
+                    .map(|local| {
+                        robot_local_collider_pose(
+                            local,
+                            player.position,
+                            player.rotation,
+                            ground_offset_y,
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             if arena.robot.intake_enabled && robot_definition.is_none() {
                 for ball in &mut self.balls {
                     if !ball.active {
@@ -1616,7 +1656,42 @@ impl SphereRuntime {
                 }
             }
             let robot = effective_robot(&arena.robot, &player.mech);
-            for ball in &mut self.balls {
+
+            let mut active_transfer_ball = None;
+            if player.outtake_power > 0.0 {
+                if let Some((mouth, dir_world)) = &transfer_zone_info {
+                    let mut max_progress = f32::NEG_INFINITY;
+                    for (index, ball) in self.balls.iter().enumerate() {
+                        if !ball.active { continue; }
+                        let dx = ball.position[0] - player.position[0];
+                        let dy = ball.position[1] - player.position[1];
+                        let dz = ball.position[2] - player.position[2];
+                        if dx*dx + dy*dy + dz*dz > 2.0 { continue; }
+
+                        let touches_transfer = sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth).is_some();
+                        let inside_robot = if let Some((_, _, envelope)) = &intake_zone_info {
+                            sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), envelope).is_some()
+                        } else { false };
+                        let touches_outtake = if let Some((outtake_mouth, _)) = &outtake_zone_info {
+                            sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), outtake_mouth).is_some()
+                        } else { false };
+                        let is_shooting_out = if let Some((_, outtake_dir)) = &outtake_zone_info {
+                            let rel_vel = sub(ball.velocity, player.velocity);
+                            dot(rel_vel, *outtake_dir) > 1.5
+                        } else { false };
+
+                        if !touches_outtake && !is_shooting_out && (touches_transfer || inside_robot) {
+                            let progress = dot(ball.position, *dir_world);
+                            if progress > max_progress {
+                                max_progress = progress;
+                                active_transfer_ball = Some(index);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (ball_index, ball) in self.balls.iter_mut().enumerate() {
                 if !ball.active {
                     continue;
                 }
@@ -1646,8 +1721,19 @@ impl SphereRuntime {
                     false
                 };
 
-                // Sync balls inside the robot's mechanical zones to prevent them from falling back during fast movement
-                if inside_robot || touches_transfer || touches_outtake {
+                let is_shooting_out = if let Some((_, outtake_dir)) = &outtake_zone_info {
+                    let rel_vel = sub(ball.velocity, player.velocity);
+                    dot(rel_vel, *outtake_dir) > 1.5
+                } else {
+                    false
+                };
+
+                // Sync balls inside the robot's mechanical zones to prevent them from falling back during fast movement,
+                // but do not drag balls that are currently being actively launched out of the outtake.
+                if (inside_robot || touches_transfer || touches_outtake)
+                    && !(touches_outtake && player.outtake_power > 0.0)
+                    && !is_shooting_out
+                {
                     let sync_factor = (15.0 * dt).min(1.0);
                     ball.velocity[0] += (player.velocity[0] - ball.velocity[0]) * sync_factor;
                     ball.velocity[2] += (player.velocity[2] - ball.velocity[2]) * sync_factor;
@@ -1693,33 +1779,33 @@ impl SphereRuntime {
                 // The transfer only feeds balls toward the shooter while the
                 // outtake is commanded. Intake runs its own roller path and
                 // must not also energize the internal transfer.
-                let is_shooting_out = if let Some((_, outtake_dir)) = &outtake_zone_info {
-                    let rel_vel = sub(ball.velocity, player.velocity);
-                    dot(rel_vel, *outtake_dir) > 1.5
-                } else {
-                    false
-                };
                 if player.outtake_power > 0.0 && !touches_outtake && !is_shooting_out && (touches_transfer || inside_robot) {
-                    if let Some((_, dir_world)) = &transfer_zone_info {
-                        let power = player.outtake_power;
-                        let target_speed = robot.transfer_surface_speed_mps * power;
-                        let force_n = (robot.transfer_normal_force_n * power * 4.0).max(10.0 * power);
-                        let mass = arena.ball.mass_kg.max(0.001);
-                        let rel_vel = sub(ball.velocity, player.velocity);
-                        let current_speed = dot(rel_vel, *dir_world);
+                    if Some(ball_index) == active_transfer_ball {
+                        if let Some((_, dir_world)) = &transfer_zone_info {
+                            let power = player.outtake_power;
+                            let target_speed = robot.transfer_surface_speed_mps * power;
+                            let force_n = (robot.transfer_normal_force_n * power * 4.0).max(10.0 * power);
+                            let mass = arena.ball.mass_kg.max(0.001);
+                            let rel_vel = sub(ball.velocity, player.velocity);
+                            let current_speed = dot(rel_vel, *dir_world);
 
-                        if current_speed < target_speed {
-                            let speed_needed = target_speed - current_speed;
-                            let dv = (force_n / mass * dt).min(speed_needed);
-                            ball.velocity = add(ball.velocity, mul(*dir_world, dv));
+                            if current_speed < target_speed {
+                                let dv = force_n / mass * dt;
+                                ball.velocity = add(ball.velocity, mul(*dir_world, dv));
+                                let after_speed = dot(sub(ball.velocity, player.velocity), *dir_world);
+                                if after_speed > target_speed {
+                                    ball.velocity =
+                                        sub(ball.velocity, mul(*dir_world, after_speed - target_speed));
+                                }
+                            }
+
+                            let perp_vel = sub(rel_vel, mul(*dir_world, dot(rel_vel, *dir_world)));
+                            let damp_factor = (1.0 - 6.0 * dt).max(0.0);
+                            ball.velocity = sub(ball.velocity, mul(perp_vel, 1.0 - damp_factor));
+
+                            ball.sleeping = false;
+                            ball.quiet_ticks = 0;
                         }
-
-                        let perp_vel = sub(rel_vel, mul(*dir_world, dot(rel_vel, *dir_world)));
-                        let damp_factor = (1.0 - 6.0 * dt).max(0.0);
-                        ball.velocity = sub(ball.velocity, mul(perp_vel, 1.0 - damp_factor));
-
-                        ball.sleeping = false;
-                        ball.quiet_ticks = 0;
                     }
                 }
 
@@ -1753,9 +1839,8 @@ impl SphereRuntime {
 
                 let bypass_intake_collider = player.intake_power > 0.0 && touches_intake_mouth;
                 let bypass_transfer_collider = player.outtake_power > 0.0 && touches_transfer;
-                let bypass_outtake_collider = player.outtake_power > 0.0 && touches_outtake;
+                let bypass_outtake_collider = player.outtake_power > 0.0 && (touches_outtake || is_shooting_out);
                 let authored_contact = robot_definition.as_ref().and_then(|definition| {
-                    let ground_offset_y = -arena.robot.height_m * 0.5;
                     let envelope = robot_local_collider_pose(
                         &definition.bounds,
                         player.position,
@@ -1767,35 +1852,30 @@ impl SphereRuntime {
                         arena.ball.radius_m() * 1.01,
                         &envelope,
                     )?;
-                    definition
-                        .colliders
+                    let radius = arena.ball.radius_m() * 1.01;
+                    world_robot_colliders
                         .iter()
-                        .filter_map(|local| {
-                            let collider = robot_local_collider_pose(
-                                local,
-                                player.position,
-                                player.rotation,
-                                ground_offset_y,
-                            );
-                            if (bypass_intake_collider
-                                && intake_zone_info.as_ref().is_some_and(|(zone, _, _)| {
-                                    collider_is_inside_mechanism_zone(&collider, zone)
-                                }))
-                                || (bypass_transfer_collider
-                                    && transfer_zone_info.as_ref().is_some_and(|(zone, _)| {
-                                        collider_is_inside_mechanism_zone(&collider, zone)
-                                    }))
-                                || (bypass_outtake_collider
-                                    && outtake_zone_info.as_ref().is_some_and(|(zone, _)| {
-                                        collider_is_inside_mechanism_zone(&collider, zone)
-                                    }))
+                        .enumerate()
+                        .filter_map(|(i, collider)| {
+                            if (bypass_intake_collider && definition.is_intake_collider.get(i).copied().unwrap_or(false))
+                                || (bypass_transfer_collider && definition.is_transfer_collider.get(i).copied().unwrap_or(false))
+                                || (bypass_outtake_collider && definition.is_outtake_collider.get(i).copied().unwrap_or(false))
+                            {
+                                return None;
+                            }
+                            if ball.position[0] + radius < collider.min[0]
+                                || ball.position[0] - radius > collider.max[0]
+                                || ball.position[1] + radius < collider.min[1]
+                                || ball.position[1] - radius > collider.max[1]
+                                || ball.position[2] + radius < collider.min[2]
+                                || ball.position[2] - radius > collider.max[2]
                             {
                                 return None;
                             }
                             sphere_authored_obb_contact(
                                 ball.position,
-                                arena.ball.radius_m() * 1.01,
-                                &collider,
+                                radius,
+                                collider,
                             )
                         })
                         .max_by(|left, right| left.1.total_cmp(&right.1))

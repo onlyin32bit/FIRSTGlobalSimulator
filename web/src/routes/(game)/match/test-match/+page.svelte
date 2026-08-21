@@ -12,6 +12,7 @@
 	import OverviewCamera from './OverviewCamera.svelte';
 	import FlyCamera from './FlyCamera.svelte';
 	import RobotModel from './RobotModel.svelte';
+	import type { RobotRollerSettings } from './StarterBotModel.svelte';
 	import PackField from './PackField.svelte';
 	import FieldBoundsDebug from './FieldBoundsDebug.svelte';
 	import ScriptedObjects from './ScriptedObjects.svelte';
@@ -67,6 +68,10 @@
 		ballDebug: new Uint8Array(),
 		ballContacts: []
 	});
+	let prevSnapshotPositions = new Float32Array();
+	let currSnapshotPositions = new Float32Array();
+	let lastSnapshotTimestamp = 0;
+	let snapshotDeltaSeconds = 1 / 60;
 	let physics = $state.raw<PhysicsModel>({
 		ballMaterial: 'closed-cell polyurethane foam',
 		ballDiameterM: 0.1,
@@ -81,11 +86,11 @@
 		robotWidthM: 0.5,
 		robotHeightM: 0.5,
 		robotLengthM: 0.5,
-		robotMaxSpeedMps: 4,
-		robotMaxAccelerationMps2: 3,
-		robotMaxDecelerationMps2: 4,
-		robotMaxTurnRateRadps: 2.5,
-		robotMaxAngularAccelerationRadps2: 6,
+		robotMaxSpeedMps: 2.8,
+		robotMaxAccelerationMps2: 3.5,
+		robotMaxDecelerationMps2: 5.0,
+		robotMaxTurnRateRadps: 7.0,
+		robotMaxAngularAccelerationRadps2: 16.0,
 		robotLateralGripMps2: 6,
 		robotTractionFriction: 0.85,
 		robotTrackWidthM: 0.4,
@@ -118,7 +123,7 @@
 		maxBrakeForceN: 200,
 		storageCapacity: 40,
 		intakeRateBps: 6,
-		outtakeRateBps: 3,
+		outtakeRateBps: 1,
 		outtakeVelocityMps: 8,
 		outtakeAngleDeg: 35,
 		flywheelWidthM: 0.35,
@@ -128,7 +133,7 @@
 	let robotSpecs = $state({
 		capacity: 40,
 		intake_rate_bps: 6,
-		outtake_rate_bps: 3,
+		outtake_rate_bps: 1,
 		outtake_velocity_mps: 8,
 		outtake_angle_deg: 35,
 		flywheel_width_m: 0.35
@@ -155,6 +160,7 @@
 	let starterBotDetailVisual = $state<string | null>(null);
 	let starterBotPhysics = $state<string | null>(null);
 	let starterBotSemantics = $state<string | null>(null);
+	let starterBotRollers = $state<RobotRollerSettings | null>(null);
 	let starterBotClimber = $state<{
 		wheelParts: string[];
 		grooveRootRadiusM: number;
@@ -496,7 +502,7 @@
 		let gamepadClimb = 0;
 		if (gamepad) {
 			const controls = userPreferences?.controls;
-			const driveMode = controls?.driveMode ?? 'arcade-left';
+			const driveMode = controls?.driveMode ?? 'split-arcade';
 			// The predictor and game host apply the same scaled deadband. Keep the
 			// raw axis here so every client gets identical neutral behavior.
 			const leftY = gamepad.axes[1] ?? 0;
@@ -964,31 +970,53 @@
 			const renderedPositions = renderedObjectFrame.positions;
 			if (targetPositions.length !== renderedPositions.length) {
 				// Allocate only when the pack changes its object count. Normal
-				// animation reuses these tuples to avoid 500 allocations per frame.
+				// animation reuses these tuples to avoid allocations per frame.
 				renderedObjectFrame = {
 					...objectFrame,
 					positions: new Float32Array(targetPositions)
 				};
+				currSnapshotPositions = new Float32Array(targetPositions);
+				prevSnapshotPositions = new Float32Array(targetPositions);
 			} else {
+				const elapsed = Math.max(0, (performance.now() - lastSnapshotTimestamp) / 1000);
+				const interval = Math.max(0.008, snapshotDeltaSeconds);
+				// Progress alpha from 0 (at snapshot arrival) to 1.0 (at next expected snapshot).
+				// Extrapolate up to 1.35x if a packet is slightly late so balls don't freeze.
+				const alpha = Math.min(elapsed / interval, 1.35);
+
 				let changedProperties =
 					objectFrame.objectId !== renderedObjectFrame.objectId ||
 					objectFrame.radius !== renderedObjectFrame.radius ||
 					objectFrame.color !== renderedObjectFrame.color;
 				for (let index = 0; index < targetPositions.length; index += 3) {
-					const dx = targetPositions[index] - renderedPositions[index];
-					const dy = targetPositions[index + 1] - renderedPositions[index + 1];
-					const dz = targetPositions[index + 2] - renderedPositions[index + 2];
-					const distance = Math.hypot(dx, dy, dz);
-					if (distance < 0.0001) continue;
+					const x0 = prevSnapshotPositions[index];
+					const y0 = prevSnapshotPositions[index + 1];
+					const z0 = prevSnapshotPositions[index + 2];
 
-					if (distance > 0.75) {
-						renderedPositions[index] = targetPositions[index];
-						renderedPositions[index + 1] = targetPositions[index + 1];
-						renderedPositions[index + 2] = targetPositions[index + 2];
+					const x1 = currSnapshotPositions[index];
+					const y1 = currSnapshotPositions[index + 1];
+					const z1 = currSnapshotPositions[index + 2];
+
+					const dx = x1 - x0;
+					const dy = y1 - y0;
+					const dz = z1 - z0;
+					const dist = Math.hypot(dx, dy, dz);
+
+					if (dist > 2.5) {
+						// Teleport / spawn / score reset -> snap to latest
+						renderedPositions[index] = x1;
+						renderedPositions[index + 1] = y1;
+						renderedPositions[index + 2] = z1;
+					} else if (dist < 0.0001) {
+						// Stationary or sleeping ball -> exact position without arithmetic
+						renderedPositions[index] = x1;
+						renderedPositions[index + 1] = y1;
+						renderedPositions[index + 2] = z1;
 					} else {
-						renderedPositions[index] += dx * blend;
-						renderedPositions[index + 1] += dy * blend;
-						renderedPositions[index + 2] += dz * blend;
+						// Moving or projectile ball -> 100% continuous, fluid, constant-velocity linear interpolation
+						renderedPositions[index] = x0 + dx * alpha;
+						renderedPositions[index + 1] = y0 + dy * alpha;
+						renderedPositions[index + 2] = z0 + dz * alpha;
 					}
 				}
 				if (changedProperties) {
@@ -1070,6 +1098,16 @@
 				starterBotPhysics = starterBot.physics ?? null;
 				starterBotSemantics = starterBot.semantics ?? null;
 				starterBotClimber = starterBot.climber ?? null;
+				if (starterBot.rollers) {
+					try {
+						const res = await fetch(starterBot.rollers);
+						if (res.ok) {
+							starterBotRollers = await res.json();
+						}
+					} catch (e) {
+						console.warn('Failed to load dynamic robot rollers config:', e);
+					}
+				}
 				await loadRobotDebugSummary(starterBot.physics ?? null, starterBot.semantics ?? null);
 				fieldDefinition = metadata.fieldDefinition;
 				const nextSocket = new WebSocket(ticket.ws_url);
@@ -1110,14 +1148,32 @@
 								const localServer = message.players.find((player) => player.id === localId);
 								if (localServer) reconcileLocal(localServer);
 							}
-objectFrame = {
-							objectId: message.objectId,
-							positions: message.positions,
-							radius: message.objectRadius,
-							color: message.objectColor,
-							ballDebug: message.ballDebug,
-							ballContacts: message.ballContacts
-						};
+							const now = performance.now();
+							if (lastSnapshotTimestamp > 0) {
+								const measuredDelta = (now - lastSnapshotTimestamp) / 1000;
+								if (measuredDelta > 0.005 && measuredDelta < 0.2) {
+									snapshotDeltaSeconds = snapshotDeltaSeconds * 0.8 + measuredDelta * 0.2;
+								}
+							}
+							lastSnapshotTimestamp = now;
+
+							const newPositions = message.positions;
+							if (currSnapshotPositions.length !== newPositions.length) {
+								currSnapshotPositions = new Float32Array(newPositions);
+								prevSnapshotPositions = new Float32Array(newPositions);
+							} else {
+								prevSnapshotPositions.set(currSnapshotPositions);
+								currSnapshotPositions.set(newPositions);
+							}
+
+							objectFrame = {
+								objectId: message.objectId,
+								positions: message.positions,
+								radius: message.objectRadius,
+								color: message.objectColor,
+								ballDebug: message.ballDebug,
+								ballContacts: message.ballContacts
+							};
 							contacts = message.contacts;
 							if (message.matchRunning && receivedMatchState && !matchRunning) {
 								startCueVisible = true;
@@ -1872,6 +1928,7 @@ objectFrame = {
 					isIntaking={player.id === localId ? inputIntake > 0 : false}
 					isOuttaking={player.id === localId ? inputOuttake > 0 : false}
 					isClimbing={player.id === localId ? inputClimb > 0 : false}
+					rollerSettings={starterBotRollers ?? undefined}
 					debug={robotDebugOpen && player.id === localId}
 					physicsAsset={starterBotPhysics ?? undefined}
 					semanticsAsset={starterBotSemantics ?? undefined}

@@ -43,6 +43,8 @@
 		const redColor = new Color('#ef4444');
 		const orangeColor = new Color('#f97316');
 
+		const hasDebugFlags = debug && frame.ballDebug && frame.ballDebug.length > 0;
+
 		for (let index = 0; index < count; index += 1) {
 			const positionOffset = index * 3;
 			const offset = index * 16;
@@ -66,8 +68,8 @@
 			matrices[offset + 14] = frame.positions[positionOffset + 2];
 			matrices[offset + 15] = 1;
 
-			if (debug && frame.ballDebug && frame.ballDebug.length > index) {
-				const flags = frame.ballDebug[index];
+			if (hasDebugFlags && frame.ballDebug!.length > index) {
+				const flags = frame.ballDebug![index];
 				const insideRobot = (flags & 1) !== 0;
 				const touchingOuttake = (flags & 2) !== 0;
 				const receivingForce = (flags & 4) !== 0;
@@ -84,14 +86,12 @@
 				} else {
 					mesh.setColorAt(index, baseColorObj);
 				}
-			} else {
-				mesh.setColorAt(index, baseColorObj);
 			}
 		}
 
 		mesh.count = count;
 		mesh.instanceMatrix.needsUpdate = true;
-		if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+		if (hasDebugFlags && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 		invalidate();
 	});
 </script>

@@ -53,11 +53,12 @@
   "robots": {
     "starter-bot": {
       "name": "Starter Bot",
-      "visual": "robots/starter-bot/bot.web.glb",
-      "lod1": "robots/starter-bot/bot.lod1.web.glb",
+      "visual": "robots/starter-bot/bot.glb",
+      "lod1": "robots/starter-bot/bot.glb",
       "physics": "robots/starter-bot/bot.physics.json",
       "semantics": "robots/starter-bot/bot.semantics.json",
       "behavior": "robots/starter-bot/robot.rhai",
+      "rollers": "robots/starter-bot/rollers.json",
       "climber": {
         "wheelParts": ["ClimbWheel1", "ClimbWheel2"],
         "supportParts": ["Cube.012"],

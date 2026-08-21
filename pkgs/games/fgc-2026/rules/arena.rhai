@@ -98,7 +98,7 @@ fn arena_config() {
             surface_friction: 0.45,
             restitution: 0.05,
             rolling_resistance: 0.35,
-            max_speed_mps: 4.0,
+            max_speed_mps: 2.8,
             max_acceleration_mps2: 3.5,
             max_deceleration_mps2: 5.0,
             // Force and power limits keep the controller from behaving like
@@ -106,8 +106,8 @@ fn arena_config() {
             max_drive_force_n: 140.0,
             max_drive_power_w: 420.0,
             max_brake_force_n: 200.0,
-            max_turn_rate_radps: 4.5,
-            max_angular_acceleration_radps2: 9.0,
+            max_turn_rate_radps: 5.0,
+            max_angular_acceleration_radps2: 12.0,
             lateral_grip_mps2: 12.0,
             restitution_curve: #{
                 low_speed: 0.36,
@@ -130,16 +130,16 @@ fn arena_config() {
                 exponent: 0.70
             },
             // Transfer mechanism (conveyor / hopper path)
-            transfer_surface_speed_mps: 1.5,
-            transfer_normal_force_n: 60.0,
+            transfer_surface_speed_mps: 2.0,
+            transfer_normal_force_n: 150.0,
             // Hopper storage + wide flywheel outtake. The flywheel spans 3.5
             // WILDFIRE widths so the mouth accepts a spread of incoming balls
             // and launches them across a matching opening.
             storage_capacity: 40.0,
             intake_rate_bps: 6.0,
             outtake_rate_bps: 1.0,
-            outtake_velocity_mps: 15.0,
-            outtake_normal_force_n: 200.0,
+            outtake_velocity_mps: 6.0,
+            outtake_normal_force_n: 50.0,
             outtake_angle_deg: 80.0,
             flywheel_width_m: 0.35,
             outtake_forward_offset_m: 0.0,

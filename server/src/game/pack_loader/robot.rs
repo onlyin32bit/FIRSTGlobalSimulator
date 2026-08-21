@@ -11,6 +11,12 @@ pub struct RobotDefinition {
     pub climber: Option<RobotClimberConfig>,
     pub bounds: FieldCollider,
     pub zones: Vec<RobotSemanticZone>,
+    #[serde(default)]
+    pub is_intake_collider: Vec<bool>,
+    #[serde(default)]
+    pub is_transfer_collider: Vec<bool>,
+    #[serde(default)]
+    pub is_outtake_collider: Vec<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -180,6 +186,24 @@ pub(super) fn load_robot_definition(
             )));
         }
     }
+
+    let intake_zone = zones.iter().find(|zone| zone.kind == RobotSemanticKind::Intake);
+    let transfer_zone = zones.iter().find(|zone| zone.kind == RobotSemanticKind::Transfer);
+    let outtake_zone = zones.iter().find(|zone| zone.kind == RobotSemanticKind::Outtake);
+
+    let is_intake_collider = colliders
+        .iter()
+        .map(|c| intake_zone.map_or(false, |z| crate::game::sphere_runtime::collision::sphere_authored_obb_contact(c.center, 1.0e-5, &z.collider).is_some()))
+        .collect();
+    let is_transfer_collider = colliders
+        .iter()
+        .map(|c| transfer_zone.map_or(false, |z| crate::game::sphere_runtime::collision::sphere_authored_obb_contact(c.center, 1.0e-5, &z.collider).is_some()))
+        .collect();
+    let is_outtake_collider = colliders
+        .iter()
+        .map(|c| outtake_zone.map_or(false, |z| crate::game::sphere_runtime::collision::sphere_authored_obb_contact(c.center, 1.0e-5, &z.collider).is_some()))
+        .collect();
+
     info!(
         robot = id,
         colliders = colliders.len(),
@@ -194,6 +218,9 @@ pub(super) fn load_robot_definition(
         climber,
         bounds,
         zones,
+        is_intake_collider,
+        is_transfer_collider,
+        is_outtake_collider,
     })
 }
 

@@ -412,6 +412,7 @@ export class APIClient {
 			lod1?: string;
 			physics?: string;
 			semantics?: string;
+			rollers?: string;
 			climber?: {
 				wheelParts: string[];
 				supportParts?: string[];

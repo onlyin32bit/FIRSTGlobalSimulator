@@ -290,18 +290,20 @@ fn sphere_box_contact_with_sweep(
     }
 
     // If the previous point was already inside the expanded box and the
-    // current point is outside, keep the ball on its previous/nearest side.
-    // This handles a transfer impulse that starts while a ball is already
-    // slightly embedded in a wall.
+    // current point is outside, keep the ball on the side it approached
+    // from. This handles a transfer impulse that starts while a ball is
+    // already slightly embedded in a wall: the previous side is the one the
+    // ball entered from, so a robot pushing it past the far face must not
+    // strand it on the far side of a thin panel.
     let current_inside_expanded =
         (0..3).all(|axis| local[axis].abs() <= half_extents[axis] + radius);
     if previous_inside_expanded && !current_inside_expanded && entry_time < 0.0 {
         let axis = (0..3)
             .find(|axis| local[*axis].abs() > half_extents[*axis] + radius)
             .unwrap_or(0);
-        let sign = if local[axis] < 0.0 { -1.0 } else { 1.0 };
+        let sign = if previous_local[axis] < 0.0 { -1.0 } else { 1.0 };
         let target = sign * (half_extents[axis] + radius);
-        let correction = target - local[axis] * sign;
+        let correction = sign * (target - local[axis]);
         return Some((mul(axes[axis], sign), correction));
     }
 
@@ -1004,7 +1006,7 @@ pub(super) fn sphere_obb_contact(
 /// Sphere contact against an arbitrary authored OBB. Robot pack colliders are
 /// expressed this way so the server never needs to approximate a whole bot as
 /// a single chassis cube.
-pub(super) fn sphere_authored_obb_contact(
+pub(crate) fn sphere_authored_obb_contact(
     sphere: Vec3,
     radius: f32,
     collider: &FieldCollider,

@@ -2,7 +2,7 @@
 	import { T, useTask } from '@threlte/core';
 	import { HTML } from '@threlte/extras';
 	import type { MatchPhysics, MatchPlayer } from './match-protocol';
-	import StarterBotModel from './StarterBotModel.svelte';
+	import StarterBotModel, { type RobotRollerSettings } from './StarterBotModel.svelte';
 	import RobotDebug from './RobotDebug.svelte';
 
 	let {
@@ -13,6 +13,7 @@
 		detailVisualAsset,
 		isIntaking = false,
 		isOuttaking = false,
+		rollerSettings,
 		debug = false,
 		physicsAsset,
 		semanticsAsset,
@@ -28,6 +29,7 @@
 		detailVisualAsset?: string;
 		isIntaking?: boolean;
 		isOuttaking?: boolean;
+		rollerSettings?: RobotRollerSettings;
 		debug?: boolean;
 		physicsAsset?: string;
 		semanticsAsset?: string;
@@ -97,6 +99,9 @@
 				detailAssetUrl={detailVisualAsset}
 				climbing={isClimbing}
 				wheelAngle={player.climbWheelAngle}
+				{isIntaking}
+				{isOuttaking}
+				{rollerSettings}
 			/>
 		</T.Group>
 	{:else}
