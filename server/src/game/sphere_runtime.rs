@@ -606,17 +606,20 @@ impl SphereRuntime {
         }
         let robot = &arena.robot;
         for player in self.players.values_mut() {
-            // Once the wheels are engaged, the brace motor owns travel. Keep
-            // the raw input intact so normal driving resumes on release.
-            let move_x = if player.climbing_brace.is_some() {
-                0.0
-            } else {
+            let driving = player.move_z.abs() > CONTROL_DEADBAND || player.move_x.abs() > CONTROL_DEADBAND;
+            if player.floor_supported && player.climb_power <= CONTROL_DEADBAND && driving {
+                player.climbing_brace = None;
+            }
+            let drive_enabled = player.floor_supported && (player.climb_power <= CONTROL_DEADBAND || player.climbing_brace.is_none());
+            let move_x = if drive_enabled {
                 player.move_x
-            };
-            let move_z = if player.climbing_brace.is_some() {
-                0.0
             } else {
+                0.0
+            };
+            let move_z = if drive_enabled {
                 player.move_z
+            } else {
+                0.0
             };
             let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
             let right = [-forward[2], 0.0, forward[0]];

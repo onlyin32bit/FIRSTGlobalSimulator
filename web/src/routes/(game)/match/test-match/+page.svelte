@@ -853,7 +853,14 @@
 				const pred = predictor;
 				const serverLocal = players.find((player) => player.id === localId);
 				if (pred && serverLocal) {
-					const driveEnabled = serverLocal.floorSupported && !serverLocal.braceContact;
+					const localUpY =
+						serverLocal.rotation && serverLocal.rotation.length >= 4
+							? 1 - 2 * (serverLocal.rotation[0] * serverLocal.rotation[0] + serverLocal.rotation[2] * serverLocal.rotation[2])
+							: 1;
+					const driveEnabled =
+						serverLocal.floorSupported &&
+						localUpY >= 0.7 &&
+						(input.climb <= 0 || !serverLocal.braceContact);
 					pred.step(
 						{
 							turn: driveEnabled ? input.turn : 0,

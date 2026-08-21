@@ -2228,3 +2228,54 @@ fn dbg_transfer_flow2() {
         }
     }
 }
+
+#[test]
+fn tipped_over_robot_cannot_drive() {
+    let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 0;
+    let mut runtime = SphereRuntime::new("tipover-test".into(), "fgc-2026".into(), 0);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.add_player("red".into(), "Red".into(), "red".into(), None, &arena);
+    let start_y = runtime.robot_center_y(&arena);
+    let player = runtime.players.get_mut("red").unwrap();
+    player.position = [0.0, start_y, 0.0];
+    // Rotate 90 degrees around Z axis (tipped on its side, local up points along X)
+    player.rotation = [0.0, 0.0, 0.7071068, 0.7071068];
+    player.yaw = 0.0;
+    runtime
+        .robot_physics
+        .as_mut()
+        .unwrap()
+        .teleport_to_players(&runtime.players);
+
+    // Let it settle on its side on the floor
+    for _ in 0..30 {
+        runtime.tick(1.0 / 60.0);
+    }
+    assert!(
+        !runtime.players["red"].floor_supported,
+        "tipped robot must not be marked floor_supported"
+    );
+
+    let settled_pos = runtime.players["red"].position;
+    // Attempt to drive while lying on its side
+    let player = runtime.players.get_mut("red").unwrap();
+    player.move_z = 1.0;
+    player.move_x = 1.0;
+    for _ in 0..60 {
+        runtime.tick(1.0 / 60.0);
+    }
+
+    let final_pos = runtime.players["red"].position;
+    let dx = final_pos[0] - settled_pos[0];
+    let dz = final_pos[2] - settled_pos[2];
+    let distance = (dx * dx + dz * dz).sqrt();
+    assert!(
+        distance < 0.05,
+        "tipped robot should not drive across the floor, moved {distance}m"
+    );
+}

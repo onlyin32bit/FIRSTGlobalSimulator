@@ -412,6 +412,10 @@ impl MatchRuntime {
         for player in self.players.values() {
             if let Some(body) = self.rigid_body_set.get_mut(player.body) {
                 let rotation = body.rotation();
+                let local_up_y = 1.0 - 2.0 * (rotation.x * rotation.x + rotation.z * rotation.z);
+                if local_up_y < 0.70 {
+                    continue;
+                }
                 let forward_x = -2.0 * (rotation.x * rotation.z + rotation.w * rotation.y);
                 let forward_z = -1.0 + 2.0 * (rotation.x * rotation.x + rotation.y * rotation.y);
                 let right_x = -forward_z;

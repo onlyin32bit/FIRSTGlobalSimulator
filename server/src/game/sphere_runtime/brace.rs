@@ -248,4 +248,54 @@ mod tests {
             runtime.players["red"].position
         );
     }
+
+    #[test]
+    fn starter_bot_can_disengage_and_drive_away_from_brace() {
+        let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
+            .load_pack("../pkgs/games/fgc-2026/manifest.json")
+            .unwrap();
+        let mut arena = pack.arena.clone();
+        arena.object_count = 0;
+        let mut runtime = SphereRuntime::new("brace-disengage-test".into(), "fgc-2026".into(), 0);
+        runtime.create_field_arena(&arena, &pack.field_definition);
+        runtime.set_robot_definition(pack.default_robot.as_ref());
+        runtime.add_player("red".into(), "Red".into(), "red".into(), None, &arena);
+        let start_y = runtime.robot_center_y(&arena);
+        let player = runtime.players.get_mut("red").unwrap();
+        player.position = [-2.126, start_y, 2.646];
+        player.yaw = 0.0;
+        player.rotation = [0.0, 0.0, 0.0, 1.0];
+        runtime
+            .robot_physics
+            .as_mut()
+            .unwrap()
+            .teleport_to_players(&runtime.players);
+
+        // First, power climb briefly to engage with the brace
+        let player = runtime.players.get_mut("red").unwrap();
+        player.climb_power = 1.0;
+        for _ in 0..30 {
+            runtime.tick(1.0 / 60.0);
+        }
+        let engaged_z = runtime.players["red"].position[2];
+
+        // Now release climb and drive in reverse to exit the brace
+        let player = runtime.players.get_mut("red").unwrap();
+        player.climb_power = 0.0;
+        player.move_z = -1.0;
+        for _ in 0..60 {
+            runtime.tick(1.0 / 60.0);
+        }
+
+        let player = &runtime.players["red"];
+        assert_eq!(
+            player.climbing_brace, None,
+            "robot must clear climbing_brace after driving away"
+        );
+        assert!(
+            player.position[2] > engaged_z + 0.1,
+            "robot must drive away in reverse, start_z={engaged_z}, final_z={}",
+            player.position[2]
+        );
+    }
 }

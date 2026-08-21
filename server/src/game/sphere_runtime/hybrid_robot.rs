@@ -549,6 +549,7 @@ impl HybridRobotWorld {
             let Some(player) = players.get(id) else {
                 continue;
             };
+            let powered = player.climb_power > CONTROL_DEADBAND;
             let mut wheel_constraint = None;
             if let Some(climber) = self.definition.climber.as_ref()
                 && let Some(joint) = handles
@@ -556,13 +557,15 @@ impl HybridRobotWorld {
                     .and_then(|joint| self.joints.get_mut(joint, true))
                 && let Some(revolute) = joint.data.as_revolute_mut()
             {
-                let powered = player.climb_power > CONTROL_DEADBAND;
+                let reverse_climb = !handles.floor_supported && player.move_z < -CONTROL_DEADBAND && !powered;
                 let target = if powered {
                     climber.free_speed_radps * player.climb_power
+                } else if reverse_climb {
+                    -climber.free_speed_radps * player.move_z.abs()
                 } else {
                     0.0
                 };
-                let torque = if powered {
+                let torque = if powered || reverse_climb {
                     climber.stall_torque_nm
                 } else {
                     climber.brake_torque_nm
@@ -610,11 +613,16 @@ impl HybridRobotWorld {
                             id: brace_id.to_owned(),
                         });
                     }
-                    let capture_valid = handles.brace_capture.as_ref().is_some_and(|capture| {
-                        capture.id == brace_id
-                            && along.abs() <= brace.half_length + 0.06
-                            && groove_radial.length() <= capture_radius + 0.04
-                    });
+                    let driving_away_on_floor = handles.floor_supported
+                        && !powered
+                        && (player.move_z.abs() > CONTROL_DEADBAND
+                            || player.move_x.abs() > CONTROL_DEADBAND);
+                    let capture_valid = !driving_away_on_floor
+                        && handles.brace_capture.as_ref().is_some_and(|capture| {
+                            capture.id == brace_id
+                                && along.abs() <= brace.half_length + 0.06
+                                && groove_radial.length() <= capture_radius + 0.04
+                        });
                     if !capture_valid {
                         handles.brace_capture = None;
                     }
@@ -638,20 +646,31 @@ impl HybridRobotWorld {
                             (seated - groove_radial) * 20_000.0 - radial_velocity * 120.0;
                         let guide = (guide_force * dt).clamp_length_max(4.5);
 
-                        let traction = if powered {
+                        let traction = if powered || reverse_climb {
                             let contact_radius = climber.groove_outer_radius_m.max(0.005);
                             let along_speed = point_velocity.dot(brace.ascent);
-                            let desired_speed = climber.max_climb_speed_mps * player.climb_power;
+                            let climb_factor = if powered {
+                                player.climb_power
+                            } else {
+                                player.move_z.abs()
+                            };
+                            let desired_speed = if powered {
+                                climber.max_climb_speed_mps * player.climb_power
+                            } else {
+                                -climber.max_climb_speed_mps * player.move_z.abs()
+                            };
                             let free_surface_speed = climber.free_speed_radps * contact_radius;
                             let motor_force = climber.stall_torque_nm / contact_radius
                                 * (1.0 - along_speed.abs() / free_surface_speed.max(0.1))
                                     .clamp(0.0, 1.0)
-                                * player.climb_power;
-                            let speed_impulse = mass * (desired_speed - along_speed).max(0.0);
+                                * climb_factor;
+                            let speed_delta = desired_speed - along_speed;
+                            let speed_impulse = mass * speed_delta.abs();
                             let motor_impulse = motor_force * dt;
                             let normal_impulse = support_impulse + guide.length();
                             let friction_impulse = climber.dynamic_friction * normal_impulse;
-                            brace.ascent * speed_impulse.min(motor_impulse).min(friction_impulse)
+                            let max_impulse = speed_impulse.min(motor_impulse).min(friction_impulse);
+                            brace.ascent * (speed_delta.signum() * max_impulse)
                         } else {
                             Vector::ZERO
                         };
@@ -668,10 +687,14 @@ impl HybridRobotWorld {
                 // the net force and moment match the wheel/joint assembly.
                 body.apply_impulse_at_point(impulse, point, true);
             }
-            if !handles.floor_supported || handles.brace_capture.is_some() {
+            let rotation = body.rotation();
+            let local_up = *rotation * Vector::Y;
+            if !handles.floor_supported
+                || (handles.brace_capture.is_some() && powered)
+                || local_up.y < 0.70
+            {
                 continue;
             }
-            let rotation = body.rotation();
             let raw_forward = *rotation * Vector::NEG_Z;
             let forward = Vector::new(raw_forward.x, 0.0, raw_forward.z).normalize_or_zero();
             let right = Vector::new(-forward.z, 0.0, forward.x);
@@ -726,13 +749,19 @@ impl HybridRobotWorld {
             let Some(player) = players.get_mut(id) else {
                 continue;
             };
-            handles.floor_supported = handles
-                .chassis_colliders
-                .iter()
-                .chain(handles.wheel_colliders.iter())
-                .any(|collider| {
-                    has_upward_support(&self.narrow_phase, *collider, &self.support_colliders)
-                });
+            let is_upright = self
+                .bodies
+                .get(handles.chassis)
+                .map(|body| (*body.rotation() * Vector::Y).y >= 0.70)
+                .unwrap_or(true);
+            handles.floor_supported = is_upright
+                && handles
+                    .chassis_colliders
+                    .iter()
+                    .chain(handles.wheel_colliders.iter())
+                    .any(|collider| {
+                        has_upward_support(&self.narrow_phase, *collider, &self.support_colliders)
+                    });
             let brace_id = alliance_brace(&player.team_name);
             let brace_handle = brace_id.and_then(|id| self.braces.get(id).map(|rail| rail.handle));
             handles.brace_contact = handles
@@ -824,10 +853,22 @@ impl HybridRobotWorld {
             let delta = target - body.translation();
             let mut pose = *body.position();
             pose.translation = target;
+            pose.rotation = Rotation::from_xyzw(
+                player.rotation[0],
+                player.rotation[1],
+                player.rotation[2],
+                player.rotation[3],
+            );
             body.set_position(pose, true);
             if let Some(wheel) = handles.wheel.and_then(|wheel| self.bodies.get_mut(wheel)) {
                 let mut pose = *wheel.position();
                 pose.translation += delta;
+                pose.rotation = Rotation::from_xyzw(
+                    player.rotation[0],
+                    player.rotation[1],
+                    player.rotation[2],
+                    player.rotation[3],
+                );
                 wheel.set_position(pose, true);
             }
         }
