@@ -165,6 +165,7 @@
 		wheelParts: string[];
 		grooveRootRadiusM: number;
 		grooveOuterRadiusM: number;
+		contactSkinM: number;
 	} | null>(null);
 	let starterBotColliders = $state.raw<FieldCollider[]>([]);
 	type RobotDebugSummary = {
@@ -610,16 +611,19 @@
 		}
 		try {
 			const [physicsAsset, semanticAsset] = await Promise.all([
-				fetch(physicsUrl).then((response) => {
+				fetch(physicsUrl, { cache: 'no-store' }).then((response) => {
 					if (!response.ok) throw new Error(`physics asset returned ${response.status}`);
 					return response.json() as Promise<AssimpScene>;
 				}),
-				fetch(semanticsUrl).then((response) => {
+				fetch(semanticsUrl, { cache: 'no-store' }).then((response) => {
 					if (!response.ok) throw new Error(`semantics asset returned ${response.status}`);
 					return response.json() as Promise<{ rootnode?: { children?: Array<{ name?: string }> } }>;
 				})
 			]);
-			starterBotColliders = parseRobotColliders(physicsAsset);
+			starterBotColliders = parseRobotColliders(
+				physicsAsset,
+				new Set(starterBotClimber?.wheelParts ?? ['ClimbWheel1', 'ClimbWheel2'])
+			);
 			robotDebugSummary = {
 				colliders: starterBotColliders.map(c => c.id),
 				collisionCount: starterBotColliders.length,
@@ -853,10 +857,9 @@
 				const pred = predictor;
 				const serverLocal = players.find((player) => player.id === localId);
 				if (pred && serverLocal) {
-					const localUpY =
-						serverLocal.rotation && serverLocal.rotation.length >= 4
-							? 1 - 2 * (serverLocal.rotation[0] * serverLocal.rotation[0] + serverLocal.rotation[2] * serverLocal.rotation[2])
-							: 1;
+					const rx = serverLocal.rotationX ?? 0;
+					const rz = serverLocal.rotationZ ?? 0;
+					const localUpY = 1 - 2 * (rx * rx + rz * rz);
 					const driveEnabled =
 						serverLocal.floorSupported &&
 						localUpY >= 0.7 &&

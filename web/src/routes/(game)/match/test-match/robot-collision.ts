@@ -8,7 +8,7 @@ export type AssimpScene = {
 
 const length = (value: [number, number, number]) => Math.hypot(...value);
 
-export function parseRobotColliders(scene: AssimpScene): FieldCollider[] {
+export function parseRobotColliders(scene: AssimpScene, climbWheelIds: Set<string> = new Set()): FieldCollider[] {
 	const allNodes: Array<{ node: AssimpNode; absMatrix: number[] }> = [];
 
 	function traverse(node?: { children?: AssimpNode[] } & AssimpNode, parentMat?: number[]) {
@@ -87,9 +87,11 @@ export function parseRobotColliders(scene: AssimpScene): FieldCollider[] {
 		const axes = rawAxes.map((axis, index) =>
 			axis.map((value) => value / scales[index]!)
 		) as FieldCollider['axes'];
-		const halfExtents = localMin.map((value, axis) =>
-			Math.max((localMax[axis]! - value!) * 0.5 * scales[axis]!, 0.01)
-		) as [number, number, number];
+		const halfExtents = localMin.map((value, axis) => {
+			const rawExtent = (localMax[axis]! - value!) * 0.5 * scales[axis]!;
+			const minExtent = climbWheelIds.has(node.name!) ? 0.001 : 0.01;
+			return Math.max(rawExtent, minExtent);
+		}) as [number, number, number];
 		const min = [...center] as [number, number, number];
 		const max = [...center] as [number, number, number];
 		for (let worldAxis = 0; worldAxis < 3; worldAxis += 1) {

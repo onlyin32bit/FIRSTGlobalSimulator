@@ -21,5 +21,12 @@
     "axis": "x",
     "speed": 8.0,
     "direction": 1
+  },
+  "climb": {
+    "description": "Climb wheel parts rotated during climbing. Angle is driven directly by the server's climbWheelAngle value.",
+    "parts": ["ClimbWheel1", "ClimbWheel2"],
+    "axis": "x",
+    "speed": 28.0,
+    "direction": 1
   }
 }

@@ -37,6 +37,7 @@
 			wheelParts: string[];
 			grooveRootRadiusM: number;
 			grooveOuterRadiusM: number;
+			contactSkinM: number;
 		};
 		isClimbing?: boolean;
 		ballContacts?: string[][];

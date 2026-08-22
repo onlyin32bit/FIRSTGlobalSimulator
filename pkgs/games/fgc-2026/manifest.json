@@ -61,18 +61,18 @@
       "rollers": "robots/starter-bot/rollers.json",
       "climber": {
         "wheelParts": ["ClimbWheel1", "ClimbWheel2"],
-        "supportParts": ["Cube.012"],
+        "supportParts": ["Cube.012", "Cylinder"],
         "axle": [1, 0, 0],
         "wheelMassKg": 0.35,
-        "grooveRootRadiusM": 0.012,
-        "grooveOuterRadiusM": 0.038,
+        "grooveRootRadiusM": 0.0063,
+        "grooveOuterRadiusM": 0.03,
         "maxClimbSpeedMps": 0.35,
         "freeSpeedRadps": 42,
         "stallTorqueNm": 4.2,
         "brakeTorqueNm": 2.2,
         "staticFriction": 1.15,
         "dynamicFriction": 0.9,
-        "contactSkinM": 0.002
+        "contactSkinM": 0.0018
       }
     }
   },

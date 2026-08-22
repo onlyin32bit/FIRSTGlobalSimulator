@@ -35,6 +35,7 @@
 			wheelParts: string[];
 			grooveRootRadiusM: number;
 			grooveOuterRadiusM: number;
+			contactSkinM: number;
 		};
 		ballContacts?: string[][];
 		ballPositions?: Float32Array;
@@ -42,8 +43,8 @@
 		robotQuaternion: [number, number, number, number];
 	} = $props();
 
-	let colliders = $state<DebugBox[]>([]);
-	let semantics = $state<DebugBox[]>([]);
+	let rawPhysics = $state<AssimpScene | null>(null);
+	let rawSemantics = $state<AssimpScene | null>(null);
 	let hovered = $state<DebugBox | null>(null);
 	const { invalidate } = useThrelte();
 
@@ -72,10 +73,20 @@
 		return balls;
 	});
 
-	function asBoxes(scene: AssimpScene): DebugBox[] {
+	function asBoxes(
+		scene: AssimpScene,
+		climberConfig?: {
+			wheelParts: string[];
+			grooveRootRadiusM: number;
+			grooveOuterRadiusM: number;
+			contactSkinM: number;
+		}
+	): DebugBox[] {
 		// Use the exact OBB collision parser so that the extruded 0.01m minimum half-extents
 		// are accurately reflected in the debug view.
-		const parsedColliders = parseRobotColliders(scene);
+		const wheelParts = climberConfig?.wheelParts ?? [];
+		const climbWheelIds = new Set(wheelParts);
+		const parsedColliders = parseRobotColliders(scene, climbWheelIds);
 		const boxes = parsedColliders.map((collider) => {
 			const size = collider.halfExtents.map((e) => e * 2) as [number, number, number];
 			const matrix = new Matrix4().makeBasis(
@@ -93,7 +104,6 @@
 			};
 		});
 		
-		const wheelParts = climber?.wheelParts ?? [];
 		const wheels = boxes.filter((box) => wheelParts.includes(box.id));
 		if (wheels.length < 2) return boxes;
 		const groove = wheels
@@ -102,8 +112,12 @@
 		return boxes.map((box) => {
 			if (!wheelParts.includes(box.id)) return box;
 			const axleIndex = box.size.indexOf(Math.min(...box.size));
-			const outerRadius = climber?.grooveOuterRadiusM ?? 0.038;
-			const innerRadius = climber?.grooveRootRadiusM ?? 0.012;
+			// The server builds this same tapered collider from the manifest and
+			// expands its contact envelope by contactSkinM. Include that margin in
+			// the visual so the yellow volume matches physical contacts.
+			const contactSkin = Math.max(climberConfig?.contactSkinM ?? 0, 0);
+			const outerRadius = (climberConfig?.grooveOuterRadiusM ?? 0.02) + contactSkin;
+			const innerRadius = (climberConfig?.grooveRootRadiusM ?? 0.007) + contactSkin;
 			const axis = groove
 				.clone()
 				.sub(new Vector3(...box.center))
@@ -112,7 +126,7 @@
 			return {
 				...box,
 				shape: 'frustum' as const,
-				size: [outerRadius, box.size[axleIndex]!, outerRadius] as [number, number, number],
+				size: [outerRadius, box.size[axleIndex]! + contactSkin * 2, outerRadius] as [number, number, number],
 				innerRadius,
 				quaternion: [orientation.x, orientation.y, orientation.z, orientation.w] as [
 					number,
@@ -124,21 +138,24 @@
 		});
 	}
 
+	const colliders = $derived(rawPhysics ? asBoxes(rawPhysics, climber) : []);
+	const semantics = $derived(rawSemantics ? asBoxes(rawSemantics, undefined) : []);
+
 	$effect(() => {
 		let cancelled = false;
 		const load = async () => {
 			try {
 				const [physics, semantic] = await Promise.all([
 					physicsUrl
-						? fetch(physicsUrl).then((response) => response.json() as Promise<AssimpScene>)
+						? fetch(physicsUrl, { cache: 'no-store' }).then((response) => response.json() as Promise<AssimpScene>)
 						: null,
 					semanticsUrl
-						? fetch(semanticsUrl).then((response) => response.json() as Promise<AssimpScene>)
+						? fetch(semanticsUrl, { cache: 'no-store' }).then((response) => response.json() as Promise<AssimpScene>)
 						: null
 				]);
 				if (cancelled) return;
-				colliders = physics ? asBoxes(physics) : [];
-				semantics = semantic ? asBoxes(semantic) : [];
+				rawPhysics = physics;
+				rawSemantics = semantic;
 				invalidate();
 			} catch (error) {
 				console.warn('[robot-debug] unable to load authored robot debug data', error);
@@ -164,9 +181,14 @@
 			frustumCulled={false}
 		>
 			{#if collider.shape === 'frustum'}
-				<T.CylinderGeometry
-					args={[collider.innerRadius ?? 0.012, collider.size[0], collider.size[1], 20]}
-				/>
+				<!-- CylinderGeometry constructor arguments are not reliably updated in
+					place by Three.js. Recreate it when the authored wheel width or
+					manifest-driven groove radii change. -->
+				{#key `${collider.id}:${collider.innerRadius}:${collider.size[0]}:${collider.size[1]}`}
+					<T.CylinderGeometry
+						args={[collider.innerRadius ?? 0.012, collider.size[0], collider.size[1], 20]}
+					/>
+				{/key}
 			{:else}
 				<T.BoxGeometry args={[1, 1, 1]} />
 			{/if}
@@ -186,9 +208,11 @@
 			frustumCulled={false}
 		>
 			{#if collider.shape === 'frustum'}
-				<T.CylinderGeometry
-					args={[collider.innerRadius ?? 0.012, collider.size[0], collider.size[1], 20]}
-				/>
+				{#key `${collider.id}:${collider.innerRadius}:${collider.size[0]}:${collider.size[1]}`}
+					<T.CylinderGeometry
+						args={[collider.innerRadius ?? 0.012, collider.size[0], collider.size[1], 20]}
+					/>
+				{/key}
 			{:else}
 				<T.BoxGeometry args={[1, 1, 1]} />
 			{/if}

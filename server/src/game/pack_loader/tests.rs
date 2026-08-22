@@ -75,7 +75,7 @@ fn loads_manifest_and_all_rhai_rules() {
         .as_ref()
         .expect("default robot must load");
     assert!(starter_bot.colliders.len() >= 30);
-    assert_eq!(starter_bot.zones.len(), 3);
+    assert_eq!(starter_bot.zones.len(), 4);
     assert_eq!(starter_bot.climb_colliders.len(), 2);
     let climber = starter_bot
         .climber

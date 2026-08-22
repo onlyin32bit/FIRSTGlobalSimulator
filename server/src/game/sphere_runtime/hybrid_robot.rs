@@ -41,7 +41,7 @@ fn brace_groups() -> InteractionGroups {
 fn robot_groups() -> InteractionGroups {
     InteractionGroups::new(
         ROBOT_GROUP,
-        FIELD_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP,
+        FIELD_GROUP | BRACE_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -57,7 +57,7 @@ fn climb_support_groups() -> InteractionGroups {
 fn drivebase_groups() -> InteractionGroups {
     InteractionGroups::new(
         DRIVEBASE_GROUP,
-        FIELD_GROUP | GROUND_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP,
+        FIELD_GROUP | BRACE_GROUP | GROUND_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -76,6 +76,7 @@ struct RobotHandles {
     wheel: Option<RigidBodyHandle>,
     wheel_colliders: Vec<ColliderHandle>,
     wheel_joint: Option<ImpulseJointHandle>,
+    climb_zone: Option<ColliderHandle>,
     floor_supported: bool,
     wheel_angle: f32,
     brace_contact: Option<String>,
@@ -368,6 +369,22 @@ impl HybridRobotWorld {
             &mut self.bodies,
         );
         chassis_colliders.push(wheelbase);
+        let climb_zone = self
+            .definition
+            .zones
+            .iter()
+            .find(|zone| zone.kind == RobotSemanticKind::Climb || zone.id == "ClimbZone")
+            .map(|zone| {
+                let corrected = robot_local_collider(&zone.collider, [0.0; 3], 0.0, ground_offset);
+                self.colliders.insert_with_parent(
+                    obb_collider(&corrected)
+                        .sensor(true)
+                        .collision_groups(climb_support_groups())
+                        .build(),
+                    chassis,
+                    &mut self.bodies,
+                )
+            });
 
         let mut handles = RobotHandles {
             chassis,
@@ -375,6 +392,7 @@ impl HybridRobotWorld {
             wheel: None,
             wheel_colliders: Vec::new(),
             wheel_joint: None,
+            climb_zone,
             floor_supported: true,
             wheel_angle: 0.0,
             brace_contact: None,
@@ -604,8 +622,18 @@ impl HybridRobotWorld {
                     let seated_radius = brace.radius + climber.groove_root_radius_m
                         - (climber.contact_skin_m + 0.001).min(climber.groove_root_radius_m * 0.5);
                     let capture_radius = brace.radius + climber.groove_outer_radius_m + 0.02;
+                    let in_climb_zone = match handles.climb_zone {
+                        Some(zone) => {
+                            self.narrow_phase.intersection_pair(zone, brace.handle) == Some(true)
+                                || self
+                                    .narrow_phase
+                                    .contact_pair(zone, brace.handle)
+                                    .is_some_and(|pair| pair.has_any_active_contact())
+                        }
+                        None => point_count > 0,
+                    };
                     if powered
-                        && point_count > 0
+                        && in_climb_zone
                         && groove_radial.length() <= capture_radius
                         && handles.brace_capture.is_none()
                     {
@@ -769,14 +797,11 @@ impl HybridRobotWorld {
                 .as_ref()
                 .map(|capture| capture.id.clone());
             let mut support_impulse = 0.0;
-            if let (Some(brace_id), Some(brace)) = (brace_id, brace_handle) {
+            if let Some(brace) = brace_handle {
                 for wheel in &handles.wheel_colliders {
                     if let Some(pair) = self.narrow_phase.contact_pair(*wheel, brace)
                         && pair.has_any_active_contact()
                     {
-                        handles
-                            .brace_contact
-                            .get_or_insert_with(|| brace_id.to_owned());
                         support_impulse += pair.total_impulse_magnitude();
                     }
                 }

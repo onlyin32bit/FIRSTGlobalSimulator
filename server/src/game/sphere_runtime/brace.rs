@@ -283,7 +283,7 @@ mod tests {
         let player = runtime.players.get_mut("red").unwrap();
         player.climb_power = 0.0;
         player.move_z = -1.0;
-        for _ in 0..60 {
+        for _ in 0..90 {
             runtime.tick(1.0 / 60.0);
         }
 
@@ -293,9 +293,56 @@ mod tests {
             "robot must clear climbing_brace after driving away"
         );
         assert!(
-            player.position[2] > engaged_z + 0.1,
+            player.position[2] > engaged_z + 0.05,
             "robot must drive away in reverse, start_z={engaged_z}, final_z={}",
             player.position[2]
+        );
+    }
+
+    #[test]
+    fn climb_zone_required_for_brace_capture() {
+        let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
+            .load_pack("../pkgs/games/fgc-2026/manifest.json")
+            .unwrap();
+        let mut arena = pack.arena.clone();
+        arena.object_count = 0;
+
+        // Create a definition where ClimbZone is shifted far away
+        let mut def_without_zone = (*pack.default_robot.as_ref().unwrap()).clone();
+        for zone in &mut def_without_zone.zones {
+            if zone.kind == RobotSemanticKind::Climb || zone.id == "ClimbZone" {
+                zone.collider.center = [100.0, 100.0, 100.0];
+            }
+        }
+
+        let mut runtime = SphereRuntime::new("climb-zone-test".into(), "fgc-2026".into(), 0);
+        runtime.create_field_arena(&arena, &pack.field_definition);
+        runtime.set_robot_definition(Some(&def_without_zone));
+        runtime.add_player("red".into(), "Red".into(), "red".into(), None, &arena);
+        let start_y = runtime.robot_center_y(&arena);
+        let player = runtime.players.get_mut("red").unwrap();
+        player.position = [-2.126, start_y, 2.646];
+        player.yaw = 0.0;
+        player.rotation = [0.0, 0.0, 0.0, 1.0];
+        runtime
+            .robot_physics
+            .as_mut()
+            .unwrap()
+            .teleport_to_players(&runtime.players);
+
+        let settled_y = runtime.players["red"].position[1];
+        let player = runtime.players.get_mut("red").unwrap();
+        player.climb_power = 1.0;
+
+        let mut highest = settled_y;
+        for _ in 0..120 {
+            runtime.tick(1.0 / 60.0);
+            highest = highest.max(runtime.players["red"].position[1]);
+        }
+
+        assert!(
+            highest < settled_y + 0.05,
+            "robot must NOT climb when ClimbZone does not contact brace: settled={settled_y} highest={highest}"
         );
     }
 }

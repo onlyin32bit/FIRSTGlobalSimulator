@@ -418,6 +418,7 @@ export class APIClient {
 				supportParts?: string[];
 				grooveRootRadiusM: number;
 				grooveOuterRadiusM: number;
+				contactSkinM: number;
 				maxClimbSpeedMps: number;
 			};
 		}>(`/api/game-packs/${encodeURIComponent(id)}/robots/${encodeURIComponent(robotId)}/assets`);

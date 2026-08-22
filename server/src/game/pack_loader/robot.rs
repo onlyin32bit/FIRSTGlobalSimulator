@@ -36,6 +36,7 @@ pub enum RobotSemanticKind {
     Intake,
     Transfer,
     Outtake,
+    Climb,
 }
 
 pub(super) fn load_robot_definition(
@@ -81,7 +82,15 @@ pub(super) fn load_robot_definition(
             )));
         }
     }
-    let colliders = assimp_obb_nodes(physics)
+    let wheel_parts = climber
+        .as_ref()
+        .map(|climber| climber.wheel_parts.as_slice())
+        .unwrap_or(&[]);
+    let is_climb_wheel = |id: &str| -> bool {
+        wheel_parts.iter().any(|part| part == id)
+            || (wheel_parts.is_empty() && id.starts_with("ClimbWheel"))
+    };
+    let mut raw_colliders = assimp_obb_nodes(physics)
         .into_iter()
         .filter(|collider| {
             collider
@@ -89,28 +98,28 @@ pub(super) fn load_robot_definition(
                 .iter()
                 .all(|extent| extent.is_finite())
         })
-        .map(extrude_robot_surface)
         .collect::<Vec<_>>();
-    if colliders.is_empty() {
+    if raw_colliders.is_empty() {
         return Err(GameError::ManifestParseError(format!(
             "Robot {id} has no usable authored collision nodes"
         )));
     }
-    let bounds = combined_bounds(&colliders).ok_or_else(|| {
+    let climb_colliders: Vec<_> = raw_colliders
+        .iter()
+        .filter(|c| is_climb_wheel(&c.id))
+        .cloned()
+        .map(|c| extrude_robot_surface(c, 0.001))
+        .collect();
+    let colliders: Vec<_> = raw_colliders
+        .into_iter()
+        .filter(|c| !is_climb_wheel(&c.id))
+        .map(|c| extrude_robot_surface(c, 0.01))
+        .collect();
+    let mut all_colliders = colliders.clone();
+    all_colliders.extend(climb_colliders.iter().cloned());
+    let bounds = combined_bounds(&all_colliders).ok_or_else(|| {
         GameError::ManifestParseError(format!("Robot {id} has invalid collision bounds"))
     })?;
-    let wheel_parts = climber
-        .as_ref()
-        .map(|climber| climber.wheel_parts.as_slice())
-        .unwrap_or(&[]);
-    let climb_colliders = colliders
-        .iter()
-        .filter(|collider| {
-            wheel_parts.iter().any(|part| part == &collider.id)
-                || (wheel_parts.is_empty() && collider.id.starts_with("ClimbWheel"))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
     if climber.is_some() && climb_colliders.len() != wheel_parts.len() {
         return Err(GameError::ManifestParseError(format!(
             "Robot {id} climber references missing wheel collision parts"
@@ -133,6 +142,7 @@ pub(super) fn load_robot_definition(
                 "IntakeZone" => (RobotSemanticKind::Intake, Some("IntakeTarget")),
                 "TransferZone" => (RobotSemanticKind::Transfer, Some("TransferTarget")),
                 "OuttakeZone" => (RobotSemanticKind::Outtake, Some("OuttakeTarget")),
+                "ClimbZone" => (RobotSemanticKind::Climb, None),
                 _ => return None,
             };
             let direction = if let Some(target_name) = target_name {
@@ -170,7 +180,7 @@ pub(super) fn load_robot_definition(
             Some(RobotSemanticZone {
                 id: collider.id.clone(),
                 kind,
-                collider: extrude_robot_surface(collider),
+                collider: extrude_robot_surface(collider, 0.01),
                 direction,
             })
         })
@@ -206,14 +216,14 @@ pub(super) fn load_robot_definition(
 
     info!(
         robot = id,
-        colliders = colliders.len(),
+        colliders = all_colliders.len(),
         climb_colliders = climb_colliders.len(),
         zones = zones.len(),
         "Loaded robot physics and semantics"
     );
     Ok(RobotDefinition {
         id: id.into(),
-        colliders,
+        colliders: all_colliders,
         climb_colliders,
         climber,
         bounds,
@@ -386,9 +396,9 @@ fn transform_point(matrix: &[f32; 16], point: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn extrude_robot_surface(mut collider: FieldCollider) -> FieldCollider {
+fn extrude_robot_surface(mut collider: FieldCollider, min_extent: f32) -> FieldCollider {
     for extent in &mut collider.half_extents {
-        *extent = extent.max(0.01);
+        *extent = extent.max(min_extent);
     }
     make_bounds(
         collider.id,
