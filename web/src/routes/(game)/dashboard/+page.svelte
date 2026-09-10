@@ -11,12 +11,12 @@
 
 	function joinMatch() {
 		const path = controller.joinPath();
-		if (path) void goto(resolve(path));
+		if (path) void goto(path);
 	}
 
 	async function createMatch() {
 		const path = await controller.createMatch();
-		if (path) void goto(resolve(path));
+		if (path) void goto(path);
 	}
 </script>
 

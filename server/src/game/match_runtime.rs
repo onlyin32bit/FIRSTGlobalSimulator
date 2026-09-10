@@ -2,7 +2,7 @@ use rapier3d::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
 
-use super::match_registry::ObjectPositionsSync;
+use super::match_registry::{InputAcknowledgement, ObjectPositionsSync};
 use super::pack_loader::ArenaConfig;
 
 const CONTROL_DEADBAND: f32 = 0.08;
@@ -44,6 +44,8 @@ pub struct ScoreState {
     pub blue_score: i32,
     pub red_score: i32,
     pub global_score: i32,
+    pub blue_su_score: i32,
+    pub red_su_score: i32,
     pub breakdown: HashMap<String, i32>,
 }
 
@@ -67,10 +69,36 @@ pub struct PlayerSnapshot {
     pub velocity_z: f32,
     #[serde(rename = "angularVelocityY")]
     pub angular_velocity_y: f32,
+    #[serde(rename = "rotationX")]
+    pub rotation_x: f32,
+    #[serde(rename = "rotationY")]
+    pub rotation_y: f32,
+    #[serde(rename = "rotationZ")]
+    pub rotation_z: f32,
+    #[serde(rename = "rotationW")]
+    pub rotation_w: f32,
+    #[serde(rename = "angularVelocityX")]
+    pub angular_velocity_x: f32,
+    #[serde(rename = "angularVelocityZ")]
+    pub angular_velocity_z: f32,
     pub color: String,
     #[serde(rename = "storedBalls")]
     pub stored_balls: usize,
     pub capacity: usize,
+    #[serde(rename = "braceZone")]
+    pub brace_zone: Option<u8>,
+    #[serde(rename = "braceMultiplier")]
+    pub brace_multiplier: f32,
+    #[serde(rename = "floorSupported")]
+    pub floor_supported: bool,
+    #[serde(rename = "braceContact")]
+    pub brace_contact: bool,
+    #[serde(rename = "braceSupportImpulse")]
+    pub brace_support_impulse: f32,
+    #[serde(rename = "climbWheelAngle")]
+    pub climb_wheel_angle: f32,
+    #[serde(rename = "climbWheelRadps")]
+    pub climb_wheel_radps: f32,
 }
 
 struct PlayerBody {
@@ -81,6 +109,7 @@ struct PlayerBody {
     move_x: f32,
     move_z: f32,
     sequence: u64,
+    connection_id: Option<String>,
     color: &'static str,
 }
 
@@ -337,6 +366,7 @@ impl MatchRuntime {
                 move_x: 0.0,
                 move_z: 0.0,
                 sequence: 0,
+                connection_id: None,
                 color: colors[slot % colors.len()],
             },
         );
@@ -371,6 +401,46 @@ impl MatchRuntime {
         }
     }
 
+    pub fn bind_player_connection(&mut self, user_id: &str, connection_id: String) {
+        if let Some(player) = self.players.get_mut(user_id) {
+            player.connection_id = Some(connection_id);
+            player.sequence = 0;
+            player.move_x = 0.0;
+            player.move_z = 0.0;
+        }
+    }
+
+    pub fn set_player_input_from_connection(
+        &mut self,
+        user_id: &str,
+        connection_id: &str,
+        move_x: f32,
+        move_z: f32,
+        sequence: u64,
+    ) {
+        if self
+            .players
+            .get(user_id)
+            .and_then(|player| player.connection_id.as_deref())
+            == Some(connection_id)
+        {
+            self.set_player_input(user_id, move_x, move_z, sequence);
+        }
+    }
+
+    pub fn remove_player_from_connection(&mut self, user_id: &str, connection_id: Option<&str>) {
+        let matches = self
+            .players
+            .get(user_id)
+            .map(|player| {
+                connection_id.is_none() || player.connection_id.as_deref() == connection_id
+            })
+            .unwrap_or(false);
+        if matches {
+            self.remove_player(user_id);
+        }
+    }
+
     pub fn disable_player_controls(&mut self) {
         for player in self.players.values_mut() {
             player.move_x = 0.0;
@@ -384,6 +454,10 @@ impl MatchRuntime {
         for player in self.players.values() {
             if let Some(body) = self.rigid_body_set.get_mut(player.body) {
                 let rotation = body.rotation();
+                let local_up_y = 1.0 - 2.0 * (rotation.x * rotation.x + rotation.z * rotation.z);
+                if local_up_y < 0.70 {
+                    continue;
+                }
                 let forward_x = -2.0 * (rotation.x * rotation.z + rotation.w * rotation.y);
                 let forward_z = -1.0 + 2.0 * (rotation.x * rotation.x + rotation.y * rotation.y);
                 let right_x = -forward_z;
@@ -477,9 +551,22 @@ impl MatchRuntime {
                         velocity_y: velocity.y,
                         velocity_z: velocity.z,
                         angular_velocity_y: angular_velocity.y,
+                        rotation_x: r.x,
+                        rotation_y: r.y,
+                        rotation_z: r.z,
+                        rotation_w: r.w,
+                        angular_velocity_x: angular_velocity.x,
+                        angular_velocity_z: angular_velocity.z,
                         color: player.color.to_string(),
                         stored_balls: 0,
                         capacity: self.storage_capacity,
+                        brace_zone: None,
+                        brace_multiplier: 1.0,
+                        floor_supported: true,
+                        brace_contact: false,
+                        brace_support_impulse: 0.0,
+                        climb_wheel_angle: 0.0,
+                        climb_wheel_radps: 0.0,
                     }
                 })
             })
@@ -487,6 +574,14 @@ impl MatchRuntime {
     }
 
     pub fn field_object_positions(&self) -> ObjectPositionsSync {
+        self.object_positions(false)
+    }
+
+    pub fn field_object_positions_full(&self) -> ObjectPositionsSync {
+        self.object_positions(true)
+    }
+
+    fn object_positions(&self, include_sleeping: bool) -> ObjectPositionsSync {
         let count = self.objects.len() as u32;
         let mask_bytes = (count as usize + 7) / 8;
         let mut active_mask = vec![0u8; mask_bytes];
@@ -496,7 +591,7 @@ impl MatchRuntime {
         for (i, object) in self.objects.iter().enumerate() {
             if let Some(body) = self.rigid_body_set.get(object.body) {
                 active_mask[i / 8] |= 1 << (i % 8);
-                if !body.is_sleeping() {
+                if include_sleeping || !body.is_sleeping() {
                     moving_mask[i / 8] |= 1 << (i % 8);
                     let position = body.translation();
                     let quantize =
@@ -514,6 +609,16 @@ impl MatchRuntime {
             moving_mask,
             quantized_positions,
         }
+    }
+
+    pub fn input_acknowledgements(&self) -> Vec<InputAcknowledgement> {
+        self.players
+            .iter()
+            .map(|(player_id, player)| InputAcknowledgement {
+                player_id: player_id.clone(),
+                sequence: player.sequence,
+            })
+            .collect()
     }
 
     pub fn contact_count(&self) -> usize {

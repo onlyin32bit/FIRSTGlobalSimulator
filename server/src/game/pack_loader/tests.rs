@@ -28,12 +28,32 @@ fn loads_manifest_and_all_rhai_rules() {
         )
     })
     .collect::<BTreeMap<_, _>>();
+    let robots = ["starter-bot"]
+        .into_iter()
+        .map(|id| {
+            let physics = serde_json::from_str(
+                &std::fs::read_to_string(root.join(format!("robots/{id}/bot.physics.json")))
+                    .unwrap(),
+            )
+            .unwrap();
+            let semantics = serde_json::from_str(
+                &std::fs::read_to_string(root.join(format!("robots/{id}/bot.semantics.json")))
+                    .unwrap(),
+            )
+            .unwrap();
+            (
+                id.to_string(),
+                super::RobotRuntimeAssets { physics, semantics },
+            )
+        })
+        .collect();
     let metadata = loader
         .load_runtime_snapshot(GamePackRuntimeSnapshot {
             manifest,
             field_physics,
             field_semantics,
             scripts,
+            robots,
         })
         .unwrap();
     assert_eq!(metadata.manifest.id, "fgc-2026");
@@ -50,6 +70,19 @@ fn loads_manifest_and_all_rhai_rules() {
     assert_eq!(metadata.arena.robot.width_m, 0.50);
     assert_eq!(metadata.arena.robot.height_m, 0.50);
     assert_eq!(metadata.arena.robot.length_m, 0.50);
+    let starter_bot = metadata
+        .default_robot
+        .as_ref()
+        .expect("default robot must load");
+    assert!(starter_bot.colliders.len() >= 30);
+    assert_eq!(starter_bot.zones.len(), 4);
+    assert_eq!(starter_bot.climb_colliders.len(), 2);
+    let climber = starter_bot
+        .climber
+        .as_ref()
+        .expect("starter bot climber must load");
+    assert_eq!(climber.wheel_parts, ["ClimbWheel1", "ClimbWheel2"]);
+    assert!(climber.stall_torque_nm > 0.0);
     assert!(metadata.arena.ramp.enabled);
     assert!(metadata.field_definition.colliders.len() >= 70);
     let front_wall = metadata

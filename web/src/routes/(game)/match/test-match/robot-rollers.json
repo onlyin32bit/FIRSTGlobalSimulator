@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Configuration for robot roller animations. 'parts' are exact node name prefixes from the GLB.",
+  "intake": {
+    "description": "Roller parts spun when the intake is active (Space / intake trigger)",
+    "parts": ["IntakeRoller"],
+    "axis": "x",
+    "speed": 10.0,
+    "direction": 1
+  },
+  "outtake": {
+    "description": "Shooter / flywheel roller parts spun when outtake is active",
+    "parts": ["OuttakeRoller"],
+    "axis": "x",
+    "speed": 22.0,
+    "direction": 1
+  },
+  "transfer": {
+    "description": "Conveyor / feeder flap parts spun when balls are fed to the shooter",
+    "parts": ["TransferRoller"],
+    "axis": "x",
+    "speed": 8.0,
+    "direction": 1
+  },
+  "climb": {
+    "description": "Climb wheel parts rotated during climbing. Angle is driven directly by the server's climbWheelAngle value.",
+    "parts": ["ClimbWheel1", "ClimbWheel2"],
+    "axis": "x",
+    "speed": 28.0,
+    "direction": 1
+  }
+}

@@ -12,8 +12,21 @@ export type MatchPlayer = {
 	velocityY: number;
 	velocityZ: number;
 	angularVelocityY: number;
+	rotationX: number;
+	rotationY: number;
+	rotationZ: number;
+	rotationW: number;
+	angularVelocityX: number;
+	angularVelocityZ: number;
 	storedBalls: number;
 	capacity: number;
+	braceZone: number | null;
+	braceMultiplier: number;
+	floorSupported: boolean;
+	braceContact: boolean;
+	braceSupportImpulse: number;
+	climbWheelAngle: number;
+	climbWheelRadps: number;
 };
 
 export type MatchPhysics = {
@@ -75,14 +88,34 @@ export type MatchPhysics = {
 	outtakeHeightM: number;
 };
 
+export type TransferDebugEntry = {
+	playerName: string;
+	hasBall: boolean;
+	transferPowerOk: boolean;
+	insideRobot: boolean;
+	touchesOuttake: boolean;
+	hasTransferZone: boolean;
+	hasRobotDefinition: boolean;
+	intakePower: number;
+	outtakePower: number;
+	outtakeForceN: number;
+	outtakeTargetSpeedMps: number;
+	outtakeContactBalls: number;
+	maxOuttakeContactSpeedMps: number;
+};
+
+export type InputAcknowledgement = {
+	playerId: string;
+	sequence: number;
+};
+
 export interface MatchSnapshot {
-	tick: bigint;
+	tick: number;
 	gamePackId: string;
 	gamePackVersion: string;
 	objectId: string;
 	objectColor: string;
 	objectRadius: number;
-	positions: Float32Array;
 	matchClock: number;
 	matchDurationSeconds: number;
 	preMatchRemainingSeconds: number;
@@ -106,6 +139,8 @@ export interface MatchSnapshot {
 	serverRssMiB: number;
 	players: MatchPlayer[];
 	positions: Float32Array;
+	/** Per-ball velocity in m/s, same compacted order as positions. */
+	velocities: Float32Array;
 	physics?: MatchPhysics;
 	semanticEvents: string[];
 	score: {
@@ -114,7 +149,12 @@ export interface MatchSnapshot {
 		global: number;
 		breakdown: Record<string, number>;
 	};
-};
+	transferDebug: TransferDebugEntry[];
+	ballDebug: Uint8Array;
+	/** Authored robot collider ids each active ball is touching, indexed like `ballDebug`. */
+	ballContacts: string[][];
+	inputAcknowledgements: InputAcknowledgement[];
+}
 
 const decoder = new TextDecoder();
 
@@ -179,6 +219,20 @@ class Reader {
 
 // Maintain persistent state for sleeping objects across snapshots
 let persistentPositions = new Float32Array(3000); // Max 1000 balls * 3
+// Slot-indexed velocity derived from frame-to-frame position delta ÷ measured snapshot Δt.
+// Keyed by the same ball slot i as persistentPositions so identity is stable across frames
+// even when the active/sleeping set changes (which shifts the dense compacted output index).
+let persistentVelocities = new Float32Array(3000);
+let persistentPrevPositions = new Float32Array(3000);
+let prevSnapshotTimeMs = 0;
+
+/** Reset delta state before a new WebSocket consumes its full reconnect baseline. */
+export function resetMatchSnapshotDecoder() {
+	persistentPositions = new Float32Array(3000);
+	persistentVelocities = new Float32Array(3000);
+	persistentPrevPositions = new Float32Array(3000);
+	prevSnapshotTimeMs = 0;
+}
 
 /**
  * Decode the FGS1 sectioned little-endian protocol. Unknown section tags are
@@ -228,8 +282,13 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 		serverRssMiB: 0,
 		players: [],
 		positions: new Float32Array(),
+		velocities: new Float32Array(),
 		semanticEvents: [],
-		score: { blue: 0, red: 0, global: 0, breakdown: {} }
+		score: { blue: 0, red: 0, global: 0, breakdown: {} },
+		transferDebug: [],
+		ballDebug: new Uint8Array(),
+		ballContacts: [],
+		inputAcknowledgements: []
 	};
 
 	const view = new DataView(buffer);
@@ -306,11 +365,66 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 						velocityY: section.f32(),
 						velocityZ: section.f32(),
 						angularVelocityY: section.f32(),
+						rotationX: 0,
+						rotationY: 0,
+						rotationZ: 0,
+						rotationW: 1,
+						angularVelocityX: 0,
+						angularVelocityZ: 0,
 						storedBalls: section.u32(),
-						capacity: section.u32()
+						capacity: section.u32(),
+						braceZone: section.offset < sectionEnd ? section.u8() || null : null,
+						braceMultiplier: section.offset + 4 <= sectionEnd ? section.f32() : 1,
+						floorSupported: true,
+						braceContact: false,
+						braceSupportImpulse: 0,
+						climbWheelAngle: 0,
+						climbWheelRadps: 0
 					});
 				}
 				snapshot.players = players;
+				break;
+			}
+			case 10: {
+				const count = section.u32();
+				const playersById = new Map(snapshot.players.map((player) => [player.id, player]));
+				for (let index = 0; index < count; index += 1) {
+					const player = playersById.get(section.string());
+					const rotationX = section.f32();
+					const rotationY = section.f32();
+					const rotationZ = section.f32();
+					const rotationW = section.f32();
+					const angularVelocityX = section.f32();
+					const angularVelocityY = section.f32();
+					const angularVelocityZ = section.f32();
+					const braceSupportImpulse = section.f32();
+					const climbWheelAngle = section.f32();
+					const climbWheelRadps = section.f32();
+					const floorSupported = section.u8() !== 0;
+					const braceContact = section.u8() !== 0;
+					if (!player) continue;
+					player.rotationX = rotationX;
+					player.rotationY = rotationY;
+					player.rotationZ = rotationZ;
+					player.rotationW = rotationW;
+					player.angularVelocityX = angularVelocityX;
+					player.angularVelocityY = angularVelocityY;
+					player.angularVelocityZ = angularVelocityZ;
+					player.braceSupportImpulse = braceSupportImpulse;
+					player.climbWheelAngle = climbWheelAngle;
+					player.climbWheelRadps = climbWheelRadps;
+					player.floorSupported = floorSupported;
+					player.braceContact = braceContact;
+				}
+				break;
+			}
+			case 13: {
+				const count = section.u16();
+				const acknowledgements: InputAcknowledgement[] = [];
+				for (let index = 0; index < count && section.offset < sectionEnd; index += 1) {
+					acknowledgements.push({ playerId: section.string(), sequence: section.u64() });
+				}
+				snapshot.inputAcknowledgements = acknowledgements;
 				break;
 			}
 			case 7: {
@@ -330,11 +444,28 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 				const movingMask = new Uint8Array(view.buffer, section.offset, maskBytes);
 				section.offset += maskBytes;
 
-				if (persistentPositions.length < count * 3) {
-					const newArr = new Float32Array(count * 3);
+				const needed = count * 3;
+				if (persistentPositions.length < needed) {
+					const newArr = new Float32Array(needed);
 					newArr.set(persistentPositions);
 					persistentPositions = newArr;
 				}
+				if (persistentVelocities.length < needed) {
+					const newArr = new Float32Array(needed);
+					newArr.set(persistentVelocities);
+					persistentVelocities = newArr;
+				}
+				if (persistentPrevPositions.length < needed) {
+					const newArr = new Float32Array(needed);
+					newArr.set(persistentPrevPositions);
+					persistentPrevPositions = newArr;
+				}
+
+				// Measure inter-snapshot interval for velocity calculation.
+				const nowMs = performance.now();
+				const snapDt = prevSnapshotTimeMs > 0 ? (nowMs - prevSnapshotTimeMs) / 1000 : 1 / 60;
+				const invDt = snapDt > 0.002 && snapDt < 0.5 ? 1 / snapDt : 60;
+				prevSnapshotTimeMs = nowMs;
 
 				let activeCount = 0;
 				for (let i = 0; i < count; i++) {
@@ -342,6 +473,7 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 				}
 
 				const positions = new Float32Array(activeCount * 3);
+				const velocities = new Float32Array(activeCount * 3);
 				let writeIndex = 0;
 				for (let i = 0; i < count; i++) {
 					const active = (activeMask[i >> 3] & (1 << (i & 7))) !== 0;
@@ -355,12 +487,41 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 						persistentPositions[i * 3 + 2] = unquantize(section.u16());
 					}
 
-					positions[writeIndex * 3] = persistentPositions[i * 3];
-					positions[writeIndex * 3 + 1] = persistentPositions[i * 3 + 1];
-					positions[writeIndex * 3 + 2] = persistentPositions[i * 3 + 2];
+					// Compute velocity per slot using slot-indexed prev/cur positions.
+					// This is correct even when ball count or active set changes frame-to-frame,
+					// because we diff slot i against slot i — always the same physical ball.
+					const px = persistentPositions[i * 3];
+					const py = persistentPositions[i * 3 + 1];
+					const pz = persistentPositions[i * 3 + 2];
+					const dx = px - persistentPrevPositions[i * 3];
+					const dy = py - persistentPrevPositions[i * 3 + 1];
+					const dz = pz - persistentPrevPositions[i * 3 + 2];
+					const dist = Math.hypot(dx, dy, dz);
+					if (prevSnapshotTimeMs > 0 && dist < 3.0) {
+						// Normal movement — derive velocity from positional delta
+						persistentVelocities[i * 3] = dx * invDt;
+						persistentVelocities[i * 3 + 1] = dy * invDt;
+						persistentVelocities[i * 3 + 2] = dz * invDt;
+					} else {
+						// Teleport or initial packet — zero out velocity
+						persistentVelocities[i * 3] = 0;
+						persistentVelocities[i * 3 + 1] = 0;
+						persistentVelocities[i * 3 + 2] = 0;
+					}
+					persistentPrevPositions[i * 3] = px;
+					persistentPrevPositions[i * 3 + 1] = py;
+					persistentPrevPositions[i * 3 + 2] = pz;
+
+					positions[writeIndex * 3] = px;
+					positions[writeIndex * 3 + 1] = py;
+					positions[writeIndex * 3 + 2] = pz;
+					velocities[writeIndex * 3] = persistentVelocities[i * 3];
+					velocities[writeIndex * 3 + 1] = persistentVelocities[i * 3 + 1];
+					velocities[writeIndex * 3 + 2] = persistentVelocities[i * 3 + 2];
 					writeIndex++;
 				}
 				snapshot.positions = positions;
+				snapshot.velocities = velocities;
 				break;
 			}
 			case 6: {
@@ -379,10 +540,10 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					robotHeightM: section.f32(),
 					robotLengthM: section.f32(),
 					robotMaxSpeedMps: section.f32(),
-					robotMaxAccelerationMps2: 3,
-					robotMaxDecelerationMps2: 4,
-					robotMaxTurnRateRadps: 2.5,
-					robotMaxAngularAccelerationRadps2: 6,
+					robotMaxAccelerationMps2: 3.5,
+					robotMaxDecelerationMps2: 5.0,
+					robotMaxTurnRateRadps: 7.0,
+					robotMaxAngularAccelerationRadps2: 16.0,
 					robotLateralGripMps2: 6,
 					robotTractionFriction: 0.85,
 					robotTrackWidthM: 0.4,
@@ -490,6 +651,54 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					breakdown[category] = section.i32();
 				}
 				snapshot.score = { blue, red, global, breakdown };
+				break;
+			}
+			case 11: {
+				const count = section.u8();
+				const entries: TransferDebugEntry[] = [];
+				for (let i = 0; i < count && section.offset < sectionEnd; i++) {
+					const playerName = section.string();
+					const flags = section.u8();
+					const intakePower = section.f32();
+					const outtakePower = section.f32();
+					const outtakeForceN = section.f32();
+					const outtakeTargetSpeedMps = section.f32();
+					const outtakeContactBalls = section.u16();
+					const maxOuttakeContactSpeedMps = section.f32();
+					entries.push({
+						playerName,
+						hasBall: (flags & 1) !== 0,
+						transferPowerOk: (flags & 2) !== 0,
+						insideRobot: (flags & 4) !== 0,
+						touchesOuttake: (flags & 8) !== 0,
+						hasTransferZone: (flags & 16) !== 0,
+						hasRobotDefinition: (flags & 32) !== 0,
+						intakePower,
+						outtakePower,
+						outtakeForceN,
+						outtakeTargetSpeedMps,
+						outtakeContactBalls,
+						maxOuttakeContactSpeedMps
+					});
+				}
+				snapshot.transferDebug = entries;
+				break;
+			}
+			case 12: {
+				const count = section.u16();
+				const flags = new Uint8Array(count);
+				const contacts: string[][] = new Array(count);
+				for (let i = 0; i < count && section.offset < sectionEnd; i++) {
+					flags[i] = section.u8();
+					const contactCount = section.u8();
+					const ids: string[] = [];
+					for (let j = 0; j < contactCount && section.offset < sectionEnd; j++) {
+						ids.push(section.string());
+					}
+					contacts[i] = ids;
+				}
+				snapshot.ballDebug = flags;
+				snapshot.ballContacts = contacts;
 				break;
 			}
 		}

@@ -6,7 +6,7 @@
 		matchId,
 		redScore,
 		blueScore,
-		globalScore,
+		globalScore = 0,
 		redRoster = [],
 		blueRoster = []
 	}: {

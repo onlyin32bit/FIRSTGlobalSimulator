@@ -394,7 +394,7 @@ app.post('/game-servers', async (c) => {
   const key = `fgc_${crypto.randomUUID().replaceAll('-', '')}${crypto.randomUUID().replaceAll('-', '')}`
   const now = new Date()
   const origin = body.origin.replace(/\/$/, '')
-  const server = { id: crypto.randomUUID(), name: new URL(origin).hostname, origin, keyHash: await hashKey(key), maxUsers: 1, maxMatches: 1, slots: 1, activeUsers: 0, activeMatches: 0, status: 'provisioning', lastHeartbeatAt: null, createdAt: now, updatedAt: now, disabledAt: null }
+  const server = { id: crypto.randomUUID(), name: new URL(origin).hostname, origin, keyHash: await hashKey(key), maxUsers: 1, maxMatches: 1, slots: 1, activeUsers: 0, activeMatches: 0, status: 'provisioning', lastHeartbeatAt: null, createdAt: now, updatedAt: now, disabledAt: null, runtimeJson: null }
   const db = drizzle(c.env.DB, { schema })
   await db.insert(schema.gameServers).values(server)
   await writeAdminAudit(c.env, { actorUserId: session.user.id, action: 'game_server.created', targetType: 'game_server', targetId: server.id, metadata: { name: server.name, origin: server.origin } })

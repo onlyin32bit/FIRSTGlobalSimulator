@@ -1,5 +1,5 @@
-import { Context } from 'hono'
-import { StatusCode } from 'hono/utils/http-status'
+import type { Context } from 'hono'
+import type { ContentfulStatusCode } from 'hono/utils/http-status'
 
 export type ErrorCode = 
   | 'AUTH_FAILED'
@@ -17,10 +17,10 @@ export type ErrorCode =
 
 export function jsonError(
   c: Context, 
-  status: StatusCode, 
+  status: ContentfulStatusCode,
   code: ErrorCode, 
   message: string, 
-  details?: any
+  details?: unknown
 ) {
   return c.json({
     success: false,
@@ -32,7 +32,7 @@ export function jsonError(
   }, status)
 }
 
-export function jsonSuccess(c: Context, data: any, status: StatusCode = 200) {
+export function jsonSuccess<T>(c: Context, data: T, status: ContentfulStatusCode = 200) {
   return c.json({
     success: true,
     data

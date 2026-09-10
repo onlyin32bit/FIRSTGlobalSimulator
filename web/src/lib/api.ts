@@ -404,6 +404,26 @@ export class APIClient {
 		}>(`/api/game-packs/${encodeURIComponent(id)}/assets`);
 	}
 
+	getGamePackRobotAssets(id: 'fgc-2026', robotId: string) {
+		return this.request<{
+			id: string;
+			name: string;
+			visual: string;
+			lod1?: string;
+			physics?: string;
+			semantics?: string;
+			rollers?: string;
+			climber?: {
+				wheelParts: string[];
+				supportParts?: string[];
+				grooveRootRadiusM: number;
+				grooveOuterRadiusM: number;
+				contactSkinM: number;
+				maxClimbSpeedMps: number;
+			};
+		}>(`/api/game-packs/${encodeURIComponent(id)}/robots/${encodeURIComponent(robotId)}/assets`);
+	}
+
 	getAdminOverview() {
 		return this.request<{
 			metrics: {

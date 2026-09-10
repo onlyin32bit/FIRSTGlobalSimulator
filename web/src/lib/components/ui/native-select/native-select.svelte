@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { IconSelector } from '@tabler/icons-svelte';
-	import { cn, type WithElementRef } from "$lib/utils.js";
+	import { cn } from "$lib/utils.js";
 	import type { HTMLSelectAttributes } from "svelte/elements";
 
-	type NativeSelectProps = Omit<WithElementRef<HTMLSelectAttributes, HTMLSelectElement>, "size"> & {
+	type NativeSelectProps = Omit<HTMLSelectAttributes, "size"> & {
+		ref?: HTMLSelectElement | null;
 		size?: "sm" | "default";
 	};
 

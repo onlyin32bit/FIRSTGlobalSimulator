@@ -48,9 +48,9 @@
 			? map.stations
 					.map((station) => {
 						const bounds = station.area.semanticBounds
-							? map.semanticAreas[station.area.semanticBounds]
+							? map!.semanticAreas[station.area.semanticBounds]
 							: null;
-						const anchor = map.anchors[station.semanticAnchor];
+						const anchor = map!.anchors[station.semanticAnchor];
 						if (!bounds && !anchor) return null;
 						const footprint = footprintFor(station);
 						return {

@@ -225,20 +225,8 @@ enum ClientMessage {
         intake_power: f32,
         #[serde(default)]
         outtake_power: f32,
-    },
-    RobotSpecs {
         #[serde(default)]
-        capacity: Option<usize>,
-        #[serde(default)]
-        intake_rate_bps: Option<f32>,
-        #[serde(default)]
-        outtake_rate_bps: Option<f32>,
-        #[serde(default)]
-        outtake_velocity_mps: Option<f32>,
-        #[serde(default)]
-        outtake_angle_deg: Option<f32>,
-        #[serde(default)]
-        flywheel_width_m: Option<f32>,
+        climb_power: f32,
     },
     ContinuePractice,
     EndPractice,
@@ -279,6 +267,8 @@ fn authorize_connection(
             || claims.slot_id.as_deref() != Some(participant.slot_id.as_str())
             || claims.alliance.as_deref() != Some(participant.alliance.as_str())
             || claims.robot_id.as_deref() != participant.robot_id.as_deref()
+            || claims.robot_revision != participant.robot_revision
+            || participant.robot_data.as_deref() != Some(claims.robot_data.as_str())
         {
             return Err("Ticket no longer matches the locked station and robot.".to_string());
         }
@@ -327,7 +317,7 @@ impl InputGate {
         self.rejected = self.rejected.saturating_add(1);
         self.rejected >= 24
     }
-    fn valid_input(&mut self, sequence: u64, values: [f32; 4]) -> bool {
+    fn valid_input(&mut self, sequence: u64, values: &[f32]) -> bool {
         let valid = values
             .iter()
             .all(|value| value.is_finite() && (-1.0..=1.0).contains(value))
@@ -769,6 +759,7 @@ async fn handle_socket(
     match_handle: crate::game::match_registry::MatchHandle,
     access: ConnectionAccess,
 ) {
+    let connection_id = uuid::Uuid::new_v4().to_string();
     if access == ConnectionAccess::Driver {
         let _ = match_handle
             .input_tx
@@ -777,18 +768,32 @@ async fn handle_socket(
                 name: claims.display_name,
                 team_name: claims.alliance.unwrap_or(claims.team_name),
                 slot_id: claims.slot_id,
+                connection_id: connection_id.clone(),
             })
             .await;
     }
     let mut state_rx = match_handle.state_tx.subscribe();
     let (mut sender, mut receiver) = socket.split();
+    let mut baseline = match_handle.reconnect_baseline();
+    for _ in 0..10 {
+        if baseline.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        baseline = match_handle.reconnect_baseline();
+    }
+    if let Some(baseline) = baseline
+        && sender.send(Message::Binary(baseline)).await.is_err()
+    {
+        return;
+    }
     let mut input_gate = InputGate::new();
     loop {
         tokio::select! {
             message = receiver.next() => match message {
                 Some(Ok(Message::Binary(bin))) => {
                     if access != ConnectionAccess::Driver { match_handle.report_input_rejection(&claims.sub, "role_denied"); if input_gate.rejected() { break; } continue; }
-                    if bin.len() == 25 && bin[0] == 1 {
+                    if matches!((bin.len(), bin[0]), (25, 1) | (29, 2)) {
                         let mut arr8 = [0u8; 8];
                         arr8.copy_from_slice(&bin[1..9]);
                         let sequence = u64::from_le_bytes(arr8);
@@ -806,29 +811,24 @@ async fn handle_socket(
                         arr4.copy_from_slice(&bin[21..25]);
                         let outtake_power = f32::from_le_bytes(arr4);
 
+                        let climb_power = if bin.len() == 29 {
+                            arr4.copy_from_slice(&bin[25..29]);
+                            f32::from_le_bytes(arr4)
+                        } else {
+                            0.0
+                        };
+
                         if !input_gate.allow() { match_handle.report_input_rejection(&claims.sub, "rate_limited"); if input_gate.rejected() { break; } continue; }
-                        if !input_gate.valid_input(sequence, [move_x, move_z, intake_power, outtake_power]) { match_handle.report_input_rejection(&claims.sub, "invalid_frame"); if input_gate.rejected() { break; } continue; }
-                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, intake_power, outtake_power, sequence }).await;
+                        if !input_gate.valid_input(sequence, &[move_x, move_z, intake_power, outtake_power, climb_power]) { match_handle.report_input_rejection(&claims.sub, "invalid_frame"); if input_gate.rejected() { break; } continue; }
+                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), connection_id: connection_id.clone(), move_x, move_z, intake_power, outtake_power, climb_power, sequence }).await;
                     } else { match_handle.report_input_rejection(&claims.sub, "malformed_frame"); if input_gate.malformed() { break; } }
                 }
                 Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
-                    Ok(ClientMessage::Input { sequence, move_x, move_z, intake_power, outtake_power }) => {
+                    Ok(ClientMessage::Input { sequence, move_x, move_z, intake_power, outtake_power, climb_power }) => {
                         if access != ConnectionAccess::Driver { match_handle.report_input_rejection(&claims.sub, "role_denied"); if input_gate.rejected() { break; } continue; }
                         if !input_gate.allow() { match_handle.report_input_rejection(&claims.sub, "rate_limited"); if input_gate.rejected() { break; } continue; }
-                        if !input_gate.valid_input(sequence, [move_x, move_z, intake_power, outtake_power]) { match_handle.report_input_rejection(&claims.sub, "invalid_frame"); if input_gate.rejected() { break; } continue; }
-                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), move_x, move_z, intake_power, outtake_power, sequence }).await;
-                    }
-                    Ok(ClientMessage::RobotSpecs { capacity, intake_rate_bps, outtake_rate_bps, outtake_velocity_mps, outtake_angle_deg, flywheel_width_m }) => {
-                        if access != ConnectionAccess::Driver || !input_gate.allow() { match_handle.report_input_rejection(&claims.sub, "role_or_rate_denied"); if input_gate.rejected() { break; } continue; }
-                        let _ = match_handle.input_tx.send(MatchInput::PlayerMech { user_id: claims.sub.clone(), mech: crate::game::sphere_runtime::MechSpec {
-                            capacity,
-                            intake_rate_bps,
-                            outtake_rate_bps,
-                            outtake_velocity_mps,
-                            outtake_angle_deg,
-                            flywheel_width_m,
-                            intake_surface_speed_mps: None,
-                        } }).await;
+                        if !input_gate.valid_input(sequence, &[move_x, move_z, intake_power, outtake_power, climb_power]) { match_handle.report_input_rejection(&claims.sub, "invalid_frame"); if input_gate.rejected() { break; } continue; }
+                        let _ = match_handle.input_tx.send(MatchInput::PlayerInput { user_id: claims.sub.clone(), connection_id: connection_id.clone(), move_x, move_z, intake_power, outtake_power, climb_power, sequence }).await;
                     }
                     Ok(ClientMessage::ContinuePractice) => {
                         if access != ConnectionAccess::Driver { if input_gate.rejected() { break; } continue; }
@@ -860,6 +860,7 @@ async fn handle_socket(
             .input_tx
             .send(MatchInput::PlayerLeave {
                 user_id: claims.sub,
+                connection_id: Some(connection_id),
             })
             .await;
     }

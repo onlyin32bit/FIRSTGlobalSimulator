@@ -11,12 +11,14 @@ export type LobbyField = {
 	>['fieldDefinition']['semanticAreas'];
 };
 
+const DEFAULT_ROBOT_ID = 'pack:starter-bot';
+
 export class LobbyController {
 	lobby = $state<MatchLobby | null>(null);
 	robots = $state<Robot[]>([]);
 	userId = $state('');
 	isAdmin = $state(false);
-	selectedRobotId = $state('');
+	selectedRobotId = $state(DEFAULT_ROBOT_ID);
 	working = $state<string | null>(null);
 	error = $state('');
 	field = $state<LobbyField | null>(null);
@@ -57,7 +59,7 @@ export class LobbyController {
 			this.userId = currentUser.user.id;
 			this.isAdmin = currentUser.user.role === 'admin';
 			this.robots = robots.robots;
-			this.selectedRobotId = robots.robots[0]?.id ?? '';
+			this.selectedRobotId = DEFAULT_ROBOT_ID;
 			if (assets.ui?.lobbyField && metadata.manifest.lobby) {
 				this.field = {
 					imageUrl: assets.ui.lobbyField,
@@ -92,10 +94,6 @@ export class LobbyController {
 
 	async claim(matchId: string, slotId: LobbySlotId) {
 		const driver = slotId.includes('driver');
-		if (driver && !this.selectedRobotId) {
-			this.error = 'Choose a robot before taking a driver station.';
-			return;
-		}
 		await this.run(slotId, async () =>
 			this.accept(
 				(

@@ -3,6 +3,11 @@ export type DriveInput = {
 	drive: number;
 };
 
+export type ReplayInput = {
+	input: DriveInput;
+	durationSeconds: number;
+};
+
 export type RobotPose = {
 	x: number;
 	y: number;
@@ -14,6 +19,7 @@ export type RobotPose = {
 };
 
 export type FieldCollider = {
+	id: string;
 	min: [number, number, number];
 	max: [number, number, number];
 	center: [number, number, number];
@@ -41,6 +47,60 @@ export type DriveParams = {
 };
 
 type V3 = [number, number, number];
+
+/** Static field colliders are authored in world space. Bucket their XZ bounds
+ * once so each prediction step only reaches nearby narrow-phase tests. */
+class FieldSpatialIndex {
+	private static readonly cellSizeM = 1;
+	private readonly cells = new Map<number, number[]>();
+	private readonly candidates: number[] = [];
+
+	constructor(private readonly colliders: readonly FieldCollider[]) {
+		colliders.forEach((collider, index) => {
+			const minX = Math.floor(collider.min[0] / FieldSpatialIndex.cellSizeM);
+			const maxX = Math.floor(collider.max[0] / FieldSpatialIndex.cellSizeM);
+			const minZ = Math.floor(collider.min[2] / FieldSpatialIndex.cellSizeM);
+			const maxZ = Math.floor(collider.max[2] / FieldSpatialIndex.cellSizeM);
+			for (let z = minZ; z <= maxZ; z += 1) {
+				for (let x = minX; x <= maxX; x += 1) {
+					const key = FieldSpatialIndex.key(x, z);
+					const cell = this.cells.get(key);
+					if (cell) cell.push(index);
+					else this.cells.set(key, [index]);
+				}
+			}
+		});
+	}
+
+	query(minX: number, maxX: number, minZ: number, maxZ: number): readonly number[] {
+		this.candidates.length = 0;
+		const startX = Math.floor(minX / FieldSpatialIndex.cellSizeM);
+		const endX = Math.floor(maxX / FieldSpatialIndex.cellSizeM);
+		const startZ = Math.floor(minZ / FieldSpatialIndex.cellSizeM);
+		const endZ = Math.floor(maxZ / FieldSpatialIndex.cellSizeM);
+		for (let z = startZ; z <= endZ; z += 1) {
+			for (let x = startX; x <= endX; x += 1) {
+				const cell = this.cells.get(FieldSpatialIndex.key(x, z));
+				if (cell) this.candidates.push(...cell);
+			}
+		}
+		// Keep the authored order: positional projection is iterative.
+		this.candidates.sort((left, right) => left - right);
+		let write = 0;
+		for (const index of this.candidates) {
+			if (write === 0 || this.candidates[write - 1] !== index) {
+				this.candidates[write] = index;
+				write += 1;
+			}
+		}
+		this.candidates.length = write;
+		return this.candidates;
+	}
+
+	private static key(x: number, z: number) {
+		return x * 65_536 + z;
+	}
+}
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -135,20 +195,33 @@ const robotFieldObbContact = (
 };
 
 /**
- * Push the robot out of any interior field collider it overlaps and zero the
- * velocity component driving into the surface. Mirrors the server's
- * `project_robot_field_colliders`: OBBs use SAT, the authored guard rails are
- * treated as AABBs pushed out along the smallest penetration.
+ * Prediction deliberately uses one conservative chassis OBB. The server owns
+ * the detailed robot mesh, brace and ball contacts; replaying every authored
+ * part locally makes input reconciliation too expensive to be responsive.
  */
-const projectFieldColliders = (p: RobotPose, params: DriveParams) => {
+const projectFieldColliders = (
+	p: RobotPose,
+	params: DriveParams,
+	fieldIndex: FieldSpatialIndex
+) => {
 	const halfX = params.widthM * 0.5;
 	const halfZ = params.lengthM * 0.5;
 	const halfY = params.heightM * 0.5;
 	const robotMinY = p.y - halfY;
 	const robotMaxY = p.y + halfY;
 
-	for (const collider of params.colliders) {
+	const [planarX, planarZ] = robotPlanarExtents(params.widthM, params.lengthM, p.yaw);
+	const candidates = fieldIndex.query(p.x - planarX, p.x + planarX, p.z - planarZ, p.z + planarZ);
+	for (const index of candidates) {
+		const collider = params.colliders[index];
 		if (robotMaxY <= collider.min[1] || robotMinY >= collider.max[1]) continue;
+		if (
+			p.x + planarX <= collider.min[0] ||
+			p.x - planarX >= collider.max[0] ||
+			p.z + planarZ <= collider.min[2] ||
+			p.z - planarZ >= collider.max[2]
+		)
+			continue;
 
 		if (collider.halfExtents.some((extent) => extent > 1.0e-6)) {
 			const contact = robotFieldObbContact([p.x, p.y, p.z], p.yaw, [halfX, halfY, halfZ], collider);
@@ -200,6 +273,29 @@ const projectFieldColliders = (p: RobotPose, params: DriveParams) => {
 	}
 };
 
+const projectBoundary = (p: RobotPose, params: DriveParams) => {
+	const [extentX, extentZ] = robotPlanarExtents(params.widthM, params.lengthM, p.yaw);
+	const minX = p.x - extentX;
+	const maxX = p.x + extentX;
+	const minZ = p.z - extentZ;
+	const maxZ = p.z + extentZ;
+
+	if (minX < params.boundaryMinX) {
+		p.x += params.boundaryMinX - minX;
+		if (p.vx < 0) p.vx = 0;
+	} else if (maxX > params.boundaryMaxX) {
+		p.x -= maxX - params.boundaryMaxX;
+		if (p.vx > 0) p.vx = 0;
+	}
+	if (minZ < params.boundaryMinZ) {
+		p.z += params.boundaryMinZ - minZ;
+		if (p.vz < 0) p.vz = 0;
+	} else if (maxZ > params.boundaryMaxZ) {
+		p.z -= maxZ - params.boundaryMaxZ;
+		if (p.vz > 0) p.vz = 0;
+	}
+};
+
 /**
  * Local reproduction of the server's `apply_player_drive` drivetrain model.
  * The server integrates the same impulse/turn logic on its authoritative
@@ -211,18 +307,63 @@ const projectFieldColliders = (p: RobotPose, params: DriveParams) => {
  */
 export class DrivePredictor {
 	private readonly params: DriveParams;
+	private readonly fieldIndex: FieldSpatialIndex;
+	private authoritative: RobotPose;
 	pose: RobotPose;
 
 	constructor(params: DriveParams, initial: RobotPose) {
 		this.params = params;
+		this.fieldIndex = new FieldSpatialIndex(params.colliders);
 		this.pose = { ...initial };
+		this.authoritative = { ...initial };
 	}
 
 	setPose(pose: RobotPose) {
 		this.pose = { ...pose };
+		this.authoritative = { ...pose };
+	}
+
+	reconcile(pose: RobotPose, replay: ReplayInput[] = []) {
+		const distance = Math.hypot(pose.x - this.pose.x, pose.z - this.pose.z);
+		this.setPose(pose);
+		for (const entry of replay) {
+			this.step(entry.input, entry.durationSeconds);
+		}
+		return distance;
 	}
 
 	step(input: DriveInput, dt: number) {
+		const frameDt = clamp(dt, 0, 0.05);
+		this.authoritative.x += this.authoritative.vx * frameDt;
+		this.authoritative.z += this.authoritative.vz * frameDt;
+		this.authoritative.yaw += this.authoritative.angularVelocityY * frameDt;
+		let remaining = frameDt;
+		while (remaining > 1e-6) {
+			const substep = Math.min(remaining, 1 / 60);
+			this.stepPlanar(input, substep);
+			remaining -= substep;
+		}
+
+		// The local model cannot reproduce Rapier's carpet contacts exactly.
+		// A damped target follows the latest server velocity and removes drift
+		// continuously instead of periodically snapping the rendered chassis.
+		const positionPull = 1 - Math.exp(-8 * frameDt);
+		const velocityPull = 1 - Math.exp(-12 * frameDt);
+		const yawDelta = Math.atan2(
+			Math.sin(this.authoritative.yaw - this.pose.yaw),
+			Math.cos(this.authoritative.yaw - this.pose.yaw)
+		);
+		this.pose.x += (this.authoritative.x - this.pose.x) * positionPull;
+		this.pose.z += (this.authoritative.z - this.pose.z) * positionPull;
+		this.pose.y = this.authoritative.y;
+		this.pose.yaw += yawDelta * positionPull;
+		this.pose.vx += (this.authoritative.vx - this.pose.vx) * velocityPull;
+		this.pose.vz += (this.authoritative.vz - this.pose.vz) * velocityPull;
+		this.pose.angularVelocityY +=
+			(this.authoritative.angularVelocityY - this.pose.angularVelocityY) * velocityPull;
+	}
+
+	private stepPlanar(input: DriveInput, stepDt: number) {
 		const {
 			maxSpeedMps,
 			maxAccelerationMps2,
@@ -234,7 +375,6 @@ export class DrivePredictor {
 			trackWidthM
 		} = this.params;
 		const p = this.pose;
-		const stepDt = clamp(dt, 0, 0.05);
 		const drive = applyControlDeadband(input.drive);
 		const turn = applyControlDeadband(input.turn);
 
@@ -311,28 +451,8 @@ export class DrivePredictor {
 		// The server never lets the chassis cross the perimeter: clamp to the
 		// rotated-footprint clearance and cancel the velocity into the wall so
 		// the predicted pose stays on the playable carpet and slides along it.
-		const [robotXExtent, robotZExtent] = robotPlanarExtents(
-			this.params.widthM,
-			this.params.lengthM,
-			p.yaw
-		);
-		const minX = this.params.boundaryMinX + robotXExtent;
-		const maxX = this.params.boundaryMaxX - robotXExtent;
-		const minZ = this.params.boundaryMinZ + robotZExtent;
-		const maxZ = this.params.boundaryMaxZ - robotZExtent;
-		if (p.x <= minX + 1.0e-6 || p.x >= maxX - 1.0e-6) {
-			const normal = p.x <= minX + 1.0e-6 ? 1 : -1;
-			const intoSurface = p.vx * normal;
-			if (intoSurface < 0) p.vx -= normal * intoSurface;
-			p.x = clamp(p.x, minX, maxX);
-		}
-		if (p.z <= minZ + 1.0e-6 || p.z >= maxZ - 1.0e-6) {
-			const normal = p.z <= minZ + 1.0e-6 ? 1 : -1;
-			const intoSurface = p.vz * normal;
-			if (intoSurface < 0) p.vz -= normal * intoSurface;
-			p.z = clamp(p.z, minZ, maxZ);
-		}
+		projectBoundary(p, this.params);
 
-		projectFieldColliders(p, this.params);
+		projectFieldColliders(p, this.params, this.fieldIndex);
 	}
 }

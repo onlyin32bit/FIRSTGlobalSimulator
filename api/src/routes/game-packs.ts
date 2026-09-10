@@ -5,6 +5,12 @@ import type { Bindings } from '../types'
 
 const PACK_ID = 'fgc-2026'
 const ALLOWED_ASSETS = new Set(['field.glb', 'field.physics.json', 'field.semantics.json', 'scoreboard.html', 'topdown.webp'])
+// Long rails are excluded from ordinary client prediction to avoid mirroring
+// large field shells. These two are driveable gameplay constraints, though.
+const CLIENT_PREDICTION_COLLIDERS = new Set(['Cylinder.002', 'Cylinder.003'])
+
+type RobotAssetKind = 'visual' | 'lod1' | 'physics' | 'semantics' | 'rollers'
+const ROBOT_ASSET_KINDS: RobotAssetKind[] = ['visual', 'lod1', 'physics', 'semantics', 'rollers']
 
 type Manifest = {
   id: string
@@ -30,6 +36,22 @@ type Manifest = {
   objects: unknown[]
   phases: unknown[]
   scripts: Record<string, string>
+  robots?: Record<string, {
+    name: string
+    visual: string
+    lod1?: string
+    physics?: string
+    semantics?: string
+    behavior?: string
+    rollers?: string
+    climber?: {
+      wheelParts: string[]
+      supportParts?: string[]
+      grooveRootRadiusM: number
+      grooveOuterRadiusM: number
+      maxClimbSpeedMps: number
+    }
+  }>
 }
 
 type Bounds = {
@@ -48,6 +70,34 @@ type PackContext = Context<{ Bindings: Bindings }>
 
 function packPath(path: string) {
   return `/${PACK_ID}/${path.replace(/^\/+/, '')}`
+}
+
+function isPackRelativePath(path: string) {
+  return !path.startsWith('/') && path.split('/').every((segment) => segment.length > 0 && segment !== '.' && segment !== '..')
+}
+
+function robotAssetPaths(robot: NonNullable<Manifest['robots']>[string]) {
+  return Object.fromEntries(
+    ROBOT_ASSET_KINDS.flatMap((kind) => {
+      const path = robot[kind]
+      return typeof path === 'string' && isPackRelativePath(path) ? [[kind, path]] : []
+    }),
+  ) as Partial<Record<RobotAssetKind, string>>
+}
+
+function robotAssetUrls(robotId: string, robot: NonNullable<Manifest['robots']>[string]) {
+  const prefix = `/api/game-packs/${PACK_ID}/robots/${encodeURIComponent(robotId)}/assets`
+  const paths = robotAssetPaths(robot)
+  return {
+    id: robotId,
+    name: robot.name,
+    visual: paths.visual ? `${prefix}/visual` : undefined,
+    lod1: paths.lod1 ? `${prefix}/lod1` : undefined,
+    physics: paths.physics ? `${prefix}/physics` : undefined,
+    semantics: paths.semantics ? `${prefix}/semantics` : undefined,
+    rollers: paths.rollers ? `${prefix}/rollers` : undefined,
+    climber: robot.climber,
+  }
 }
 
 async function getPackAsset(c: PackContext, path: string) {
@@ -147,7 +197,11 @@ function buildPublicFieldDefinition(physics: any, semantics: any, manifest: any)
   const authored = physicsNodes.map((node: any) => orientedBoundsForNode(node, physics)).filter(Boolean) as OrientedBounds[]
   const riser = authored.find((bounds) => bounds.id === 'RISER.001')
   const colliders = authored
-    .filter(({ id, min, max }) => id !== 'GUARD_RAIL.001' && id !== 'RISER.001' && max[0] - min[0] <= 2.5 && max[2] - min[2] <= 2.5)
+    .filter(({ id, min, max }) =>
+      id !== 'GUARD_RAIL.001' &&
+      id !== 'RISER.001' &&
+      (CLIENT_PREDICTION_COLLIDERS.has(id) || (max[0] - min[0] <= 2.5 && max[2] - min[2] <= 2.5)),
+    )
     .map(extrudeThinBounds)
   const anchors: Record<string, [number, number, number]> = {}
   const semanticAreas: Record<string, Bounds> = {}
@@ -227,10 +281,25 @@ app.get('/:id/runtime', async (c) => {
   if (!server || server.disabledAt) return jsonError(c, 401, 'AUTH_FAILED', 'A valid game server key is required for runtime pack data.')
   try {
     const { manifest, fieldPhysics, fieldSemantics } = await loadPack(c)
-    const scripts = Object.fromEntries(
-      await Promise.all(Object.entries(manifest.scripts).map(async ([name, path]) => [path, await readPackText(c, path)] as const)),
-    )
-    return jsonSuccess(c, { manifest, fieldPhysics, fieldSemantics, scripts })
+    const [scripts, robots] = await Promise.all([
+      Promise.all(Object.entries(manifest.scripts).map(async ([, path]) => [path, await readPackText(c, path)] as const)),
+      Promise.all(Object.entries(manifest.robots ?? {}).map(async ([id, robot]) => {
+        const paths = robotAssetPaths(robot)
+        if (!paths.physics || !paths.semantics) return [id, null] as const
+        const [physics, semantics] = await Promise.all([
+          readPackJson<unknown>(c, paths.physics),
+          readPackJson<unknown>(c, paths.semantics),
+        ])
+        return [id, { physics, semantics }] as const
+      })),
+    ])
+    return jsonSuccess(c, {
+      manifest,
+      fieldPhysics,
+      fieldSemantics,
+      scripts: Object.fromEntries(scripts),
+      robots: Object.fromEntries(robots.filter((entry): entry is readonly [string, { physics: unknown; semantics: unknown }] => entry[1] !== null)),
+    })
   } catch (error) {
     return jsonError(c, 503, 'INTERNAL_ERROR', error instanceof Error ? error.message : 'Game pack runtime snapshot is unavailable.')
   }
@@ -271,6 +340,42 @@ app.get('/:id/assets/:asset', async (c) => {
     return new Response(response.body, { status: response.status, headers })
   } catch {
     return c.text('Game pack asset service is unavailable.', 503)
+  }
+})
+
+app.get('/:id/robots/:robot/assets', async (c) => {
+  if (c.req.param('id') !== PACK_ID) return jsonError(c, 404, 'VALIDATION_ERROR', 'Game pack not found.')
+  try {
+    const manifest = await readPackJson<Manifest>(c, 'manifest.json')
+    const robotId = c.req.param('robot')
+    const robot = manifest.robots?.[robotId]
+    if (!robot || !robotAssetPaths(robot).visual) {
+      return jsonError(c, 404, 'VALIDATION_ERROR', 'Robot asset set not found.')
+    }
+    return jsonSuccess(c, robotAssetUrls(robotId, robot))
+  } catch (error) {
+    return jsonError(c, 503, 'INTERNAL_ERROR', error instanceof Error ? error.message : 'Robot assets are unavailable.')
+  }
+})
+
+app.get('/:id/robots/:robot/assets/:asset', async (c) => {
+  if (c.req.param('id') !== PACK_ID) return c.text('Game pack not found.', 404)
+  const asset = c.req.param('asset') as RobotAssetKind
+  if (!ROBOT_ASSET_KINDS.includes(asset)) return c.text('Unknown robot asset.', 404)
+
+  try {
+    const manifest = await readPackJson<Manifest>(c, 'manifest.json')
+    const robot = manifest.robots?.[c.req.param('robot')]
+    const path = robot && robotAssetPaths(robot)[asset]
+    if (!path) return c.text('Robot asset not found.', 404)
+
+    const response = await getPackAsset(c, path)
+    if (!response.ok) return c.text('Robot asset not found.', response.status === 404 ? 404 : 503)
+    const headers = new Headers(response.headers)
+    headers.set('cache-control', 'public, max-age=300')
+    return new Response(response.body, { status: response.status, headers })
+  } catch {
+    return c.text('Robot asset service is unavailable.', 503)
   }
 })
 

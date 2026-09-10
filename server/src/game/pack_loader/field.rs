@@ -23,9 +23,12 @@ pub(super) fn load_field_definition(
             // The guard rail and riser provide the boundary/floor. Their
             // visual bounds must not become solid cuboids. Likewise, broad
             // cross-field assemblies are render geometry, not local blocks.
+            let brace = matches!(
+                id.as_str(),
+                "Cylinder" | "Cylinder.001" | "Cylinder.002" | "Cylinder.003"
+            );
             !matches!(id.as_str(), "GUARD_RAIL.001" | "RISER.001")
-                && max[0] - min[0] <= 2.5
-                && max[2] - min[2] <= 2.5
+                && (brace || (max[0] - min[0] <= 2.5 && max[2] - min[2] <= 2.5))
         })
         .map(|(id, _min, _max, center, mut half_extents, axes)| {
             // Rapier can contact a zero-thickness triangle mesh, but the
@@ -96,7 +99,6 @@ pub(super) fn load_field_definition(
                 requires_robot_outtake: target.requires_robot_outtake,
                 min,
                 max,
-                retention: target.retention.clone(),
             })
         })
         .collect();

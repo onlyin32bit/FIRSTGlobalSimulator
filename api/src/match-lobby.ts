@@ -13,7 +13,10 @@ export type MatchVisibility = 'private' | 'unlisted' | 'public'
 
 export type LobbyOccupant = { userId: string; name: string; teamName: string | null; robotId: string | null; ready: boolean }
 export type LobbySlot = { id: LobbySlotId; alliance: LobbyAlliance; role: LobbyRole; label: string; occupant: LobbyOccupant | null }
-export type BootstrapParticipant = { userId: string; name: string; teamName: string | null; role: LobbyRole; slotId: LobbySlotId; alliance: LobbyAlliance; robotId: string | null }
+export type BootstrapParticipant = {
+  userId: string; name: string; teamName: string | null; role: LobbyRole; slotId: LobbySlotId; alliance: LobbyAlliance
+  robotId: string | null; robotRevision: number | null; robotData: string | null
+}
 export type MatchBootstrap = {
   matchId: string; hostId: string; assignedServerId: string; gamePackId: string; gamePackVersion: string
   matchSeed: number; startsAt: number; durationSeconds: number; maxPlayers: number
@@ -131,17 +134,21 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
     return state
   }
 
-  /** Locks the roster once. The Rust host receives this immutable contract. */
-  async lockBootstrap(input: Omit<MatchBootstrap, 'matchId' | 'hostId' | 'participants'>): Promise<MatchBootstrap> {
+  /** Locks the roster and each selected robot revision once. */
+  async lockBootstrap(input: Omit<MatchBootstrap, 'matchId' | 'hostId'>): Promise<MatchBootstrap> {
     const state = this.requireLobby()
     if (state.bootstrap) return state.bootstrap
     if (state.status !== 'STARTING' && state.status !== 'IN_PROGRESS') throw new Error('Lobby is not ready to lock.')
-    const participants = state.slots.flatMap((slot) => slot.occupant ? [{
+    const roster = state.slots.flatMap((slot) => slot.occupant ? [{
       userId: slot.occupant.userId, name: slot.occupant.name, teamName: slot.occupant.teamName,
       role: slot.role, slotId: slot.id, alliance: slot.alliance, robotId: slot.occupant.robotId
     }] : [])
-    if (participants.length > input.maxPlayers) throw new Error('The roster exceeds the match player limit.')
-    state.bootstrap = { ...input, matchId: state.matchId, hostId: state.hostId, participants }
+    if (roster.length > input.maxPlayers) throw new Error('The roster exceeds the match player limit.')
+    if (input.participants.length !== roster.length || input.participants.some((participant, index) => {
+      const slot = roster[index]
+      return !slot || participant.userId !== slot.userId || participant.role !== slot.role || participant.slotId !== slot.slotId || participant.alliance !== slot.alliance || participant.robotId !== slot.robotId
+    })) throw new Error('The robot revision snapshot does not match the locked roster.')
+    state.bootstrap = { ...input, matchId: state.matchId, hostId: state.hostId }
     state.status = 'IN_PROGRESS'
     state.error = null
     this.write(state)
@@ -173,14 +180,14 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
   }
 
   /** Admin-start gets a real locked test driver, never a synthetic ticket. */
-  async assignAdminDriver(user: LobbyUser): Promise<LobbyState> {
+  async assignAdminDriver(user: LobbyUser, robotId: string): Promise<LobbyState> {
     const state = this.requireLobby()
     this.assertMutable(state)
     const existing = state.slots.find((slot) => slot.occupant?.userId === user.userId)
     if (existing) return state
     const target = state.slots.find((slot) => slot.id === 'red-driver-1')
     if (!target || target.occupant) throw new Error('The admin test station is unavailable.')
-    target.occupant = { ...user, robotId: null, ready: true }
+    target.occupant = { ...user, robotId, ready: true }
     state.error = null
     this.write(state)
     return state

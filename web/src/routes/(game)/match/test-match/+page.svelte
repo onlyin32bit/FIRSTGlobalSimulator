@@ -3,13 +3,16 @@
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { page } from '$app/state';
 	import { Canvas, T } from '@threlte/core';
-	import { Grid, OrbitControls } from '@threlte/extras';
-	import { BasicShadowMap, WebGLRenderer } from 'three';
+	import { Grid } from '@threlte/extras';
+	import { WebGLRenderer } from 'three';
 	import { Button } from '$lib/components/ui/button';
 	import { ApiError, api } from '$lib/api';
 	import { loadPreferences, type UserPreferences } from '$lib/features/settings/preferences.svelte';
 	import RobotFollowCamera from './RobotFollowCamera.svelte';
+	import OverviewCamera from './OverviewCamera.svelte';
+	import FlyCamera from './FlyCamera.svelte';
 	import RobotModel from './RobotModel.svelte';
+	import type { RobotRollerSettings } from './StarterBotModel.svelte';
 	import PackField from './PackField.svelte';
 	import FieldBoundsDebug from './FieldBoundsDebug.svelte';
 	import ScriptedObjects from './ScriptedObjects.svelte';
@@ -18,15 +21,19 @@
 	import MatchOverview from './MatchOverview.svelte';
 	import {
 		decodeMatchSnapshot,
+		resetMatchSnapshotDecoder,
 		type MatchPhysics as PhysicsModel,
-		type MatchPlayer as Player
+		type MatchPlayer as Player,
+		type TransferDebugEntry
 	} from './match-protocol';
+	import TransferDebugHUD from './TransferDebugHUD.svelte';
 	import {
 		DrivePredictor,
 		type DriveParams,
 		type FieldCollider,
 		type RobotPose
 	} from './prediction';
+	import { parseRobotColliders, type AssimpScene } from './robot-collision';
 	const activeMatchId = $derived(page.params.matchId ?? '');
 
 	type ObjectFrame = {
@@ -34,6 +41,8 @@
 		positions: Float32Array;
 		radius: number;
 		color: string;
+		ballDebug: Uint8Array;
+		ballContacts: string[][];
 	};
 	type PerformanceWithMemory = Performance & {
 		memory?: {
@@ -48,14 +57,22 @@
 		objectId: 'object',
 		positions: new Float32Array(),
 		radius: 0.05,
-		color: '#f97316'
+		color: '#f97316',
+		ballDebug: new Uint8Array(),
+		ballContacts: []
 	});
 	let renderedObjectFrame = $state.raw<ObjectFrame>({
 		objectId: 'object',
 		positions: new Float32Array(),
 		radius: 0.05,
-		color: '#f97316'
+		color: '#f97316',
+		ballDebug: new Uint8Array(),
+		ballContacts: []
 	});
+	let prevSnapshotPositions = new Float32Array();
+	let currSnapshotPositions = new Float32Array();
+	let lastSnapshotTimestamp = 0;
+	let snapshotDeltaSeconds = 1 / 60;
 	let physics = $state.raw<PhysicsModel>({
 		ballMaterial: 'closed-cell polyurethane foam',
 		ballDiameterM: 0.1,
@@ -70,11 +87,11 @@
 		robotWidthM: 0.5,
 		robotHeightM: 0.5,
 		robotLengthM: 0.5,
-		robotMaxSpeedMps: 4,
-		robotMaxAccelerationMps2: 3,
-		robotMaxDecelerationMps2: 4,
-		robotMaxTurnRateRadps: 2.5,
-		robotMaxAngularAccelerationRadps2: 6,
+		robotMaxSpeedMps: 2.8,
+		robotMaxAccelerationMps2: 3.5,
+		robotMaxDecelerationMps2: 5.0,
+		robotMaxTurnRateRadps: 7.0,
+		robotMaxAngularAccelerationRadps2: 16.0,
 		robotLateralGripMps2: 6,
 		robotTractionFriction: 0.85,
 		robotTrackWidthM: 0.4,
@@ -107,23 +124,13 @@
 		maxBrakeForceN: 200,
 		storageCapacity: 40,
 		intakeRateBps: 6,
-		outtakeRateBps: 3,
+		outtakeRateBps: 1,
 		outtakeVelocityMps: 8,
 		outtakeAngleDeg: 35,
 		flywheelWidthM: 0.35,
 		outtakeForwardOffsetM: 0,
 		outtakeHeightM: 0.55
 	});
-	let robotSpecs = $state({
-		capacity: 40,
-		intake_rate_bps: 6,
-		outtake_rate_bps: 3,
-		outtake_velocity_mps: 8,
-		outtake_angle_deg: 35,
-		flywheel_width_m: 0.35
-	});
-	let robotSpecsOpen = $state(false);
-	let robotSpecsTimer: number | undefined;
 	let status = $state('Connecting…');
 	let error = $state('');
 	let localId = $state('');
@@ -131,10 +138,45 @@
 	let predictor = $state.raw<DrivePredictor | undefined>(undefined);
 	let predictionErrorM = $state(0);
 	let sequence = 0;
+	type PendingDriveInput = {
+		sequence: number;
+		drive: number;
+		turn: number;
+		sentAt: number;
+	};
+	const MAX_REPLAY_WINDOW_MS = 350;
+	const MAX_PENDING_DRIVE_INPUTS = 24;
+	let pendingDriveInputs = $state.raw<PendingDriveInput[]>([]);
+	let lastAcknowledgedInputSequence = 0;
+	let awaitingReconnectBaseline = true;
 	let pingNonce = 0;
 	let pingMs = $state<number | null>(null);
 	let packVersion = $state('Loading pack…');
-	let fieldAssets = $state<{ visual: string; physics: string; semantics: string } | null>(null);
+	let fieldAssets = $state<{
+		visual: string;
+		physics: string;
+		semantics: string;
+		ui?: { scoreboard: string; lobbyField: string };
+	} | null>(null);
+	let starterBotVisual = $state<string | null>(null);
+	let starterBotDetailVisual = $state<string | null>(null);
+	let starterBotPhysics = $state<string | null>(null);
+	let starterBotSemantics = $state<string | null>(null);
+	let starterBotRollers = $state<RobotRollerSettings | null>(null);
+	let starterBotClimber = $state<{
+		wheelParts: string[];
+		grooveRootRadiusM: number;
+		grooveOuterRadiusM: number;
+		contactSkinM: number;
+	} | null>(null);
+	let starterBotColliders = $state.raw<FieldCollider[]>([]);
+	type RobotDebugSummary = {
+		colliders: string[];
+		collisionCount: number;
+		semantics: string[];
+		error?: string;
+	};
+	let robotDebugSummary = $state<RobotDebugSummary | null>(null);
 	type FieldDefinition = {
 		colliders: Array<{
 			id: string;
@@ -155,7 +197,15 @@
 	};
 	let fieldDefinition = $state<FieldDefinition | null>(null);
 	let fieldDebugOpen = $state(false);
+	let robotDebugOpen = $state(false);
+	let transferDebugOpen = $state(false);
+	let predictedBraceColliders = $derived(
+		(fieldDefinition?.colliders ?? [])
+			.map((collider) => collider.id)
+			.filter((id) => id === 'Cylinder.002' || id === 'Cylinder.003')
+	);
 	let semanticEvents = $state<string[]>([]);
+	let transferDebug = $state<TransferDebugEntry[]>([]);
 	let activeTriggerIds = $derived(
 		new Set(
 			semanticEvents
@@ -176,10 +226,23 @@
 	let inputTurn = $state(0);
 	let inputIntake = $state(0);
 	let inputOuttake = $state(0);
-	let cameraMode = $state<'overview' | 'robot'>('overview');
+	let inputClimb = $state(0);
+	type CameraMode = 'overview' | 'fly' | 'robot';
+	const cameraModes: CameraMode[] = ['overview', 'fly', 'robot'];
+	let cameraMode = $state<CameraMode>('overview');
 	let cameraDirection = $state<'north' | 'south'>('north');
 	let robotCameraDistance = $state(8);
-	let cameraFov = $state(50);
+	let flyCameraLocked = $state(false);
+	let overviewCameraFov = $state(50);
+	let flyCameraFov = $state(65);
+	let robotCameraFov = $state(50);
+	let activeCameraFov = $derived(
+		cameraMode === 'overview'
+			? overviewCameraFov
+			: cameraMode === 'fly'
+				? flyCameraFov
+				: robotCameraFov
+	);
 	let userPreferences = $state<UserPreferences | null>(null);
 	let rightStickWasPressed = false;
 	let clientFps = $state(0);
@@ -254,6 +317,7 @@
 		's',
 		'd',
 		'e',
+		'q',
 		'arrowup',
 		'arrowdown',
 		'arrowleft',
@@ -262,16 +326,14 @@
 	let renderer: WebGLRenderer | undefined;
 	const createRenderer = (canvas: HTMLCanvasElement) => {
 		renderer = new WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-		// One low-cost shadow map is enough to anchor the robots and balls to
-		// the field. BasicShadowMap avoids the extra filtering passes of PCF.
-		renderer.shadowMap.enabled = true;
-		renderer.shadowMap.type = BasicShadowMap;
+		renderer.shadowMap.enabled = false;
 		return renderer;
 	};
 	let lastSentDrive = Number.NaN;
 	let lastSentTurn = Number.NaN;
 	let lastSentIntake = Number.NaN;
 	let lastSentOuttake = Number.NaN;
+	let lastSentClimb = Number.NaN;
 	let lastInputSentAt = 0;
 	const highIsBadTone = (value: number, warning: number, critical: number) =>
 		value >= critical ? 'text-fuchsia-300' : value >= warning ? 'text-amber-300' : 'text-cyan-300';
@@ -281,10 +343,6 @@
 		value >= critical ? '×' : value >= warning ? '!' : '·';
 	const lowIsBadMarker = (value: number, warning: number, critical: number) =>
 		value < critical ? '×' : value < warning ? '!' : '·';
-	const formatMatchClock = (seconds: number) => {
-		const wholeSeconds = Math.max(0, Math.ceil(seconds - 0.001));
-		return `${Math.floor(wholeSeconds / 60)}:${String(wholeSeconds % 60).padStart(2, '0')}`;
-	};
 	const redRoster = $derived(players.filter((player) => player.teamName === 'red').slice(0, 3));
 	const blueRoster = $derived(players.filter((player) => player.teamName === 'blue').slice(0, 3));
 	const countdownVisible = $derived(!matchRunning && preMatchRemainingSeconds > 0.05);
@@ -359,8 +417,15 @@
 				drive: inputDrive,
 				turn: inputTurn,
 				intake: inputIntake,
+				climb: inputClimb,
 				gamepad: gamepadConnected ? gamepadName : null,
-				camera: `${cameraMode}${cameraMode === 'robot' ? `/${cameraDirection}/${robotCameraDistance.toFixed(1)}m` : ''}`
+				camera: `${cameraMode}${
+					cameraMode === 'robot'
+						? `/${cameraDirection}/${robotCameraDistance.toFixed(1)}m`
+						: cameraMode === 'fly' && flyCameraLocked
+							? '/locked'
+							: ''
+				}`
 			},
 			packVersion,
 			physics,
@@ -406,6 +471,24 @@
 		gamepadName = gamepad?.id ?? 'No gamepad';
 	}
 
+	function cycleCamera() {
+		const index = cameraModes.indexOf(cameraMode);
+		cameraMode = cameraModes[(index + 1) % cameraModes.length]!;
+	}
+
+	function toggleFlyCameraLock() {
+		flyCameraLocked = !flyCameraLocked;
+		pressed.clear();
+		sendInput(true);
+	}
+
+	function setActiveCameraFov(value: number) {
+		const fov = Math.max(30, Math.min(100, value));
+		if (cameraMode === 'overview') overviewCameraFov = fov;
+		else if (cameraMode === 'fly') flyCameraFov = fov;
+		else robotCameraFov = fov;
+	}
+
 	function sampleInput() {
 		const keyboardTurn =
 			Number(pressed.has('d') || pressed.has('arrowright')) -
@@ -419,9 +502,10 @@
 		let gamepadTurn = 0;
 		let gamepadIntake = 0;
 		let gamepadOuttake = 0;
+		let gamepadClimb = 0;
 		if (gamepad) {
 			const controls = userPreferences?.controls;
-			const driveMode = controls?.driveMode ?? 'arcade-left';
+			const driveMode = controls?.driveMode ?? 'split-arcade';
 			// The predictor and game host apply the same scaled deadband. Keep the
 			// raw axis here so every client gets identical neutral behavior.
 			const leftY = gamepad.axes[1] ?? 0;
@@ -442,6 +526,7 @@
 			}
 			gamepadIntake = gamepad.buttons[controls?.intakeButton ?? 4]?.value ?? 0;
 			gamepadOuttake = gamepad.buttons[controls?.outtakeButton ?? 5]?.value ?? 0;
+			gamepadClimb = gamepad.buttons[controls?.climbButton ?? 3]?.value ?? 0;
 
 			const rightStickPressed = gamepad.buttons[11]?.pressed ?? false;
 			if (rightStickPressed && !rightStickWasPressed && cameraMode === 'robot') {
@@ -455,13 +540,25 @@
 				gamepadTurn = 0;
 			}
 		} else rightStickWasPressed = false;
+		if (cameraMode === 'fly' && !flyCameraLocked) {
+			return {
+				drive: 0,
+				turn: 0,
+				intake: 0,
+				outtake: 0,
+				climb: 0,
+				source: 'keyboard' as const
+			};
+		}
 
 		const keyboardActive = keyboardDrive !== 0 || keyboardTurn !== 0;
+		const outtakeVal = pressed.has('e') ? 1 : gamepadOuttake;
 		return {
 			drive: keyboardActive ? keyboardDrive : gamepadDrive,
 			turn: keyboardActive ? keyboardTurn : gamepadTurn,
-			intake: pressed.has(' ') ? 1 : gamepadIntake,
-			outtake: pressed.has('e') ? 1 : gamepadOuttake,
+			intake: outtakeVal > 0 ? outtakeVal : pressed.has(' ') ? 1 : gamepadIntake,
+			outtake: outtakeVal,
+			climb: pressed.has('q') ? 1 : gamepadClimb,
 			source: (keyboardActive ? 'keyboard' : gamepad ? 'gamepad' : 'keyboard') as
 				'keyboard' | 'gamepad'
 		};
@@ -474,7 +571,8 @@
 			Math.abs(input.drive - lastSentDrive) > 0.005 ||
 			Math.abs(input.turn - lastSentTurn) > 0.005 ||
 			Math.abs(input.intake - lastSentIntake) > 0.005 ||
-			Math.abs(input.outtake - lastSentOuttake) > 0.005;
+			Math.abs(input.outtake - lastSentOuttake) > 0.005 ||
+			Math.abs(input.climb - lastSentClimb) > 0.005;
 		if (!force && !changed && now - lastInputSentAt < 250) return;
 
 		controlSource = input.source;
@@ -482,23 +580,75 @@
 		inputTurn = input.turn;
 		inputIntake = input.intake;
 		inputOuttake = input.outtake;
+		inputClimb = input.climb;
 		lastSentDrive = input.drive;
 		lastSentTurn = input.turn;
 		lastSentIntake = input.intake;
 		lastSentOuttake = input.outtake;
+		lastSentClimb = input.climb;
 		lastInputSentAt = now;
-		const buffer = new ArrayBuffer(25);
+		const buffer = new ArrayBuffer(29);
 		const view = new DataView(buffer);
-		view.setUint8(0, 1);
-		view.setBigUint64(1, BigInt(++sequence), true);
+		view.setUint8(0, 2);
+		const inputSequence = ++sequence;
+		const replayCutoff = now - MAX_REPLAY_WINDOW_MS;
+		pendingDriveInputs = [
+			...pendingDriveInputs,
+			{ sequence: inputSequence, drive: input.drive, turn: input.turn, sentAt: now }
+		]
+			.filter((entry) => entry.sentAt >= replayCutoff)
+			.slice(-MAX_PENDING_DRIVE_INPUTS);
+		view.setBigUint64(1, BigInt(inputSequence), true);
 		view.setFloat32(9, input.turn, true);
 		view.setFloat32(13, input.drive, true);
 		view.setFloat32(17, input.intake, true);
 		view.setFloat32(21, input.outtake, true);
+		view.setFloat32(25, input.climb, true);
 		socket.send(buffer);
 	}
 	function sendInput(force = false) {
 		sendInputFrom(sampleInput(), force);
+	}
+	async function loadRobotDebugSummary(physicsUrl: string | null, semanticsUrl: string | null) {
+		if (!physicsUrl || !semanticsUrl) {
+			robotDebugSummary = {
+				colliders: [],
+				collisionCount: 0,
+				semantics: [],
+				error: 'The selected robot did not publish physics and semantic assets.'
+			};
+			return;
+		}
+		try {
+			const [physicsAsset, semanticAsset] = await Promise.all([
+				fetch(physicsUrl, { cache: 'no-store' }).then((response) => {
+					if (!response.ok) throw new Error(`physics asset returned ${response.status}`);
+					return response.json() as Promise<AssimpScene>;
+				}),
+				fetch(semanticsUrl, { cache: 'no-store' }).then((response) => {
+					if (!response.ok) throw new Error(`semantics asset returned ${response.status}`);
+					return response.json() as Promise<{ rootnode?: { children?: Array<{ name?: string }> } }>;
+				})
+			]);
+			starterBotColliders = parseRobotColliders(
+				physicsAsset,
+				new Set(starterBotClimber?.wheelParts ?? ['ClimbWheel1', 'ClimbWheel2'])
+			);
+			robotDebugSummary = {
+				colliders: starterBotColliders.map((c) => c.id),
+				collisionCount: starterBotColliders.length,
+				semantics: (semanticAsset.rootnode?.children ?? []).flatMap((node) =>
+					node.name ? [node.name] : []
+				)
+			};
+		} catch (cause) {
+			robotDebugSummary = {
+				colliders: [],
+				collisionCount: 0,
+				semantics: [],
+				error: cause instanceof Error ? cause.message : 'Unable to load robot debug assets.'
+			};
+		}
 	}
 	function sendPing() {
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -514,28 +664,6 @@
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
 		socket.send(JSON.stringify({ type: 'end_practice' }));
 	}
-	function sendRobotSpecs() {
-		if (!socket || socket.readyState !== WebSocket.OPEN) return;
-		socket.send(
-			JSON.stringify({
-				type: 'robot_specs',
-				capacity: robotSpecs.capacity,
-				intake_rate_bps: robotSpecs.intake_rate_bps,
-				outtake_rate_bps: robotSpecs.outtake_rate_bps,
-				outtake_velocity_mps: robotSpecs.outtake_velocity_mps,
-				outtake_angle_deg: robotSpecs.outtake_angle_deg,
-				flywheel_width_m: robotSpecs.flywheel_width_m
-			})
-		);
-	}
-	function scheduleRobotSpecs() {
-		if (robotSpecsTimer !== undefined) window.clearTimeout(robotSpecsTimer);
-		robotSpecsTimer = window.setTimeout(() => {
-			robotSpecsTimer = undefined;
-			sendRobotSpecs();
-		}, 180);
-	}
-
 	function driveParams(): DriveParams | null {
 		if (!physicsLoaded || !fieldDefinition) return null;
 		const boundary = fieldDefinition.boundary;
@@ -561,6 +689,7 @@
 			boundaryMinZ: boundary.min[2],
 			boundaryMaxZ: boundary.max[2],
 			colliders: fieldDefinition.colliders.map((collider) => ({
+				id: collider.id,
 				min: collider.min,
 				max: collider.max,
 				center: collider.center ?? [0, 0, 0],
@@ -582,6 +711,41 @@
 		};
 	}
 
+	function blendRotation(current: Player, target: Player, blend: number) {
+		const dot =
+			current.rotationX * target.rotationX +
+			current.rotationY * target.rotationY +
+			current.rotationZ * target.rotationZ +
+			current.rotationW * target.rotationW;
+		const sign = dot < 0 ? -1 : 1;
+		const x = current.rotationX + (target.rotationX * sign - current.rotationX) * blend;
+		const y = current.rotationY + (target.rotationY * sign - current.rotationY) * blend;
+		const z = current.rotationZ + (target.rotationZ * sign - current.rotationZ) * blend;
+		const w = current.rotationW + (target.rotationW * sign - current.rotationW) * blend;
+		const inverseLength = 1 / Math.max(Math.hypot(x, y, z, w), 1e-6);
+		return {
+			rotationX: x * inverseLength,
+			rotationY: y * inverseLength,
+			rotationZ: z * inverseLength,
+			rotationW: w * inverseLength
+		};
+	}
+
+	function withPredictedYaw(player: Player, yaw: number): Player {
+		const delta = Math.atan2(Math.sin(yaw - player.yaw), Math.cos(yaw - player.yaw));
+		const sin = Math.sin(delta * 0.5);
+		const cos = Math.cos(delta * 0.5);
+		return {
+			...player,
+			yaw,
+			headingDeg: (yaw * 180) / Math.PI,
+			rotationX: cos * player.rotationX + sin * player.rotationZ,
+			rotationY: cos * player.rotationY + sin * player.rotationW,
+			rotationZ: cos * player.rotationZ - sin * player.rotationX,
+			rotationW: cos * player.rotationW - sin * player.rotationY
+		};
+	}
+
 	function ensurePredictor(serverPose: RobotPose): DrivePredictor | null {
 		if (predictor) return predictor;
 		const params = driveParams();
@@ -590,35 +754,46 @@
 		return predictor;
 	}
 
-	/**
-	 * Pull the local predictor back toward the authoritative server pose each
-	 * snapshot. Large divergence (e.g. a collision the client cannot model)
-	 * snaps; small drift is blended invisibly so prediction never feels jumpy.
-	 */
-	function reconcileLocal(server: Player) {
+	function reconcileLocal(server: Player, acknowledgedSequence: number | undefined) {
 		const pred = ensurePredictor(poseOf(server));
 		if (!pred) return;
-		const dx = server.x - pred.pose.x;
-		const dz = server.z - pred.pose.z;
-		const distance = Math.hypot(dx, dz);
-		const yawDelta = Math.atan2(
-			Math.sin(server.yaw - pred.pose.yaw),
-			Math.cos(server.yaw - pred.pose.yaw)
-		);
-		if (distance > 0.5 || Math.abs(yawDelta) > 0.5) {
+		if (acknowledgedSequence === undefined) {
 			pred.setPose(poseOf(server));
-			predictionErrorM = 0;
-		} else {
-			const pull = 0.08;
-			pred.setPose({
-				...pred.pose,
-				x: pred.pose.x + dx * pull,
-				y: server.y,
-				z: pred.pose.z + dz * pull,
-				yaw: pred.pose.yaw + yawDelta * pull
-			});
+			return;
 		}
-		predictionErrorM = distance;
+		const acknowledged = Math.max(lastAcknowledgedInputSequence, acknowledgedSequence);
+		const acknowledgementAdvanced = acknowledged > lastAcknowledgedInputSequence;
+		if (!acknowledgementAdvanced) {
+			if (pendingDriveInputs.length === 0) pred.setPose(poseOf(server));
+			return;
+		}
+		lastAcknowledgedInputSequence = acknowledged;
+		const now = performance.now();
+		const replayCutoff = now - MAX_REPLAY_WINDOW_MS;
+		pendingDriveInputs = pendingDriveInputs
+			.filter((entry) => entry.sequence > acknowledged && entry.sentAt >= replayCutoff)
+			.slice(-MAX_PENDING_DRIVE_INPUTS);
+		predictionErrorM = pred.reconcile(
+			poseOf(server),
+			pendingDriveInputs.map((entry, index) => ({
+				input: { drive: entry.drive, turn: entry.turn },
+				durationSeconds: Math.min(
+					MAX_REPLAY_WINDOW_MS / 1000,
+					Math.max(0, ((pendingDriveInputs[index + 1]?.sentAt ?? now) - entry.sentAt) / 1000)
+				)
+			}))
+		);
+	}
+
+	function resetReconnectBaseline() {
+		resetMatchSnapshotDecoder();
+		predictor = undefined;
+		pendingDriveInputs = [];
+		lastAcknowledgedInputSequence = 0;
+		awaitingReconnectBaseline = true;
+		lastSnapshotTimestamp = 0;
+		prevSnapshotPositions = new Float32Array();
+		currSnapshotPositions = new Float32Array();
 	}
 
 	onMount(() => {
@@ -696,6 +871,7 @@
 			if (input.turn !== inputTurn) inputTurn = input.turn;
 			if (input.intake !== inputIntake) inputIntake = input.intake;
 			if (input.outtake !== inputOuttake) inputOuttake = input.outtake;
+			if (input.climb !== inputClimb) inputClimb = input.climb;
 			if (input.source !== controlSource) controlSource = input.source;
 			sendInputFrom(input);
 
@@ -704,31 +880,40 @@
 				const pred = predictor;
 				const serverLocal = players.find((player) => player.id === localId);
 				if (pred && serverLocal) {
-					pred.step({ turn: input.turn, drive: input.drive }, dt);
+					const rx = serverLocal.rotationX ?? 0;
+					const rz = serverLocal.rotationZ ?? 0;
+					const localUpY = 1 - 2 * (rx * rx + rz * rz);
+					const driveEnabled =
+						serverLocal.floorSupported &&
+						localUpY >= 0.7 &&
+						(input.climb <= 0 || !serverLocal.braceContact);
+					pred.step(
+						{
+							turn: driveEnabled ? input.turn : 0,
+							drive: driveEnabled ? input.drive : 0
+						},
+						dt
+					);
 					localPose = pred.pose;
-					// Balls still render at their server positions, which lag
-					// the predicted robot by roughly one round-trip. Where the
-					// predicted footprint would sink into a ball, blend the
-					// rendered pose back toward the last server pose so the
-					// robot visibly nudges balls instead of clipping through
-					// them. The factor ramps continuously with proximity.
-					const robotRadius = Math.hypot(physics.robotWidthM, physics.robotLengthM) * 0.5;
-					const reach = robotRadius + objectFrame.radius;
-					const renderedPositions = renderedObjectFrame.positions;
-					let nearestBall = Infinity;
-					for (let index = 0; index < renderedPositions.length; index += 3) {
-						const dx = renderedPositions[index] - localPose.x;
-						const dz = renderedPositions[index + 2] - localPose.z;
-						const distance = Math.hypot(dx, dz);
-						if (distance < nearestBall) nearestBall = distance;
-					}
-					if (nearestBall < reach) {
-						const blendToServer = ((reach - nearestBall) / reach) * 0.55;
-						localPose = {
-							...localPose,
-							x: localPose.x + (serverLocal.x - localPose.x) * blendToServer,
-							z: localPose.z + (serverLocal.z - localPose.z) * blendToServer
-						};
+					if (localPose) {
+						const robotRadius = Math.hypot(physics.robotWidthM, physics.robotLengthM) * 0.5;
+						const reach = robotRadius + objectFrame.radius;
+						const renderedPositions = renderedObjectFrame.positions;
+						let nearestBall = Infinity;
+						for (let index = 0; index < renderedPositions.length; index += 3) {
+							const dx = renderedPositions[index] - localPose.x;
+							const dz = renderedPositions[index + 2] - localPose.z;
+							const distance = Math.hypot(dx, dz);
+							if (distance < nearestBall) nearestBall = distance;
+						}
+						if (nearestBall < reach) {
+							const blendToServer = ((reach - nearestBall) / reach) * 0.55;
+							localPose = {
+								...localPose,
+								x: localPose.x + (serverLocal.x - localPose.x) * blendToServer,
+								z: localPose.z + (serverLocal.z - localPose.z) * blendToServer
+							};
+						}
 					}
 				}
 			}
@@ -741,21 +926,29 @@
 			} else {
 				let changed = players.length !== renderedPlayers.length;
 				const nextPlayers = players.map((target) => {
-					// The local robot renders its predicted pose directly with
-					// no smoothing; prediction already eliminates perceived lag.
 					if (localPose && target.id === localId) {
 						changed = true;
+						const predicted = withPredictedYaw(target, localPose.yaw);
+						const current = currentById.get(target.id);
+						if (!current) {
+							return {
+								...predicted,
+								x: localPose.x,
+								z: localPose.z
+							};
+						}
 						return {
-							...target,
+							...predicted,
 							x: localPose.x,
-							y: localPose.y,
 							z: localPose.z,
-							yaw: localPose.yaw,
-							headingDeg: (localPose.yaw * 180) / Math.PI,
+							y: current.y + (target.y - current.y) * blend,
 							velocityX: localPose.vx,
 							velocityY: target.velocityY ?? 0,
 							velocityZ: localPose.vz,
-							angularVelocityY: localPose.angularVelocityY
+							angularVelocityY: localPose.angularVelocityY,
+							...blendRotation(current, predicted, blend),
+							climbWheelAngle:
+								current.climbWheelAngle + (target.climbWheelAngle - current.climbWheelAngle) * blend
 						};
 					}
 
@@ -774,7 +967,19 @@
 						Math.sin(target.yaw - current.yaw),
 						Math.cos(target.yaw - current.yaw)
 					);
-					if (distance < 0.0001 && Math.abs(yawDelta) < 0.0001) return current;
+					const rotationDot = Math.abs(
+						current.rotationX * target.rotationX +
+							current.rotationY * target.rotationY +
+							current.rotationZ * target.rotationZ +
+							current.rotationW * target.rotationW
+					);
+					if (
+						distance < 0.0001 &&
+						Math.abs(yawDelta) < 0.0001 &&
+						1 - rotationDot < 0.00001 &&
+						Math.abs(current.climbWheelAngle - target.climbWheelAngle) < 0.0001
+					)
+						return current;
 
 					changed = true;
 					if (distance > 2) return { ...target };
@@ -785,7 +990,10 @@
 						x: current.x + (target.x - current.x) * blend,
 						y: current.y + (target.y - current.y) * blend,
 						z: current.z + (target.z - current.z) * blend,
-						yaw: current.yaw + yawDelta * blend
+						yaw: current.yaw + yawDelta * blend,
+						...blendRotation(current, target, blend),
+						climbWheelAngle:
+							current.climbWheelAngle + (target.climbWheelAngle - current.climbWheelAngle) * blend
 					};
 				});
 				if (changed) renderedPlayers = nextPlayers;
@@ -795,31 +1003,53 @@
 			const renderedPositions = renderedObjectFrame.positions;
 			if (targetPositions.length !== renderedPositions.length) {
 				// Allocate only when the pack changes its object count. Normal
-				// animation reuses these tuples to avoid 500 allocations per frame.
+				// animation reuses these tuples to avoid allocations per frame.
 				renderedObjectFrame = {
 					...objectFrame,
 					positions: new Float32Array(targetPositions)
 				};
+				currSnapshotPositions = new Float32Array(targetPositions);
+				prevSnapshotPositions = new Float32Array(targetPositions);
 			} else {
+				const elapsed = Math.max(0, (performance.now() - lastSnapshotTimestamp) / 1000);
+				const interval = Math.max(0.008, snapshotDeltaSeconds);
+				// Progress alpha from 0 (at snapshot arrival) to 1.0 (at next expected snapshot).
+				// Extrapolate up to 1.35x if a packet is slightly late so balls don't freeze.
+				const alpha = Math.min(elapsed / interval, 1.35);
+
 				let changedProperties =
 					objectFrame.objectId !== renderedObjectFrame.objectId ||
 					objectFrame.radius !== renderedObjectFrame.radius ||
 					objectFrame.color !== renderedObjectFrame.color;
 				for (let index = 0; index < targetPositions.length; index += 3) {
-					const dx = targetPositions[index] - renderedPositions[index];
-					const dy = targetPositions[index + 1] - renderedPositions[index + 1];
-					const dz = targetPositions[index + 2] - renderedPositions[index + 2];
-					const distance = Math.hypot(dx, dy, dz);
-					if (distance < 0.0001) continue;
+					const x0 = prevSnapshotPositions[index];
+					const y0 = prevSnapshotPositions[index + 1];
+					const z0 = prevSnapshotPositions[index + 2];
 
-					if (distance > 0.75) {
-						renderedPositions[index] = targetPositions[index];
-						renderedPositions[index + 1] = targetPositions[index + 1];
-						renderedPositions[index + 2] = targetPositions[index + 2];
+					const x1 = currSnapshotPositions[index];
+					const y1 = currSnapshotPositions[index + 1];
+					const z1 = currSnapshotPositions[index + 2];
+
+					const dx = x1 - x0;
+					const dy = y1 - y0;
+					const dz = z1 - z0;
+					const dist = Math.hypot(dx, dy, dz);
+
+					if (dist > 2.5) {
+						// Teleport / spawn / score reset -> snap to latest
+						renderedPositions[index] = x1;
+						renderedPositions[index + 1] = y1;
+						renderedPositions[index + 2] = z1;
+					} else if (dist < 0.0001) {
+						// Stationary or sleeping ball -> exact position without arithmetic
+						renderedPositions[index] = x1;
+						renderedPositions[index + 1] = y1;
+						renderedPositions[index + 2] = z1;
 					} else {
-						renderedPositions[index] += dx * blend;
-						renderedPositions[index + 1] += dy * blend;
-						renderedPositions[index + 2] += dz * blend;
+						// Moving or projectile ball -> 100% continuous, fluid, constant-velocity linear interpolation
+						renderedPositions[index] = x0 + dx * alpha;
+						renderedPositions[index + 1] = y0 + dy * alpha;
+						renderedPositions[index + 2] = z0 + dz * alpha;
 					}
 				}
 				if (changedProperties) {
@@ -838,7 +1068,7 @@
 				return;
 			}
 			if (!event.repeat && event.key.toLowerCase() === 'c') {
-				cameraMode = cameraMode === 'overview' ? 'robot' : 'overview';
+				cycleCamera();
 				event.preventDefault();
 				return;
 			}
@@ -880,20 +1110,40 @@
 				return;
 			}
 			try {
-				const [ticket, currentUser, assets, metadata] = await Promise.all([
+				const [ticket, currentUser, assets, metadata, starterBot] = await Promise.all([
 					activeMatchId === 'arena' ? api.joinArena() : api.createMatchTicket(activeMatchId),
 					api.getCurrentUser(),
 					api.getGamePackAssets('fgc-2026'),
-					api.getGamePackMetadata('fgc-2026')
+					api.getGamePackMetadata('fgc-2026'),
+					api.getGamePackRobotAssets('fgc-2026', 'starter-bot')
 				]);
 				if (disposed) return;
 
 				localId = currentUser.user.id;
 				const savedPreferences = loadPreferences(localId);
 				userPreferences = savedPreferences;
-				cameraFov = savedPreferences.graphics.cameraFov;
+				overviewCameraFov = savedPreferences.graphics.cameraFov;
+				flyCameraFov = savedPreferences.graphics.cameraFov;
+				robotCameraFov = savedPreferences.graphics.cameraFov;
 				fieldAssets = assets;
+				starterBotVisual = starterBot.visual;
+				starterBotDetailVisual = starterBot.lod1 ?? null;
+				starterBotPhysics = starterBot.physics ?? null;
+				starterBotSemantics = starterBot.semantics ?? null;
+				starterBotClimber = starterBot.climber ?? null;
+				if (starterBot.rollers) {
+					try {
+						const res = await fetch(starterBot.rollers);
+						if (res.ok) {
+							starterBotRollers = await res.json();
+						}
+					} catch (e) {
+						console.warn('Failed to load dynamic robot rollers config:', e);
+					}
+				}
+				await loadRobotDebugSummary(starterBot.physics ?? null, starterBot.semantics ?? null);
 				fieldDefinition = metadata.fieldDefinition;
+				resetReconnectBaseline();
 				const nextSocket = new WebSocket(ticket.ws_url);
 				nextSocket.binaryType = 'arraybuffer';
 				socket = nextSocket;
@@ -920,6 +1170,8 @@
 					try {
 						if (event.data instanceof ArrayBuffer) {
 							const message = decodeMatchSnapshot(event.data);
+							const isReconnectBaseline = awaitingReconnectBaseline;
+							awaitingReconnectBaseline = false;
 							if (snapshotDecodeFailed) {
 								snapshotDecodeFailed = false;
 								status = 'Connected';
@@ -930,14 +1182,49 @@
 							players = message.players;
 							if (localId) {
 								const localServer = message.players.find((player) => player.id === localId);
-								if (localServer) reconcileLocal(localServer);
+								const acknowledgement = message.inputAcknowledgements.find(
+									(entry) => entry.playerId === localId
+								)?.sequence;
+								if (localServer && !isReconnectBaseline)
+									reconcileLocal(localServer, acknowledgement);
 							}
+							const now = performance.now();
+							if (lastSnapshotTimestamp > 0) {
+								const measuredDelta = (now - lastSnapshotTimestamp) / 1000;
+								if (measuredDelta > 0.005 && measuredDelta < 0.2) {
+									snapshotDeltaSeconds = snapshotDeltaSeconds * 0.8 + measuredDelta * 0.2;
+								}
+							}
+							lastSnapshotTimestamp = now;
+
+							const newPositions = message.positions;
+							if (isReconnectBaseline || currSnapshotPositions.length !== newPositions.length) {
+								currSnapshotPositions = new Float32Array(newPositions);
+								prevSnapshotPositions = new Float32Array(newPositions);
+							} else {
+								prevSnapshotPositions.set(currSnapshotPositions);
+								currSnapshotPositions.set(newPositions);
+							}
+
 							objectFrame = {
 								objectId: message.objectId,
 								positions: message.positions,
 								radius: message.objectRadius,
-								color: message.objectColor
+								color: message.objectColor,
+								ballDebug: message.ballDebug,
+								ballContacts: message.ballContacts
 							};
+							if (isReconnectBaseline) {
+								renderedPlayers = message.players.map((player) => ({ ...player }));
+								renderedObjectFrame = {
+									objectId: message.objectId,
+									positions: new Float32Array(message.positions),
+									radius: message.objectRadius,
+									color: message.objectColor,
+									ballDebug: new Uint8Array(message.ballDebug),
+									ballContacts: message.ballContacts.map((contacts) => [...contacts])
+								};
+							}
 							contacts = message.contacts;
 							if (message.matchRunning && receivedMatchState && !matchRunning) {
 								startCueVisible = true;
@@ -965,7 +1252,7 @@
 							globalScore = message.score.global;
 							receivedMatchState = true;
 							simulationClock = message.simulationClock;
-							serverTick = message.tick;
+							serverTick = Number(message.tick);
 							serverPhysicsTickMs = message.physicsTickMs;
 							serverPhysicsLoadPercent = message.physicsLoadPercent;
 							ticksPerSecond = message.ticksPerSecond;
@@ -982,15 +1269,10 @@
 							if (message.physics && !physicsLoaded) {
 								physics = message.physics;
 								physicsLoaded = true;
-								robotSpecs.capacity = Math.round(physics.storageCapacity);
-								robotSpecs.intake_rate_bps = physics.intakeRateBps;
-								robotSpecs.outtake_rate_bps = physics.outtakeRateBps;
-								robotSpecs.outtake_velocity_mps = physics.outtakeVelocityMps;
-								robotSpecs.outtake_angle_deg = physics.outtakeAngleDeg;
-								robotSpecs.flywheel_width_m = physics.flywheelWidthM;
 							}
 							packVersion = `${message.gamePackId} · v${message.gamePackVersion}`;
 							semanticEvents = message.semanticEvents;
+							transferDebug = message.transferDebug;
 							return;
 						}
 						const message = JSON.parse(event.data);
@@ -1027,7 +1309,6 @@
 			window.clearInterval(pingTimer);
 			if (startCueTimer !== undefined) window.clearTimeout(startCueTimer);
 			if (matchEndTimer !== undefined) window.clearTimeout(matchEndTimer);
-			if (robotSpecsTimer !== undefined) window.clearTimeout(robotSpecsTimer);
 			window.removeEventListener('keydown', keydown);
 			window.removeEventListener('keyup', keyup);
 			window.removeEventListener('gamepadconnected', gamepadChanged);
@@ -1110,9 +1391,14 @@
 				: `${Math.round(pingMs)} ms`}
 		</p>
 		<p class="mt-1 text-xs text-white/60">Pack: {packVersion}</p>
+		{#if trackedPlayer?.braceZone}
+			<p class="mt-1 text-xs font-medium text-lime-200">
+				Brace zone {trackedPlayer.braceZone} · ×{trackedPlayer.braceMultiplier.toFixed(1)} score
+			</p>
+		{/if}
 		<p class="mt-2 text-xs text-white/60">
-			W/S drive · A/D turn · Space intake · E flywheel outtake · Gamepad follows your Settings
-			mapping
+			W/S drive · A/D turn · Space intake · E flywheel outtake · Q brace climb · Gamepad follows
+			your Settings mapping
 		</p>
 		<p class="mt-1 max-w-72 truncate text-xs text-white/50" title={gamepadName}>
 			<span class={gamepadConnected ? 'text-cyan-300' : 'text-white/35'}>●</span>
@@ -1124,14 +1410,43 @@
 		</p>
 		{#if error}<p class="mt-2 text-fuchsia-300">✖ {error}</p>{/if}
 	</div>
-	<div class="absolute top-4 right-4 z-10 flex items-center gap-2">
-		<Button
-			variant="outline"
-			class="border-white/20 bg-black/40 text-white hover:bg-white/10"
-			onclick={() => (cameraMode = cameraMode === 'overview' ? 'robot' : 'overview')}
+	<div
+		class="absolute top-4 right-4 z-10 flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2"
+	>
+		<div
+			class="flex h-10 items-center rounded-md border border-white/20 bg-black/50 p-1"
+			aria-label="Camera mode"
 		>
-			{cameraMode === 'robot' ? 'Overview camera' : 'Follow robot'}
-		</Button>
+			{#each cameraModes as mode (mode)}
+				<button
+					type="button"
+					class="h-8 rounded px-3 text-xs capitalize transition-colors {cameraMode === mode
+						? 'bg-white text-slate-950'
+						: 'text-white/65 hover:bg-white/10 hover:text-white'}"
+					onclick={() => (cameraMode = mode)}
+					aria-pressed={cameraMode === mode}
+				>
+					{mode}
+				</button>
+			{/each}
+		</div>
+		<label
+			class="flex h-10 items-center gap-2 rounded-md border border-white/20 bg-black/50 px-3 text-xs text-white/75"
+			for="active-camera-fov"
+		>
+			<span class="w-14 whitespace-nowrap">FOV {activeCameraFov.toFixed(0)}°</span>
+			<input
+				id="active-camera-fov"
+				type="range"
+				min="30"
+				max="100"
+				step="1"
+				value={activeCameraFov}
+				oninput={(event) => setActiveCameraFov(Number(event.currentTarget.value))}
+				class="w-24 accent-cyan-300"
+				aria-label={`${cameraMode} camera field of view`}
+			/>
+		</label>
 		{#if cameraMode === 'robot'}
 			<Button
 				variant="outline"
@@ -1139,6 +1454,13 @@
 				onclick={() => (cameraDirection = cameraDirection === 'north' ? 'south' : 'north')}
 			>
 				Flip to {cameraDirection === 'north' ? 'south' : 'north'}
+			</Button>
+			<Button
+				variant="outline"
+				class="border-cyan-300/30 bg-black/40 text-cyan-100 hover:bg-cyan-300/10"
+				onclick={() => (robotCameraDistance = 1.0)}
+			>
+				1m Zoom
 			</Button>
 			<label
 				class="flex h-10 items-center gap-2 rounded-md border border-white/20 bg-black/40 px-3 text-xs text-white/75"
@@ -1148,7 +1470,7 @@
 				<input
 					id="robot-camera-distance"
 					type="range"
-					min="2.5"
+					min="1.0"
 					max="18"
 					step="0.5"
 					bind:value={robotCameraDistance}
@@ -1156,6 +1478,24 @@
 					aria-label="Robot follow camera distance"
 				/>
 			</label>
+		{/if}
+		{#if cameraMode === 'fly'}
+			<Button
+				variant="outline"
+				class={flyCameraLocked
+					? 'border-lime-300/50 bg-lime-300/15 text-lime-100 hover:bg-lime-300/25'
+					: 'border-cyan-300/30 bg-black/50 text-cyan-100 hover:bg-cyan-300/10'}
+				onclick={toggleFlyCameraLock}
+			>
+				{flyCameraLocked ? 'Unlock fly camera' : 'Lock camera & drive'}
+			</Button>
+			<p
+				class="h-10 rounded-md border border-cyan-300/25 bg-black/50 px-3 text-xs leading-10 text-cyan-100"
+			>
+				{flyCameraLocked
+					? 'Camera fixed · robot controls active'
+					: 'Click scene · mouse look · WASD move · Q/E down/up · Shift boost'}
+			</p>
 		{/if}
 		<Button
 			variant="outline"
@@ -1175,12 +1515,21 @@
 		</Button>
 		<Button
 			variant="outline"
-			class={robotSpecsOpen
+			class={robotDebugOpen
 				? 'border-amber-300/60 bg-amber-300/15 text-amber-100 hover:bg-amber-300/25'
-				: 'border-white/20 bg-black/40 text-white hover:bg-white/10'}
-			onclick={() => (robotSpecsOpen = !robotSpecsOpen)}
+				: 'border-amber-300/30 bg-black/40 text-amber-100 hover:bg-amber-300/10'}
+			onclick={() => (robotDebugOpen = !robotDebugOpen)}
 		>
-			Robot specs
+			{robotDebugOpen ? 'Hide robot debug' : 'Robot debug'}
+		</Button>
+		<Button
+			variant="outline"
+			class={transferDebugOpen
+				? 'border-amber-300/60 bg-amber-300/15 text-amber-100 hover:bg-amber-300/25'
+				: 'border-amber-300/30 bg-black/40 text-amber-100 hover:bg-amber-300/10'}
+			onclick={() => (transferDebugOpen = !transferDebugOpen)}
+		>
+			{transferDebugOpen ? 'Hide transfer debug' : 'Transfer debug'}
 		</Button>
 		<Button
 			variant="outline"
@@ -1197,112 +1546,57 @@
 			class="border-white/20 bg-black/40 text-white hover:bg-white/10">Leave match</Button
 		>
 	</div>
-	{#if robotSpecsOpen}
+	{#if robotDebugOpen}
 		<section
-			class="absolute top-18 right-4 z-10 w-[19rem] rounded-lg border border-white/20 bg-black/85 p-3 text-sm text-white backdrop-blur"
-			aria-label="Robot mechanics specs"
+			class="absolute top-18 right-4 z-10 w-[19rem] rounded-lg border border-amber-300/40 bg-slate-950/90 p-3 text-sm text-slate-100 shadow-xl backdrop-blur"
+			aria-label="Starter bot authored debug data"
 		>
-			<div class="mb-2 flex items-baseline justify-between">
-				<h2 class="font-semibold">ROBOT MECH SPECS</h2>
-				<span class="text-xs text-white/40">apply live</span>
+			<div class="flex items-baseline justify-between gap-3">
+				<h2 class="font-semibold text-amber-100">STARTER BOT DEBUG</h2>
+				<span class="text-[10px] tracking-wide text-cyan-200 uppercase">live assets</span>
 			</div>
-			<p class="mb-2 text-xs leading-relaxed text-white/55">
-				Space/E intake, E/LB outtake the wide flywheel. Values rebalance your robot without
-				restarting the match.
+			<p class="mt-1 text-xs leading-relaxed text-slate-300">
+				Cyan is an interaction semantic. Yellow is a climb-wheel collision volume. Hover a cyan
+				label on the robot for its authored dimensions.
 			</p>
-			<div class="space-y-2 text-xs">
-				<label class="flex items-center justify-between gap-2" for="spec-capacity">
-					<span class="text-white/70">Storage</span>
-					<input
-						id="spec-capacity"
-						type="range"
-						min="1"
-						max="80"
-						step="1"
-						bind:value={robotSpecs.capacity}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums">{robotSpecs.capacity}</span>
-				</label>
-				<label class="flex items-center justify-between gap-2" for="spec-intake">
-					<span class="text-white/70">Intake rate</span>
-					<input
-						id="spec-intake"
-						type="range"
-						min="1"
-						max="20"
-						step="0.5"
-						bind:value={robotSpecs.intake_rate_bps}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums">{robotSpecs.intake_rate_bps.toFixed(1)}/s</span
-					>
-				</label>
-				<label class="flex items-center justify-between gap-2" for="spec-outrate">
-					<span class="text-white/70">Outtake rate</span>
-					<input
-						id="spec-outrate"
-						type="range"
-						min="1"
-						max="20"
-						step="0.5"
-						bind:value={robotSpecs.outtake_rate_bps}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums"
-						>{robotSpecs.outtake_rate_bps.toFixed(1)}/s</span
-					>
-				</label>
-				<label class="flex items-center justify-between gap-2" for="spec-vel">
-					<span class="text-white/70">Launch speed</span>
-					<input
-						id="spec-vel"
-						type="range"
-						min="2"
-						max="12"
-						step="0.5"
-						bind:value={robotSpecs.outtake_velocity_mps}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums"
-						>{robotSpecs.outtake_velocity_mps.toFixed(1)} m/s</span
-					>
-				</label>
-				<label class="flex items-center justify-between gap-2" for="spec-angle">
-					<span class="text-white/70">Launch angle</span>
-					<input
-						id="spec-angle"
-						type="range"
-						min="5"
-						max="60"
-						step="1"
-						bind:value={robotSpecs.outtake_angle_deg}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums">{robotSpecs.outtake_angle_deg}°</span>
-				</label>
-				<label class="flex items-center justify-between gap-2" for="spec-width">
-					<span class="text-white/70">Flywheel width</span>
-					<input
-						id="spec-width"
-						type="range"
-						min="0.1"
-						max="0.6"
-						step="0.05"
-						bind:value={robotSpecs.flywheel_width_m}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums"
-						>{robotSpecs.flywheel_width_m.toFixed(2)} m</span
-					>
-				</label>
-			</div>
+			{#if robotDebugSummary?.error}
+				<p class="mt-3 rounded bg-red-500/15 px-2 py-1.5 text-xs text-red-200">
+					{robotDebugSummary.error}
+				</p>
+			{:else if robotDebugSummary}
+				<div class="mt-3 grid grid-cols-2 gap-3 text-xs">
+					<div>
+						<p class="mb-1 font-medium text-amber-200">Climb contacts</p>
+						{#each robotDebugSummary.colliders as collider (collider)}
+							<p class="font-mono text-slate-300">{collider}</p>
+						{:else}
+							<p class="text-slate-500">None loaded</p>
+						{/each}
+					</div>
+					<div>
+						<p class="mb-1 font-medium text-cyan-200">Semantics</p>
+						{#each robotDebugSummary.semantics as semantic (semantic)}
+							<p class="font-mono text-slate-300">{semantic}</p>
+						{:else}
+							<p class="text-slate-500">None loaded</p>
+						{/each}
+					</div>
+				</div>
+				<p class="mt-3 border-t border-white/10 pt-2 text-xs">
+					<span class="text-slate-400">Authored collision parts:</span>
+					<span class="ml-1 font-mono text-violet-200">{robotDebugSummary.collisionCount}</span>
+				</p>
+				<p class="mt-1 text-xs">
+					<span class="text-slate-400">Client prediction rails:</span>
+					{#if predictedBraceColliders.length}
+						<span class="ml-1 font-mono text-lime-200">{predictedBraceColliders.join(', ')}</span>
+					{:else}
+						<span class="ml-1 text-red-200">missing</span>
+					{/if}
+				</p>
+			{:else}
+				<p class="mt-3 text-xs text-slate-400">Loading authored robot assets…</p>
+			{/if}
 		</section>
 	{/if}
 	{#if debugOpen}
@@ -1472,7 +1766,13 @@
 					{predictor ? `${predictionErrorM.toFixed(3)} m err` : 'off'}
 				</dd>
 				<dt class="text-white/40">camera</dt>
-				<dd>{cameraMode}{cameraMode === 'robot' ? `/${cameraDirection}` : ''}</dd>
+				<dd>
+					{cameraMode}{cameraMode === 'robot'
+						? `/${cameraDirection}`
+						: cameraMode === 'fly' && flyCameraLocked
+							? '/locked'
+							: ''}
+				</dd>
 				<dt class="text-white/40">device</dt>
 				<dd>
 					{logicalCpuCores || '?'}T · {deviceMemoryGb === null ? 'RAM ?' : `~${deviceMemoryGb} GiB`}
@@ -1506,29 +1806,21 @@
 			{/if}
 		</aside>
 	{/if}
-	<!-- Cap pixel density for the heavy imported field; this is the largest
-	     client-side GPU cost on high-DPI displays. -->
-	<Canvas {createRenderer} dpr={[0.65, 1]} renderMode="on-demand" shadows={BasicShadowMap}>
+	<Canvas {createRenderer} dpr={[0.6, 0.85]} renderMode="on-demand">
 		{#if cameraMode === 'robot'}
 			<RobotFollowCamera
 				player={trackedPlayer}
 				direction={cameraDirection}
 				distance={robotCameraDistance}
-				fov={cameraFov}
+				fov={robotCameraFov}
 			/>
+		{:else if cameraMode === 'fly'}
+			<FlyCamera fov={flyCameraFov} locked={flyCameraLocked} />
 		{:else}
-			<T.PerspectiveCamera makeDefault position={[11, 12, 14]} fov={cameraFov}>
-				<OrbitControls target={[0, 0, 0]} enablePan={false} minDistance={8} maxDistance={28} />
-			</T.PerspectiveCamera>
+			<OverviewCamera fov={overviewCameraFov} />
 		{/if}
 		<T.AmbientLight intensity={0.55} />
-		<T.DirectionalLight
-			position={[8, 12, 6]}
-			intensity={2.1}
-			castShadow
-			shadow.mapSize={[512, 512]}
-			shadow.bias={-0.0005}
-		/>
+		<T.DirectionalLight position={[8, 12, 6]} intensity={2.1} />
 		<Grid
 			position={[0, 0.002, 0]}
 			cellColor="#64748b"
@@ -1549,17 +1841,32 @@
 				{activeTriggerIds}
 			/>
 		{/if}
-		<ScriptedObjects frame={renderedObjectFrame} {potatoMode} />
+		<ScriptedObjects frame={renderedObjectFrame} {potatoMode} debug={transferDebugOpen} />
 		<T.Group>
 			{#each renderedPlayers as player (player.id)}
 				<RobotModel
 					{player}
 					{physics}
+					visualAsset={starterBotVisual ?? undefined}
+					detailVisualAsset={player.id === localId && userPreferences?.graphics.quality === 'high'
+						? (starterBotDetailVisual ?? undefined)
+						: undefined}
 					local={player.id === localId}
 					isIntaking={player.id === localId ? inputIntake > 0 : false}
 					isOuttaking={player.id === localId ? inputOuttake > 0 : false}
+					isClimbing={player.id === localId ? inputClimb > 0 : false}
+					rollerSettings={starterBotRollers ?? undefined}
+					debug={robotDebugOpen && player.id === localId}
+					physicsAsset={starterBotPhysics ?? undefined}
+					semanticsAsset={starterBotSemantics ?? undefined}
+					climber={starterBotClimber ?? undefined}
+					ballContacts={renderedObjectFrame?.ballContacts}
+					ballPositions={renderedObjectFrame?.positions}
 				/>
 			{/each}
 		</T.Group>
 	</Canvas>
+	{#if transferDebugOpen}
+		<TransferDebugHUD entries={transferDebug} ballDebug={objectFrame?.ballDebug} />
+	{/if}
 </main>

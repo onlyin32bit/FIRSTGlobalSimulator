@@ -18,8 +18,8 @@
 		onClaim: (slotId: LobbySlotId) => void;
 	} = $props();
 
-	const label = alliance === 'red' ? 'Red alliance' : 'Blue alliance';
-	const isRestricted = restrictedAlliance !== null && restrictedAlliance !== alliance;
+	const label = $derived(alliance === 'red' ? 'Red alliance' : 'Blue alliance');
+	const isRestricted = $derived(restrictedAlliance !== null && restrictedAlliance !== alliance);
 </script>
 
 <section aria-label={label} class="rounded-xl bg-card p-4 shadow-sm">

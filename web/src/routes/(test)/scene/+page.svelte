@@ -188,8 +188,9 @@
 
 							<div class="grid grid-cols-2 gap-1">
 								<div>
-									<label class="block text-[9px] text-gray-400">Controller</label>
+									<label for={`controller-${slot.id}`} class="block text-[9px] text-gray-400">Controller</label>
 									<select
+										id={`controller-${slot.id}`}
 										value={slot.controller}
 										onchange={(e) => {
 											const val = (e.target as HTMLSelectElement).value as any;
@@ -207,8 +208,9 @@
 								</div>
 
 								<div>
-									<label class="block text-[9px] text-gray-400">Spawn Anchor</label>
+									<label for={`spawn-anchor-${slot.id}`} class="block text-[9px] text-gray-400">Spawn Anchor</label>
 									<select
+										id={`spawn-anchor-${slot.id}`}
 										value={slot.spawnAnchor}
 										onchange={(e) => {
 											const val = (e.target as HTMLSelectElement).value;

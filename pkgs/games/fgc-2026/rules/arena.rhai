@@ -3,10 +3,9 @@
 // and does not hard-code the object count, shape, or motion parameters.
 fn arena_config() {
     #{
-        physics_backend: "sphere_xpbd",
+        physics_backend: "rapier",
         solver: #{
-            // The sphere-specialized solver keeps dense ball contacts stable
-            // without paying for a general rigid-body constraint graph.
+            // Kept for the sphere_xpbd fallback pack profile.
             position_iterations: 3.0,
             velocity_iterations: 4.0,
             contact_compliance: 0.0000002,
@@ -14,7 +13,7 @@ fn arena_config() {
             // A 500-ball pile needs enough correction to restore one full
             // ball diameter in a frame instead of compressing into a goal.
             max_depenetration_speed_mps: 5.0,
-            max_ball_speed_mps: 12.0,
+            max_ball_speed_mps: 20.0,
             max_ball_angular_speed_radps: 240.0,
             sleep_linear_threshold_mps: 0.035,
             sleep_angular_threshold_radps: 0.20,
@@ -98,7 +97,7 @@ fn arena_config() {
             surface_friction: 0.45,
             restitution: 0.05,
             rolling_resistance: 0.35,
-            max_speed_mps: 4.0,
+            max_speed_mps: 2.8,
             max_acceleration_mps2: 3.5,
             max_deceleration_mps2: 5.0,
             // Force and power limits keep the controller from behaving like
@@ -106,8 +105,8 @@ fn arena_config() {
             max_drive_force_n: 140.0,
             max_drive_power_w: 420.0,
             max_brake_force_n: 200.0,
-            max_turn_rate_radps: 4.5,
-            max_angular_acceleration_radps2: 9.0,
+            max_turn_rate_radps: 5.0,
+            max_angular_acceleration_radps2: 12.0,
             lateral_grip_mps2: 12.0,
             restitution_curve: #{
                 low_speed: 0.36,
@@ -120,23 +119,27 @@ fn arena_config() {
             intake_radius_m: 0.045,
             intake_forward_offset_m: 0.38,
             intake_center_height_m: 0.075,
-            intake_surface_speed_mps: 3.0,
+            intake_surface_speed_mps: 1.0,
             intake_friction: 0.90,
-            intake_normal_force_n: 8.0,
+            intake_normal_force_n: 25.0,
             intake_restitution_curve: #{
                 low_speed: 0.22,
                 high_speed: 0.10,
                 transition_speed_mps: 1.50,
                 exponent: 0.70
             },
+            // Transfer mechanism (conveyor / hopper path)
+            transfer_surface_speed_mps: 2.0,
+            transfer_normal_force_n: 150.0,
             // Hopper storage + wide flywheel outtake. The flywheel spans 3.5
             // WILDFIRE widths so the mouth accepts a spread of incoming balls
             // and launches them across a matching opening.
             storage_capacity: 40.0,
             intake_rate_bps: 6.0,
-            outtake_rate_bps: 3.0,
-            outtake_velocity_mps: 8.0,
-            outtake_angle_deg: 35.0,
+            outtake_rate_bps: 1.0,
+            outtake_velocity_mps: 6.0,
+            outtake_normal_force_n: 50.0,
+            outtake_angle_deg: 80.0,
             flywheel_width_m: 0.35,
             outtake_forward_offset_m: 0.0,
             // Above the 50 cm chassis top so a launched ball clears the body.

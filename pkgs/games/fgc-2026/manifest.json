@@ -3,6 +3,7 @@
   "name": "Igniting Innovation",
   "version": "1.0.0",
   "engineVersion": ">=0.1.0",
+  "defaultRobot": "starter-bot",
   "field": {
     "visual": "field.glb",
     "physics": "field.physics.json",
@@ -49,10 +50,36 @@
     "robot_rules": "rules/robot.rhai",
     "arena": "rules/arena.rhai"
   },
+  "robots": {
+    "starter-bot": {
+      "name": "Starter Bot",
+      "visual": "robots/starter-bot/bot.glb",
+      "lod1": "robots/starter-bot/bot.glb",
+      "physics": "robots/starter-bot/bot.physics.json",
+      "semantics": "robots/starter-bot/bot.semantics.json",
+      "behavior": "robots/starter-bot/robot.rhai",
+      "rollers": "robots/starter-bot/rollers.json",
+      "climber": {
+        "wheelParts": ["ClimbWheel1", "ClimbWheel2"],
+        "supportParts": ["Cube.012", "Cylinder"],
+        "axle": [1, 0, 0],
+        "wheelMassKg": 0.35,
+        "grooveRootRadiusM": 0.0063,
+        "grooveOuterRadiusM": 0.03,
+        "maxClimbSpeedMps": 0.35,
+        "freeSpeedRadps": 42,
+        "stallTorqueNm": 4.2,
+        "brakeTorqueNm": 2.2,
+        "staticFriction": 1.15,
+        "dynamicFriction": 0.9,
+        "contactSkinM": 0.0018
+      }
+    }
+  },
   "scoring": {
     "targets": [
-      { "id": "red-suppression-unit", "semanticId": "redSUscore", "kind": "suppression-unit", "alliance": "red", "points": 1, "requiresRobotOuttake": true, "area": { "min": [-1.465079, 0.65, -2.9914392], "max": [-0.503383, 1.92352463, -2.7963208] }, "retention": { "min": [-1.465079, 0.65, -3.14], "max": [-0.503383, 1.92352463, -2.74], "openTop": true } },
-      { "id": "blue-suppression-unit", "semanticId": "blueSUscore", "kind": "suppression-unit", "alliance": "blue", "points": 1, "requiresRobotOuttake": true, "area": { "min": [0.496984, 0.65, -2.9852828], "max": [1.458572, 1.9116209, -2.7940172] }, "retention": { "min": [0.496984, 0.65, -3.14], "max": [1.458572, 1.9116209, -2.74], "openTop": true } },
+      { "id": "red-suppression-unit", "semanticId": "redSUscore", "kind": "suppression-unit", "alliance": "red", "points": 1, "requiresRobotOuttake": true, "area": { "min": [-1.465079, 0.65, -2.9914392], "max": [-0.503383, 1.92352463, -2.7963208] } },
+      { "id": "blue-suppression-unit", "semanticId": "blueSUscore", "kind": "suppression-unit", "alliance": "blue", "points": 1, "requiresRobotOuttake": true, "area": { "min": [0.496984, 0.65, -2.9852828], "max": [1.458572, 1.9116209, -2.7940172] } },
       { "id": "red-fire-shield", "semanticId": "redFSscore", "kind": "fire-shield", "alliance": "red", "points": 0, "enabled": false },
       { "id": "blue-fire-shield", "semanticId": "blueFSscore", "kind": "fire-shield", "alliance": "blue", "points": 0, "enabled": false },
       { "id": "extinguisher", "semanticId": "EXTscore", "kind": "extinguisher", "points": 1, "enabled": false }

@@ -22,6 +22,39 @@ pub struct GamePackManifest {
     pub scripts: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub scoring: ScoringConfig,
+    #[serde(default, rename = "defaultRobot")]
+    pub default_robot: Option<String>,
+    #[serde(default)]
+    pub robots: BTreeMap<String, PackRobotManifest>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PackRobotManifest {
+    pub name: String,
+    pub visual: String,
+    pub physics: Option<String>,
+    pub semantics: Option<String>,
+    pub behavior: Option<String>,
+    pub climber: Option<RobotClimberConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RobotClimberConfig {
+    pub wheel_parts: Vec<String>,
+    #[serde(default)]
+    pub support_parts: Vec<String>,
+    pub axle: [f32; 3],
+    pub wheel_mass_kg: f32,
+    pub groove_root_radius_m: f32,
+    pub groove_outer_radius_m: f32,
+    pub max_climb_speed_mps: f32,
+    pub free_speed_radps: f32,
+    pub stall_torque_nm: f32,
+    pub brake_torque_nm: f32,
+    pub static_friction: f32,
+    pub dynamic_friction: f32,
+    pub contact_skin_m: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -43,25 +76,12 @@ pub struct ScoringTargetConfig {
     #[serde(default)]
     pub requires_robot_outtake: bool,
     pub area: Option<ScoringAreaConfig>,
-    /// Open-top physical pocket that retains scored balls. This is separate
-    /// from the scoring area because a sensor can be much thinner than the
-    /// hopper behind it.
-    pub retention: Option<ScoringRetentionConfig>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ScoringAreaConfig {
     pub min: [f32; 3],
     pub max: [f32; 3],
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ScoringRetentionConfig {
-    pub min: [f32; 3],
-    pub max: [f32; 3],
-    #[serde(default = "default_true")]
-    pub open_top: bool,
 }
 
 fn default_true() -> bool {
@@ -75,6 +95,7 @@ pub struct GamePackMetadata {
     pub scripts: Vec<RuleScriptMetadata>,
     pub arena: ArenaConfig,
     pub field_definition: FieldDefinition,
+    pub default_robot: Option<RobotDefinition>,
     /// Raw Rhai source belongs to the API pack snapshot, not the filesystem.
     /// It stays process-local and is never sent to connected clients.
     #[serde(skip)]
@@ -91,6 +112,14 @@ pub struct GamePackRuntimeSnapshot {
     pub field_physics: serde_json::Value,
     pub field_semantics: serde_json::Value,
     pub scripts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub robots: BTreeMap<String, RobotRuntimeAssets>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct RobotRuntimeAssets {
+    pub physics: serde_json::Value,
+    pub semantics: serde_json::Value,
 }
 
 /// Server-ready subset of the authored Assimp field files. The GLB is only a
@@ -166,7 +195,6 @@ pub struct FieldScoringTarget {
     pub requires_robot_outtake: bool,
     pub min: [f32; 3],
     pub max: [f32; 3],
-    pub retention: Option<ScoringRetentionConfig>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -319,6 +347,8 @@ pub struct RobotPhysicsConfig {
     pub intake_friction: f32,
     pub intake_normal_force_n: f32,
     pub intake_restitution_curve: RestitutionCurveConfig,
+    pub transfer_surface_speed_mps: f32,
+    pub transfer_normal_force_n: f32,
     /// Ball storage capacity of the on-robot hopper (0 = no storage, balls
     /// simply deflect off the chassis as before).
     pub storage_capacity: usize,
@@ -328,6 +358,7 @@ pub struct RobotPhysicsConfig {
     pub outtake_rate_bps: f32,
     /// Flywheel launch speed in metres per second.
     pub outtake_velocity_mps: f32,
+    pub outtake_normal_force_n: f32,
     /// Flywheel launch pitch angle above horizontal, in degrees.
     pub outtake_angle_deg: f32,
     /// Width of the flywheel mouth. 3–4 WILDFIRE (100 mm) wide ≈ 0.30–0.40 m.
@@ -411,11 +442,30 @@ impl PackLoader {
             &snapshot.field_semantics,
             &snapshot.manifest.scoring,
         )?;
+        let default_robot = snapshot
+            .manifest
+            .default_robot
+            .as_deref()
+            .map(|id| {
+                let assets = snapshot.robots.get(id).ok_or_else(|| {
+                    GameError::ManifestParseError(format!(
+                        "Runtime snapshot is missing collision or semantics for default robot {id}"
+                    ))
+                })?;
+                let climber = snapshot
+                    .manifest
+                    .robots
+                    .get(id)
+                    .and_then(|robot| robot.climber.clone());
+                load_robot_definition(id, &assets.physics, &assets.semantics, climber)
+            })
+            .transpose()?;
         Ok(GamePackMetadata {
             manifest: snapshot.manifest,
             scripts,
             arena,
             field_definition,
+            default_robot,
             script_sources: snapshot.scripts,
         })
     }
@@ -462,17 +512,42 @@ impl PackLoader {
                     .map_err(|error| GameError::ManifestParseError(error.to_string()))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let robots = manifest
+            .robots
+            .iter()
+            .filter_map(|(id, robot)| match (&robot.physics, &robot.semantics) {
+                (Some(physics), Some(semantics)) => Some((id, physics, semantics)),
+                _ => None,
+            })
+            .map(|(id, physics, semantics)| {
+                let physics = serde_json::from_str(
+                    &std::fs::read_to_string(root.join(physics))
+                        .map_err(|error| GameError::ManifestParseError(error.to_string()))?,
+                )
+                .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
+                let semantics = serde_json::from_str(
+                    &std::fs::read_to_string(root.join(semantics))
+                        .map_err(|error| GameError::ManifestParseError(error.to_string()))?,
+                )
+                .map_err(|error| GameError::ManifestParseError(error.to_string()))?;
+                Ok((id.clone(), RobotRuntimeAssets { physics, semantics }))
+            })
+            .collect::<Result<BTreeMap<_, _>, GameError>>()?;
         self.load_runtime_snapshot(GamePackRuntimeSnapshot {
             manifest,
             field_physics,
             field_semantics,
             scripts,
+            robots,
         })
     }
 }
 
 mod field;
 use field::load_field_definition;
+mod robot;
+use robot::load_robot_definition;
+pub use robot::{RobotDefinition, RobotSemanticKind};
 
 #[cfg(test)]
 #[path = "pack_loader/tests.rs"]
