@@ -148,12 +148,11 @@
 				{#if mobileNavOpen}<div
 						class="fixed inset-0 z-50 bg-foreground/20 lg:hidden"
 						role="presentation"
-						onclick={() => (mobileNavOpen = false)}
+						onclick={(event) => {
+							if (event.target === event.currentTarget) mobileNavOpen = false;
+						}}
 					>
-						<aside
-							class="h-full w-72 bg-sidebar shadow-xl"
-							onclick={(event) => event.stopPropagation()}
-						>
+						<aside class="h-full w-72 bg-sidebar shadow-xl">
 							{@render navigation()}
 						</aside>
 					</div>{/if}

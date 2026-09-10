@@ -83,13 +83,15 @@
 			</div>
 
 			<table class="condition-table">
-				{#each ROWS as row}
-					{@const value = entry[row.key] as boolean}
-					<tr class="condition-row" class:pass={value} class:fail={!value} title={row.hint}>
-						<td class="condition-icon">{value ? '✓' : '✗'}</td>
-						<td class="condition-label">{row.label}</td>
-					</tr>
-				{/each}
+				<tbody>
+					{#each ROWS as row}
+						{@const value = entry[row.key] as boolean}
+						<tr class="condition-row" class:pass={value} class:fail={!value} title={row.hint}>
+							<td class="condition-icon">{value ? '✓' : '✗'}</td>
+							<td class="condition-label">{row.label}</td>
+						</tr>
+					{/each}
+				</tbody>
 			</table>
 
 			<div class="outtake-readout">

@@ -129,6 +129,7 @@ pub(super) fn project_static_position(
     floor_y: f32,
     field_boundary: &FieldBoundary,
     field_colliders: &[FieldCollider],
+    collider_candidates: &[usize],
 ) -> usize {
     let mut contacts = 0;
     let floor_contact_y = floor_y + radius;
@@ -163,10 +164,15 @@ pub(super) fn project_static_position(
     let max_y = ball.position[1].max(ball.previous_position[1]) + radius;
     let min_z = ball.position[2].min(ball.previous_position[2]) - radius;
     let max_z = ball.position[2].max(ball.previous_position[2]) + radius;
-    for collider in field_colliders {
-        if max_x < collider.min[0] || min_x > collider.max[0] ||
-           max_y < collider.min[1] || min_y > collider.max[1] ||
-           max_z < collider.min[2] || min_z > collider.max[2] {
+    for &index in collider_candidates {
+        let collider = &field_colliders[index];
+        if max_x < collider.min[0]
+            || min_x > collider.max[0]
+            || max_y < collider.min[1]
+            || min_y > collider.max[1]
+            || max_z < collider.min[2]
+            || min_z > collider.max[2]
+        {
             continue;
         }
         contacts += project_sphere_aabb(ball, collider, radius);
@@ -270,7 +276,14 @@ fn sphere_box_contact_with_sweep(
         let speed = movement[axis];
         if speed.abs() <= 1.0e-8 {
             if previous_local[axis] < -limit || previous_local[axis] > limit {
-                return sphere_box_discrete_contact(position, previous_position, radius, center, axes, half_extents);
+                return sphere_box_discrete_contact(
+                    position,
+                    previous_position,
+                    radius,
+                    center,
+                    axes,
+                    half_extents,
+                );
             }
             continue;
         }
@@ -301,7 +314,11 @@ fn sphere_box_contact_with_sweep(
         let axis = (0..3)
             .find(|axis| local[*axis].abs() > half_extents[*axis] + radius)
             .unwrap_or(0);
-        let sign = if previous_local[axis] < 0.0 { -1.0 } else { 1.0 };
+        let sign = if previous_local[axis] < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
         let target = sign * (half_extents[axis] + radius);
         let correction = sign * (target - local[axis]);
         return Some((mul(axes[axis], sign), correction));
@@ -315,7 +332,14 @@ fn sphere_box_contact_with_sweep(
         }
     }
 
-    sphere_box_discrete_contact(position, previous_position, radius, center, axes, half_extents)
+    sphere_box_discrete_contact(
+        position,
+        previous_position,
+        radius,
+        center,
+        axes,
+        half_extents,
+    )
 }
 
 fn sphere_box_discrete_contact(
@@ -350,7 +374,9 @@ fn sphere_box_discrete_contact(
     }
     let (local_normal, penetration) = if distance_sq > 1.0e-12 {
         let (axis, sign, face_distance) = obb_entry_face(previous_local, local, half_extents);
-        if previous_local[axis] * local[axis] < 0.0 && previous_local[axis].abs() > half_extents[axis] {
+        if previous_local[axis] * local[axis] < 0.0
+            && previous_local[axis].abs() > half_extents[axis]
+        {
             let mut normal = [0.0; 3];
             normal[axis] = sign;
             (normal, radius + face_distance)
@@ -371,53 +397,6 @@ fn sphere_box_discrete_contact(
     Some((normal, penetration))
 }
 
-pub(super) fn project_sphere_obb(ball: &mut Ball, collider: &FieldCollider, radius: f32) -> usize {
-    let delta = sub(ball.position, collider.center);
-    let local = [
-        dot(delta, collider.axes[0]),
-        dot(delta, collider.axes[1]),
-        dot(delta, collider.axes[2]),
-    ];
-    let closest = [
-        local[0].clamp(-collider.half_extents[0], collider.half_extents[0]),
-        local[1].clamp(-collider.half_extents[1], collider.half_extents[1]),
-        local[2].clamp(-collider.half_extents[2], collider.half_extents[2]),
-    ];
-    let local_delta = [
-        local[0] - closest[0],
-        local[1] - closest[1],
-        local[2] - closest[2],
-    ];
-    let distance_sq = dot(local_delta, local_delta);
-    if distance_sq >= radius * radius {
-        return 0;
-    }
-    if distance_sq > 1.0e-10 {
-        let distance = distance_sq.sqrt();
-        let normal = [
-            collider.axes[0][0] * local_delta[0] / distance
-                + collider.axes[1][0] * local_delta[1] / distance
-                + collider.axes[2][0] * local_delta[2] / distance,
-            collider.axes[0][1] * local_delta[0] / distance
-                + collider.axes[1][1] * local_delta[1] / distance
-                + collider.axes[2][1] * local_delta[2] / distance,
-            collider.axes[0][2] * local_delta[0] / distance
-                + collider.axes[1][2] * local_delta[1] / distance
-                + collider.axes[2][2] * local_delta[2] / distance,
-        ];
-        ball.position = add(ball.position, mul(normal, (radius - distance).max(0.0)));
-        return 1;
-    }
-    let (nearest_axis, sign, nearest_distance) =
-        inside_obb_exit_face(ball.previous_position, local, collider);
-    let normal = mul(collider.axes[nearest_axis], sign);
-    ball.position = add(
-        ball.position,
-        mul(normal, radius + nearest_distance.max(0.0)),
-    );
-    1
-}
-
 /// Pick the exit face for a sphere whose centre is already inside an OBB.
 ///
 /// Ball-to-ball projection can move a ball into a thin polycarbonate panel
@@ -425,6 +404,7 @@ pub(super) fn project_sphere_obb(ball: &mut Ball, collider: &FieldCollider, radi
 /// the nearest face then lets a dense pile "tunnel" through the panel once it
 /// crosses the midpoint. If the ball began this tick outside the OBB, retain
 /// that approached-from face; otherwise use the normal nearest-face rule.
+#[cfg(test)]
 pub(super) fn inside_obb_exit_face(
     previous_position: Vec3,
     local_position: Vec3,
@@ -478,11 +458,7 @@ fn obb_entry_face(previous_local: Vec3, local: Vec3, half_extents: Vec3) -> (usi
             nearest_axis = axis;
         }
     }
-    let sign = if local[nearest_axis] < 0.0 {
-        -1.0
-    } else {
-        1.0
-    };
+    let sign = if local[nearest_axis] < 0.0 { -1.0 } else { 1.0 };
     (nearest_axis, sign, nearest_distance)
 }
 
@@ -579,6 +555,7 @@ pub(super) fn project_robot_field_colliders(
     robot_definition: Option<&RobotDefinition>,
     ground_offset_y: f32,
     field_colliders: &[FieldCollider],
+    collider_candidates: &[usize],
     climbing: bool,
 ) -> (usize, Option<Vec3>) {
     if let Some(definition) = robot_definition {
@@ -587,6 +564,7 @@ pub(super) fn project_robot_field_colliders(
             definition,
             ground_offset_y,
             field_colliders,
+            collider_candidates,
             climbing,
         );
     }
@@ -598,7 +576,8 @@ pub(super) fn project_robot_field_colliders(
     let mut contacts = 0;
     let mut contact_normal = None;
 
-    for collider in field_colliders {
+    for &index in collider_candidates {
+        let collider = &field_colliders[index];
         // The climb motor constrains both wheels to its authored rail. Letting
         // the generic chassis solver fight any of the brace subparts causes a
         // one-tick nudge that drops the attachment.
@@ -665,6 +644,7 @@ fn project_authored_robot_field_colliders(
     definition: &RobotDefinition,
     ground_offset_y: f32,
     field_colliders: &[FieldCollider],
+    collider_candidates: &[usize],
     climbing: bool,
 ) -> (usize, Option<Vec3>) {
     let mut contacts = 0;
@@ -676,7 +656,8 @@ fn project_authored_robot_field_colliders(
         ground_offset_y,
     );
 
-    for field in field_colliders {
+    for &index in collider_candidates {
+        let field = &field_colliders[index];
         if climbing && field.id.starts_with("Cylinder") {
             continue;
         }
@@ -1131,10 +1112,7 @@ pub(super) fn sphere_robot_obb_contact(
         let limit = collider.half_extents[entry_axis] + radius;
         let penetration = (local[entry_axis] - entry_sign * limit) * -entry_sign;
         if penetration > 0.0 {
-            return Some((
-                mul(collider.axes[entry_axis], entry_sign),
-                penetration,
-            ));
+            return Some((mul(collider.axes[entry_axis], entry_sign), penetration));
         }
     }
     sphere_authored_obb_contact(position, radius, collider)

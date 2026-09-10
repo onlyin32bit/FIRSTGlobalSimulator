@@ -10,6 +10,8 @@ pub struct TicketClaims {
     #[serde(default)]
     pub robot_id: Option<String>,
     #[serde(default)]
+    pub robot_revision: Option<u64>,
+    #[serde(default)]
     pub slot_id: Option<String>,
     #[serde(default)]
     pub role: Option<String>,

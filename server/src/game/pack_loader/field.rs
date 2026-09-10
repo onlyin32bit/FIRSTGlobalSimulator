@@ -99,7 +99,6 @@ pub(super) fn load_field_definition(
                 requires_robot_outtake: target.requires_robot_outtake,
                 min,
                 max,
-                retention: target.retention.clone(),
             })
         })
         .collect();

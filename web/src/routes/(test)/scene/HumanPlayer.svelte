@@ -33,7 +33,7 @@
   const keys = { forward: false, back: false, left: false, right: false }
   let yaw = 0
   let pitch = 0
-  let chargeTime = 0
+	let chargeTime = $state(0)
   let isCharging = false
   let throwId = 0
   const MAX_CHARGE_TIME = 1.0

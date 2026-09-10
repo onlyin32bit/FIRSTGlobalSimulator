@@ -46,7 +46,7 @@
 	// is intentionally not suitable for visual debugging of rotated parts.
 	const physicsMeshes = new Group();
 	physicsMeshes.name = 'authored-field-collision-meshes';
-	physicsMeshes.visible = Boolean(physicsUrl);
+	physicsMeshes.visible = false;
 
 	onMount(() => {
 		if (!physicsUrl) return;

@@ -14,8 +14,8 @@
 	const forward = new Vector3();
 	const right = new Vector3();
 	const movement = new Vector3();
-	let yaw = -0.72;
-	let pitch = -0.35;
+	let yaw = $state(-0.72);
+	let pitch = $state(-0.35);
 
 	$effect(() => {
 		if (!camera) return;

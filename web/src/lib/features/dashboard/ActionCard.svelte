@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Component } from 'svelte';
+	import type { Icon as TablerIcon } from '@tabler/icons-svelte';
 
 	let {
 		icon,
@@ -9,14 +9,14 @@
 		onclick,
 		featured = false
 	}: {
-		icon: Component;
+		icon: TablerIcon;
 		title: string;
 		description: string;
 		href?: string;
 		onclick?: () => void;
 		featured?: boolean;
 	} = $props();
-	const Icon = icon;
+	const Icon = $derived(icon);
 </script>
 
 {#if href}

@@ -2,7 +2,7 @@ use rapier3d::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
 
-use super::match_registry::ObjectPositionsSync;
+use super::match_registry::{InputAcknowledgement, ObjectPositionsSync};
 use super::pack_loader::ArenaConfig;
 
 const CONTROL_DEADBAND: f32 = 0.08;
@@ -109,6 +109,7 @@ struct PlayerBody {
     move_x: f32,
     move_z: f32,
     sequence: u64,
+    connection_id: Option<String>,
     color: &'static str,
 }
 
@@ -365,6 +366,7 @@ impl MatchRuntime {
                 move_x: 0.0,
                 move_z: 0.0,
                 sequence: 0,
+                connection_id: None,
                 color: colors[slot % colors.len()],
             },
         );
@@ -396,6 +398,46 @@ impl MatchRuntime {
             player.sequence = sequence;
             player.move_x = apply_control_deadband(move_x);
             player.move_z = apply_control_deadband(move_z);
+        }
+    }
+
+    pub fn bind_player_connection(&mut self, user_id: &str, connection_id: String) {
+        if let Some(player) = self.players.get_mut(user_id) {
+            player.connection_id = Some(connection_id);
+            player.sequence = 0;
+            player.move_x = 0.0;
+            player.move_z = 0.0;
+        }
+    }
+
+    pub fn set_player_input_from_connection(
+        &mut self,
+        user_id: &str,
+        connection_id: &str,
+        move_x: f32,
+        move_z: f32,
+        sequence: u64,
+    ) {
+        if self
+            .players
+            .get(user_id)
+            .and_then(|player| player.connection_id.as_deref())
+            == Some(connection_id)
+        {
+            self.set_player_input(user_id, move_x, move_z, sequence);
+        }
+    }
+
+    pub fn remove_player_from_connection(&mut self, user_id: &str, connection_id: Option<&str>) {
+        let matches = self
+            .players
+            .get(user_id)
+            .map(|player| {
+                connection_id.is_none() || player.connection_id.as_deref() == connection_id
+            })
+            .unwrap_or(false);
+        if matches {
+            self.remove_player(user_id);
         }
     }
 
@@ -532,6 +574,14 @@ impl MatchRuntime {
     }
 
     pub fn field_object_positions(&self) -> ObjectPositionsSync {
+        self.object_positions(false)
+    }
+
+    pub fn field_object_positions_full(&self) -> ObjectPositionsSync {
+        self.object_positions(true)
+    }
+
+    fn object_positions(&self, include_sleeping: bool) -> ObjectPositionsSync {
         let count = self.objects.len() as u32;
         let mask_bytes = (count as usize + 7) / 8;
         let mut active_mask = vec![0u8; mask_bytes];
@@ -541,7 +591,7 @@ impl MatchRuntime {
         for (i, object) in self.objects.iter().enumerate() {
             if let Some(body) = self.rigid_body_set.get(object.body) {
                 active_mask[i / 8] |= 1 << (i % 8);
-                if !body.is_sleeping() {
+                if include_sleeping || !body.is_sleeping() {
                     moving_mask[i / 8] |= 1 << (i % 8);
                     let position = body.translation();
                     let quantize =
@@ -559,6 +609,16 @@ impl MatchRuntime {
             moving_mask,
             quantized_positions,
         }
+    }
+
+    pub fn input_acknowledgements(&self) -> Vec<InputAcknowledgement> {
+        self.players
+            .iter()
+            .map(|(player_id, player)| InputAcknowledgement {
+                player_id: player_id.clone(),
+                sequence: player.sequence,
+            })
+            .collect()
     }
 
     pub fn contact_count(&self) -> usize {

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { T, useTask } from '@threlte/core';
 	import { useGltf, useMeshopt } from '@threlte/extras';
+	import { untrack } from 'svelte';
 	import { FrontSide, Mesh, MeshStandardMaterial, Object3D } from 'three';
 
 	import defaultRollerSettings from './robot-rollers.json';
@@ -39,7 +40,7 @@
 
 	const meshoptDecoder = useMeshopt();
 	const cacheBuster = import.meta.env.DEV ? `?r=${Date.now()}` : '';
-	const robotGltf = useGltf(`${assetUrl}${cacheBuster}`, { meshoptDecoder });
+	const robotGltf = useGltf(`${untrack(() => assetUrl)}${cacheBuster}`, { meshoptDecoder });
 	let model = $state<Object3D | null>(null);
 	let renderedWheelAngle = 0;
 

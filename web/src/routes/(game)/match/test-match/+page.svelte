@@ -21,6 +21,7 @@
 	import MatchOverview from './MatchOverview.svelte';
 	import {
 		decodeMatchSnapshot,
+		resetMatchSnapshotDecoder,
 		type MatchPhysics as PhysicsModel,
 		type MatchPlayer as Player,
 		type TransferDebugEntry
@@ -130,16 +131,6 @@
 		outtakeForwardOffsetM: 0,
 		outtakeHeightM: 0.55
 	});
-	let robotSpecs = $state({
-		capacity: 40,
-		intake_rate_bps: 6,
-		outtake_rate_bps: 1,
-		outtake_velocity_mps: 8,
-		outtake_angle_deg: 35,
-		flywheel_width_m: 0.35
-	});
-	let robotSpecsOpen = $state(false);
-	let robotSpecsTimer: number | undefined;
 	let status = $state('Connecting…');
 	let error = $state('');
 	let localId = $state('');
@@ -147,6 +138,17 @@
 	let predictor = $state.raw<DrivePredictor | undefined>(undefined);
 	let predictionErrorM = $state(0);
 	let sequence = 0;
+	type PendingDriveInput = {
+		sequence: number;
+		drive: number;
+		turn: number;
+		sentAt: number;
+	};
+	const MAX_REPLAY_WINDOW_MS = 350;
+	const MAX_PENDING_DRIVE_INPUTS = 24;
+	let pendingDriveInputs = $state.raw<PendingDriveInput[]>([]);
+	let lastAcknowledgedInputSequence = 0;
+	let awaitingReconnectBaseline = true;
 	let pingNonce = 0;
 	let pingMs = $state<number | null>(null);
 	let packVersion = $state('Loading pack…');
@@ -554,7 +556,7 @@
 		return {
 			drive: keyboardActive ? keyboardDrive : gamepadDrive,
 			turn: keyboardActive ? keyboardTurn : gamepadTurn,
-			intake: outtakeVal > 0 ? outtakeVal : (pressed.has(' ') ? 1 : gamepadIntake),
+			intake: outtakeVal > 0 ? outtakeVal : pressed.has(' ') ? 1 : gamepadIntake,
 			outtake: outtakeVal,
 			climb: pressed.has('q') ? 1 : gamepadClimb,
 			source: (keyboardActive ? 'keyboard' : gamepad ? 'gamepad' : 'keyboard') as
@@ -588,7 +590,15 @@
 		const buffer = new ArrayBuffer(29);
 		const view = new DataView(buffer);
 		view.setUint8(0, 2);
-		view.setBigUint64(1, BigInt(++sequence), true);
+		const inputSequence = ++sequence;
+		const replayCutoff = now - MAX_REPLAY_WINDOW_MS;
+		pendingDriveInputs = [
+			...pendingDriveInputs,
+			{ sequence: inputSequence, drive: input.drive, turn: input.turn, sentAt: now }
+		]
+			.filter((entry) => entry.sentAt >= replayCutoff)
+			.slice(-MAX_PENDING_DRIVE_INPUTS);
+		view.setBigUint64(1, BigInt(inputSequence), true);
 		view.setFloat32(9, input.turn, true);
 		view.setFloat32(13, input.drive, true);
 		view.setFloat32(17, input.intake, true);
@@ -625,7 +635,7 @@
 				new Set(starterBotClimber?.wheelParts ?? ['ClimbWheel1', 'ClimbWheel2'])
 			);
 			robotDebugSummary = {
-				colliders: starterBotColliders.map(c => c.id),
+				colliders: starterBotColliders.map((c) => c.id),
 				collisionCount: starterBotColliders.length,
 				semantics: (semanticAsset.rootnode?.children ?? []).flatMap((node) =>
 					node.name ? [node.name] : []
@@ -654,28 +664,6 @@
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
 		socket.send(JSON.stringify({ type: 'end_practice' }));
 	}
-	function sendRobotSpecs() {
-		if (!socket || socket.readyState !== WebSocket.OPEN) return;
-		socket.send(
-			JSON.stringify({
-				type: 'robot_specs',
-				capacity: robotSpecs.capacity,
-				intake_rate_bps: robotSpecs.intake_rate_bps,
-				outtake_rate_bps: robotSpecs.outtake_rate_bps,
-				outtake_velocity_mps: robotSpecs.outtake_velocity_mps,
-				outtake_angle_deg: robotSpecs.outtake_angle_deg,
-				flywheel_width_m: robotSpecs.flywheel_width_m
-			})
-		);
-	}
-	function scheduleRobotSpecs() {
-		if (robotSpecsTimer !== undefined) window.clearTimeout(robotSpecsTimer);
-		robotSpecsTimer = window.setTimeout(() => {
-			robotSpecsTimer = undefined;
-			sendRobotSpecs();
-		}, 180);
-	}
-
 	function driveParams(): DriveParams | null {
 		if (!physicsLoaded || !fieldDefinition) return null;
 		const boundary = fieldDefinition.boundary;
@@ -707,8 +695,7 @@
 				center: collider.center ?? [0, 0, 0],
 				halfExtents: collider.halfExtents ?? [0, 0, 0],
 				axes: collider.axes ?? axes
-			})),
-			robotColliders: starterBotColliders
+			}))
 		};
 	}
 
@@ -767,10 +754,46 @@
 		return predictor;
 	}
 
-	function reconcileLocal(server: Player) {
+	function reconcileLocal(server: Player, acknowledgedSequence: number | undefined) {
 		const pred = ensurePredictor(poseOf(server));
 		if (!pred) return;
-		predictionErrorM = pred.reconcile(poseOf(server));
+		if (acknowledgedSequence === undefined) {
+			pred.setPose(poseOf(server));
+			return;
+		}
+		const acknowledged = Math.max(lastAcknowledgedInputSequence, acknowledgedSequence);
+		const acknowledgementAdvanced = acknowledged > lastAcknowledgedInputSequence;
+		if (!acknowledgementAdvanced) {
+			if (pendingDriveInputs.length === 0) pred.setPose(poseOf(server));
+			return;
+		}
+		lastAcknowledgedInputSequence = acknowledged;
+		const now = performance.now();
+		const replayCutoff = now - MAX_REPLAY_WINDOW_MS;
+		pendingDriveInputs = pendingDriveInputs
+			.filter((entry) => entry.sequence > acknowledged && entry.sentAt >= replayCutoff)
+			.slice(-MAX_PENDING_DRIVE_INPUTS);
+		predictionErrorM = pred.reconcile(
+			poseOf(server),
+			pendingDriveInputs.map((entry, index) => ({
+				input: { drive: entry.drive, turn: entry.turn },
+				durationSeconds: Math.min(
+					MAX_REPLAY_WINDOW_MS / 1000,
+					Math.max(0, ((pendingDriveInputs[index + 1]?.sentAt ?? now) - entry.sentAt) / 1000)
+				)
+			}))
+		);
+	}
+
+	function resetReconnectBaseline() {
+		resetMatchSnapshotDecoder();
+		predictor = undefined;
+		pendingDriveInputs = [];
+		lastAcknowledgedInputSequence = 0;
+		awaitingReconnectBaseline = true;
+		lastSnapshotTimestamp = 0;
+		prevSnapshotPositions = new Float32Array();
+		currSnapshotPositions = new Float32Array();
 	}
 
 	onMount(() => {
@@ -1120,6 +1143,7 @@
 				}
 				await loadRobotDebugSummary(starterBot.physics ?? null, starterBot.semantics ?? null);
 				fieldDefinition = metadata.fieldDefinition;
+				resetReconnectBaseline();
 				const nextSocket = new WebSocket(ticket.ws_url);
 				nextSocket.binaryType = 'arraybuffer';
 				socket = nextSocket;
@@ -1146,6 +1170,8 @@
 					try {
 						if (event.data instanceof ArrayBuffer) {
 							const message = decodeMatchSnapshot(event.data);
+							const isReconnectBaseline = awaitingReconnectBaseline;
+							awaitingReconnectBaseline = false;
 							if (snapshotDecodeFailed) {
 								snapshotDecodeFailed = false;
 								status = 'Connected';
@@ -1156,7 +1182,11 @@
 							players = message.players;
 							if (localId) {
 								const localServer = message.players.find((player) => player.id === localId);
-								if (localServer) reconcileLocal(localServer);
+								const acknowledgement = message.inputAcknowledgements.find(
+									(entry) => entry.playerId === localId
+								)?.sequence;
+								if (localServer && !isReconnectBaseline)
+									reconcileLocal(localServer, acknowledgement);
 							}
 							const now = performance.now();
 							if (lastSnapshotTimestamp > 0) {
@@ -1168,7 +1198,7 @@
 							lastSnapshotTimestamp = now;
 
 							const newPositions = message.positions;
-							if (currSnapshotPositions.length !== newPositions.length) {
+							if (isReconnectBaseline || currSnapshotPositions.length !== newPositions.length) {
 								currSnapshotPositions = new Float32Array(newPositions);
 								prevSnapshotPositions = new Float32Array(newPositions);
 							} else {
@@ -1184,6 +1214,17 @@
 								ballDebug: message.ballDebug,
 								ballContacts: message.ballContacts
 							};
+							if (isReconnectBaseline) {
+								renderedPlayers = message.players.map((player) => ({ ...player }));
+								renderedObjectFrame = {
+									objectId: message.objectId,
+									positions: new Float32Array(message.positions),
+									radius: message.objectRadius,
+									color: message.objectColor,
+									ballDebug: new Uint8Array(message.ballDebug),
+									ballContacts: message.ballContacts.map((contacts) => [...contacts])
+								};
+							}
 							contacts = message.contacts;
 							if (message.matchRunning && receivedMatchState && !matchRunning) {
 								startCueVisible = true;
@@ -1228,12 +1269,6 @@
 							if (message.physics && !physicsLoaded) {
 								physics = message.physics;
 								physicsLoaded = true;
-								robotSpecs.capacity = Math.round(physics.storageCapacity);
-								robotSpecs.intake_rate_bps = physics.intakeRateBps;
-								robotSpecs.outtake_rate_bps = physics.outtakeRateBps;
-								robotSpecs.outtake_velocity_mps = physics.outtakeVelocityMps;
-								robotSpecs.outtake_angle_deg = physics.outtakeAngleDeg;
-								robotSpecs.flywheel_width_m = physics.flywheelWidthM;
 							}
 							packVersion = `${message.gamePackId} · v${message.gamePackVersion}`;
 							semanticEvents = message.semanticEvents;
@@ -1274,7 +1309,6 @@
 			window.clearInterval(pingTimer);
 			if (startCueTimer !== undefined) window.clearTimeout(startCueTimer);
 			if (matchEndTimer !== undefined) window.clearTimeout(matchEndTimer);
-			if (robotSpecsTimer !== undefined) window.clearTimeout(robotSpecsTimer);
 			window.removeEventListener('keydown', keydown);
 			window.removeEventListener('keyup', keyup);
 			window.removeEventListener('gamepadconnected', gamepadChanged);
@@ -1499,15 +1533,6 @@
 		</Button>
 		<Button
 			variant="outline"
-			class={robotSpecsOpen
-				? 'border-amber-300/60 bg-amber-300/15 text-amber-100 hover:bg-amber-300/25'
-				: 'border-white/20 bg-black/40 text-white hover:bg-white/10'}
-			onclick={() => (robotSpecsOpen = !robotSpecsOpen)}
-		>
-			Robot specs
-		</Button>
-		<Button
-			variant="outline"
 			class={potatoMode
 				? 'border-fuchsia-300/60 bg-fuchsia-300/15 text-fuchsia-100 hover:bg-fuchsia-300/25'
 				: 'border-white/20 bg-black/40 text-white hover:bg-white/10'}
@@ -1521,114 +1546,6 @@
 			class="border-white/20 bg-black/40 text-white hover:bg-white/10">Leave match</Button
 		>
 	</div>
-	{#if robotSpecsOpen}
-		<section
-			class="absolute top-18 right-4 z-10 w-[19rem] rounded-lg border border-white/20 bg-black/85 p-3 text-sm text-white backdrop-blur"
-			aria-label="Robot mechanics specs"
-		>
-			<div class="mb-2 flex items-baseline justify-between">
-				<h2 class="font-semibold">ROBOT MECH SPECS</h2>
-				<span class="text-xs text-white/40">apply live</span>
-			</div>
-			<p class="mb-2 text-xs leading-relaxed text-white/55">
-				Space/E intake, E/LB outtake the wide flywheel. Values rebalance your robot without
-				restarting the match.
-			</p>
-			<div class="space-y-2 text-xs">
-				<label class="flex items-center justify-between gap-2" for="spec-capacity">
-					<span class="text-white/70">Storage</span>
-					<input
-						id="spec-capacity"
-						type="range"
-						min="1"
-						max="80"
-						step="1"
-						bind:value={robotSpecs.capacity}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums">{robotSpecs.capacity}</span>
-				</label>
-				<label class="flex items-center justify-between gap-2" for="spec-intake">
-					<span class="text-white/70">Intake rate</span>
-					<input
-						id="spec-intake"
-						type="range"
-						min="1"
-						max="20"
-						step="0.5"
-						bind:value={robotSpecs.intake_rate_bps}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums">{robotSpecs.intake_rate_bps.toFixed(1)}/s</span
-					>
-				</label>
-				<label class="flex items-center justify-between gap-2" for="spec-outrate">
-					<span class="text-white/70">Outtake rate</span>
-					<input
-						id="spec-outrate"
-						type="range"
-						min="1"
-						max="20"
-						step="0.5"
-						bind:value={robotSpecs.outtake_rate_bps}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums"
-						>{robotSpecs.outtake_rate_bps.toFixed(1)}/s</span
-					>
-				</label>
-				<label class="flex items-center justify-between gap-2" for="spec-vel">
-					<span class="text-white/70">Launch speed</span>
-					<input
-						id="spec-vel"
-						type="range"
-						min="2"
-						max="12"
-						step="0.5"
-						bind:value={robotSpecs.outtake_velocity_mps}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums"
-						>{robotSpecs.outtake_velocity_mps.toFixed(1)} m/s</span
-					>
-				</label>
-				<label class="flex items-center justify-between gap-2" for="spec-angle">
-					<span class="text-white/70">Launch angle</span>
-					<input
-						id="spec-angle"
-						type="range"
-						min="5"
-						max="60"
-						step="1"
-						bind:value={robotSpecs.outtake_angle_deg}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums">{robotSpecs.outtake_angle_deg}°</span>
-				</label>
-				<label class="flex items-center justify-between gap-2" for="spec-width">
-					<span class="text-white/70">Flywheel width</span>
-					<input
-						id="spec-width"
-						type="range"
-						min="0.1"
-						max="0.6"
-						step="0.05"
-						bind:value={robotSpecs.flywheel_width_m}
-						onchange={scheduleRobotSpecs}
-						class="w-32 accent-amber-300"
-					/>
-					<span class="w-10 text-right tabular-nums"
-						>{robotSpecs.flywheel_width_m.toFixed(2)} m</span
-					>
-				</label>
-			</div>
-		</section>
-	{/if}
 	{#if robotDebugOpen}
 		<section
 			class="absolute top-18 right-4 z-10 w-[19rem] rounded-lg border border-amber-300/40 bg-slate-950/90 p-3 text-sm text-slate-100 shadow-xl backdrop-blur"

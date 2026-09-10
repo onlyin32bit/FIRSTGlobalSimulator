@@ -3,6 +3,11 @@ export type DriveInput = {
 	drive: number;
 };
 
+export type ReplayInput = {
+	input: DriveInput;
+	durationSeconds: number;
+};
+
 export type RobotPose = {
 	x: number;
 	y: number;
@@ -39,10 +44,63 @@ export type DriveParams = {
 	boundaryMinZ: number;
 	boundaryMaxZ: number;
 	colliders: FieldCollider[];
-	robotColliders: FieldCollider[];
 };
 
 type V3 = [number, number, number];
+
+/** Static field colliders are authored in world space. Bucket their XZ bounds
+ * once so each prediction step only reaches nearby narrow-phase tests. */
+class FieldSpatialIndex {
+	private static readonly cellSizeM = 1;
+	private readonly cells = new Map<number, number[]>();
+	private readonly candidates: number[] = [];
+
+	constructor(private readonly colliders: readonly FieldCollider[]) {
+		colliders.forEach((collider, index) => {
+			const minX = Math.floor(collider.min[0] / FieldSpatialIndex.cellSizeM);
+			const maxX = Math.floor(collider.max[0] / FieldSpatialIndex.cellSizeM);
+			const minZ = Math.floor(collider.min[2] / FieldSpatialIndex.cellSizeM);
+			const maxZ = Math.floor(collider.max[2] / FieldSpatialIndex.cellSizeM);
+			for (let z = minZ; z <= maxZ; z += 1) {
+				for (let x = minX; x <= maxX; x += 1) {
+					const key = FieldSpatialIndex.key(x, z);
+					const cell = this.cells.get(key);
+					if (cell) cell.push(index);
+					else this.cells.set(key, [index]);
+				}
+			}
+		});
+	}
+
+	query(minX: number, maxX: number, minZ: number, maxZ: number): readonly number[] {
+		this.candidates.length = 0;
+		const startX = Math.floor(minX / FieldSpatialIndex.cellSizeM);
+		const endX = Math.floor(maxX / FieldSpatialIndex.cellSizeM);
+		const startZ = Math.floor(minZ / FieldSpatialIndex.cellSizeM);
+		const endZ = Math.floor(maxZ / FieldSpatialIndex.cellSizeM);
+		for (let z = startZ; z <= endZ; z += 1) {
+			for (let x = startX; x <= endX; x += 1) {
+				const cell = this.cells.get(FieldSpatialIndex.key(x, z));
+				if (cell) this.candidates.push(...cell);
+			}
+		}
+		// Keep the authored order: positional projection is iterative.
+		this.candidates.sort((left, right) => left - right);
+		let write = 0;
+		for (const index of this.candidates) {
+			if (write === 0 || this.candidates[write - 1] !== index) {
+				this.candidates[write] = index;
+				write += 1;
+			}
+		}
+		this.candidates.length = write;
+		return this.candidates;
+	}
+
+	private static key(x: number, z: number) {
+		return x * 65_536 + z;
+	}
+}
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -136,115 +194,34 @@ const robotFieldObbContact = (
 	return { normal: minimumNormal, penetration: minimumPenetration };
 };
 
-const authoredRobotCollider = (
-	local: FieldCollider,
-	pose: RobotPose,
-	heightM: number
-): FieldCollider => {
-	const sin = Math.sin(pose.yaw);
-	const cos = Math.cos(pose.yaw);
-	const rotate = (value: V3): V3 => {
-		const corrected: V3 = [-value[0], value[1], -value[2]];
-		return [
-			cos * corrected[0] + sin * corrected[2],
-			corrected[1],
-			-sin * corrected[0] + cos * corrected[2]
-		];
-	};
-	const offset = rotate([local.center[0], local.center[1] - heightM * 0.5, local.center[2]]);
-	const center: V3 = [pose.x + offset[0], pose.y + offset[1], pose.z + offset[2]];
-	const axes = local.axes.map((axis) => rotate(axis)) as FieldCollider['axes'];
-	const min = [...center] as V3;
-	const max = [...center] as V3;
-	for (let worldAxis = 0; worldAxis < 3; worldAxis += 1) {
-		const radius = axes.reduce(
-			(sum, axis, localAxis) => sum + Math.abs(axis[worldAxis]) * local.halfExtents[localAxis],
-			0
-		);
-		min[worldAxis] -= radius;
-		max[worldAxis] += radius;
-	}
-	return { ...local, center, axes, min, max };
-};
-
-const obbContact = (
-	left: FieldCollider,
-	right: FieldCollider
-): { normal: V3; penetration: number } | null => {
-	const axes: V3[] = [...left.axes, ...right.axes];
-	for (const leftAxis of left.axes) {
-		for (const rightAxis of right.axes) {
-			const candidate = cross3(leftAxis, rightAxis);
-			const candidateLength = Math.hypot(...candidate);
-			if (candidateLength > 1e-5) axes.push(mul3(candidate, 1 / candidateLength));
-		}
-	}
-	const centerDelta = sub3(left.center, right.center);
-	let minimumPenetration = Infinity;
-	let minimumNormal: V3 = [0, 1, 0];
-	for (const axis of axes) {
-		const leftRadius = left.axes.reduce(
-			(sum, localAxis, index) => sum + left.halfExtents[index] * Math.abs(dot3(axis, localAxis)),
-			0
-		);
-		const rightRadius = right.axes.reduce(
-			(sum, localAxis, index) => sum + right.halfExtents[index] * Math.abs(dot3(axis, localAxis)),
-			0
-		);
-		const penetration = leftRadius + rightRadius - Math.abs(dot3(centerDelta, axis));
-		if (penetration <= 0) return null;
-		if (penetration < minimumPenetration) {
-			minimumPenetration = penetration;
-			minimumNormal = dot3(centerDelta, axis) < 0 ? mul3(axis, -1) : axis;
-		}
-	}
-	return { normal: minimumNormal, penetration: minimumPenetration };
-};
-
 /**
- * Push the robot out of any interior field collider it overlaps and zero the
- * velocity component driving into the surface. Mirrors the server's
- * `project_robot_field_colliders`: OBBs use SAT, the authored guard rails are
- * treated as AABBs pushed out along the smallest penetration.
+ * Prediction deliberately uses one conservative chassis OBB. The server owns
+ * the detailed robot mesh, brace and ball contacts; replaying every authored
+ * part locally makes input reconciliation too expensive to be responsive.
  */
-const projectFieldColliders = (p: RobotPose, params: DriveParams) => {
+const projectFieldColliders = (
+	p: RobotPose,
+	params: DriveParams,
+	fieldIndex: FieldSpatialIndex
+) => {
 	const halfX = params.widthM * 0.5;
 	const halfZ = params.lengthM * 0.5;
 	const halfY = params.heightM * 0.5;
 	const robotMinY = p.y - halfY;
 	const robotMaxY = p.y + halfY;
-	let authoredColliders = params.robotColliders.map((local) =>
-		authoredRobotCollider(local, p, params.heightM)
-	);
 
-	for (const collider of params.colliders) {
-		if (authoredColliders.length) {
-			let contact: { normal: V3; penetration: number } | null = null;
-			for (const robot of authoredColliders) {
-				const overlaps =
-					robot.min.every((value, axis) => value <= collider.max[axis]) &&
-					robot.max.every((value, axis) => value >= collider.min[axis]);
-				if (!overlaps) continue;
-				const candidate = obbContact(robot, collider);
-				if (candidate && (!contact || candidate.penetration > contact.penetration)) {
-					contact = candidate;
-				}
-			}
-			if (!contact) continue;
-			p.x += contact.normal[0] * contact.penetration;
-			p.y += contact.normal[1] * contact.penetration;
-			p.z += contact.normal[2] * contact.penetration;
-			const intoSurface = p.vx * contact.normal[0] + p.vz * contact.normal[2];
-			if (intoSurface < 0) {
-				p.vx -= contact.normal[0] * intoSurface;
-				p.vz -= contact.normal[2] * intoSurface;
-			}
-			authoredColliders = params.robotColliders.map((local) =>
-				authoredRobotCollider(local, p, params.heightM)
-			);
-			continue;
-		}
+	const [planarX, planarZ] = robotPlanarExtents(params.widthM, params.lengthM, p.yaw);
+	const candidates = fieldIndex.query(p.x - planarX, p.x + planarX, p.z - planarZ, p.z + planarZ);
+	for (const index of candidates) {
+		const collider = params.colliders[index];
 		if (robotMaxY <= collider.min[1] || robotMinY >= collider.max[1]) continue;
+		if (
+			p.x + planarX <= collider.min[0] ||
+			p.x - planarX >= collider.max[0] ||
+			p.z + planarZ <= collider.min[2] ||
+			p.z - planarZ >= collider.max[2]
+		)
+			continue;
 
 		if (collider.halfExtents.some((extent) => extent > 1.0e-6)) {
 			const contact = robotFieldObbContact([p.x, p.y, p.z], p.yaw, [halfX, halfY, halfZ], collider);
@@ -297,25 +274,11 @@ const projectFieldColliders = (p: RobotPose, params: DriveParams) => {
 };
 
 const projectBoundary = (p: RobotPose, params: DriveParams) => {
-	let minX: number;
-	let maxX: number;
-	let minZ: number;
-	let maxZ: number;
-	if (params.robotColliders.length) {
-		const colliders = params.robotColliders.map((local) =>
-			authoredRobotCollider(local, p, params.heightM)
-		);
-		minX = Math.min(...colliders.map((collider) => collider.min[0]));
-		maxX = Math.max(...colliders.map((collider) => collider.max[0]));
-		minZ = Math.min(...colliders.map((collider) => collider.min[2]));
-		maxZ = Math.max(...colliders.map((collider) => collider.max[2]));
-	} else {
-		const [extentX, extentZ] = robotPlanarExtents(params.widthM, params.lengthM, p.yaw);
-		minX = p.x - extentX;
-		maxX = p.x + extentX;
-		minZ = p.z - extentZ;
-		maxZ = p.z + extentZ;
-	}
+	const [extentX, extentZ] = robotPlanarExtents(params.widthM, params.lengthM, p.yaw);
+	const minX = p.x - extentX;
+	const maxX = p.x + extentX;
+	const minZ = p.z - extentZ;
+	const maxZ = p.z + extentZ;
 
 	if (minX < params.boundaryMinX) {
 		p.x += params.boundaryMinX - minX;
@@ -344,11 +307,13 @@ const projectBoundary = (p: RobotPose, params: DriveParams) => {
  */
 export class DrivePredictor {
 	private readonly params: DriveParams;
+	private readonly fieldIndex: FieldSpatialIndex;
 	private authoritative: RobotPose;
 	pose: RobotPose;
 
 	constructor(params: DriveParams, initial: RobotPose) {
 		this.params = params;
+		this.fieldIndex = new FieldSpatialIndex(params.colliders);
 		this.pose = { ...initial };
 		this.authoritative = { ...initial };
 	}
@@ -358,10 +323,12 @@ export class DrivePredictor {
 		this.authoritative = { ...pose };
 	}
 
-	reconcile(pose: RobotPose) {
+	reconcile(pose: RobotPose, replay: ReplayInput[] = []) {
 		const distance = Math.hypot(pose.x - this.pose.x, pose.z - this.pose.z);
-		this.authoritative = { ...pose };
-		if (distance > 3 || Math.abs(pose.y - this.pose.y) > 1) this.setPose(pose);
+		this.setPose(pose);
+		for (const entry of replay) {
+			this.step(entry.input, entry.durationSeconds);
+		}
 		return distance;
 	}
 
@@ -486,6 +453,6 @@ export class DrivePredictor {
 		// the predicted pose stays on the playable carpet and slides along it.
 		projectBoundary(p, this.params);
 
-		projectFieldColliders(p, this.params);
+		projectFieldColliders(p, this.params, this.fieldIndex);
 	}
 }

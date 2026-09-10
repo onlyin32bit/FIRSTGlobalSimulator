@@ -104,6 +104,11 @@ export type TransferDebugEntry = {
 	maxOuttakeContactSpeedMps: number;
 };
 
+export type InputAcknowledgement = {
+	playerId: string;
+	sequence: number;
+};
+
 export interface MatchSnapshot {
 	tick: number;
 	gamePackId: string;
@@ -148,6 +153,7 @@ export interface MatchSnapshot {
 	ballDebug: Uint8Array;
 	/** Authored robot collider ids each active ball is touching, indexed like `ballDebug`. */
 	ballContacts: string[][];
+	inputAcknowledgements: InputAcknowledgement[];
 }
 
 const decoder = new TextDecoder();
@@ -220,6 +226,14 @@ let persistentVelocities = new Float32Array(3000);
 let persistentPrevPositions = new Float32Array(3000);
 let prevSnapshotTimeMs = 0;
 
+/** Reset delta state before a new WebSocket consumes its full reconnect baseline. */
+export function resetMatchSnapshotDecoder() {
+	persistentPositions = new Float32Array(3000);
+	persistentVelocities = new Float32Array(3000);
+	persistentPrevPositions = new Float32Array(3000);
+	prevSnapshotTimeMs = 0;
+}
+
 /**
  * Decode the FGS1 sectioned little-endian protocol. Unknown section tags are
  * skipped using their byte length, so compatible protocol additions do not
@@ -273,7 +287,8 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 		score: { blue: 0, red: 0, global: 0, breakdown: {} },
 		transferDebug: [],
 		ballDebug: new Uint8Array(),
-		ballContacts: []
+		ballContacts: [],
+		inputAcknowledgements: []
 	};
 
 	const view = new DataView(buffer);
@@ -401,6 +416,15 @@ export function decodeMatchSnapshot(buffer: ArrayBuffer): MatchSnapshot {
 					player.floorSupported = floorSupported;
 					player.braceContact = braceContact;
 				}
+				break;
+			}
+			case 13: {
+				const count = section.u16();
+				const acknowledgements: InputAcknowledgement[] = [];
+				for (let index = 0; index < count && section.offset < sectionEnd; index += 1) {
+					acknowledgements.push({ playerId: section.string(), sequence: section.u64() });
+				}
+				snapshot.inputAcknowledgements = acknowledgements;
 				break;
 			}
 			case 7: {

@@ -4,7 +4,7 @@ import { drizzle } from 'drizzle-orm/d1'
 import { sign } from 'hono/jwt'
 import * as schema from '../db/schema'
 import { isResponse, lobbyReadySchema, lobbySlotSchema, matchSchema, parseJson } from '../lib/validation'
-import type { LobbySlotId, LobbyUser, MatchBootstrap } from '../match-lobby'
+import type { BootstrapParticipant, LobbySlotId, LobbyUser, MatchBootstrap } from '../match-lobby'
 import { requireAdmin, requireUser } from '../middleware'
 import { jsonError, jsonSuccess } from '../responses'
 import type { Bindings } from '../types'
@@ -50,7 +50,7 @@ async function chooseGameServer(c: Parameters<typeof requireUser>[0], matchId: s
   return server
 }
 
-async function issueTicket(c: Parameters<typeof requireUser>[0], input: { userId: string; teamName: string; displayName: string; matchId: string; robotData: string; robotId?: string; slotId?: string; role?: string; alliance?: string }) {
+async function issueTicket(c: Parameters<typeof requireUser>[0], input: { userId: string; teamName: string; displayName: string; matchId: string; robotData: string; robotId?: string; robotRevision?: number | null; slotId?: string; role?: string; alliance?: string }) {
   if (!c.env.JWT_SECRET) return null
   return sign({
     sub: input.userId,
@@ -59,6 +59,7 @@ async function issueTicket(c: Parameters<typeof requireUser>[0], input: { userId
     display_name: input.displayName,
     robot_data: input.robotData,
     robot_id: input.robotId,
+    robot_revision: input.robotRevision,
     slot_id: input.slotId,
     role: input.role,
     alliance: input.alliance,
@@ -132,7 +133,25 @@ async function resolveDriverRobot(
 
 async function lockMatchBootstrap(c: Parameters<typeof requireUser>[0], match: typeof schema.matches.$inferSelect, serverId: string): Promise<MatchBootstrap> {
   const startsAt = Date.now() + 5_000
-  const bootstrap = await lobbyFor(c, match.id).lockBootstrap({
+  const lobby = lobbyFor(c, match.id)
+  const state = await lobby.getState()
+  const participants: BootstrapParticipant[] = await Promise.all(state.slots.flatMap((slot) => slot.occupant ? [slot] : []).map(async (slot) => {
+    const occupant = slot.occupant!
+    if (slot.role !== 'driver') {
+      return {
+        userId: occupant.userId, name: occupant.name, teamName: occupant.teamName,
+        role: slot.role, slotId: slot.id, alliance: slot.alliance,
+        robotId: null, robotRevision: null, robotData: null
+      }
+    }
+    const robot = await resolveDriverRobot(c, occupant.userId, match.gamePackId, occupant.robotId)
+    return {
+      userId: occupant.userId, name: occupant.name, teamName: occupant.teamName,
+      role: slot.role, slotId: slot.id, alliance: slot.alliance,
+      robotId: robot.id, robotRevision: robot.revision, robotData: robot.data
+    }
+  }))
+  const bootstrap = await lobby.lockBootstrap({
     assignedServerId: serverId,
     gamePackId: match.gamePackId,
     gamePackVersion: await gamePackVersion(c, match.gamePackId),
@@ -141,7 +160,8 @@ async function lockMatchBootstrap(c: Parameters<typeof requireUser>[0], match: t
     durationSeconds: 150,
     maxPlayers: match.maxPlayers,
     scenarioId: 'default',
-    visibility: 'private'
+    visibility: 'private',
+    participants
   })
   await drizzle(c.env.DB, { schema }).update(schema.matches).set({
     status: 'IN_PROGRESS', matchSeed: bootstrap.matchSeed, packVersion: bootstrap.gamePackVersion,
@@ -337,9 +357,12 @@ app.post('/:id/ticket', async (c) => {
   let driverRobot: DriverRobot | null = null
   if (station?.role === 'driver') {
     try {
-      driverRobot = await resolveDriverRobot(c, session.user.id, match.gamePackId, station.occupant?.robotId)
+      const bootstrap = await lobbyFor(c, match.id).getBootstrap()
+      const participant = bootstrap.participants.find((entry) => entry.userId === session.user.id && entry.slotId === station?.id)
+      if (!participant?.robotId || !participant.robotData) throw new Error('The locked robot revision is unavailable.')
+      driverRobot = { id: participant.robotId, data: participant.robotData, revision: participant.robotRevision }
     } catch (error) {
-      return jsonError(c, 400, 'ROBOT_NOT_FOUND', error instanceof Error ? error.message : 'The selected robot is unavailable.')
+      return jsonError(c, 409, 'LOBBY_INVALID_STATE', error instanceof Error ? error.message : 'The locked robot revision is unavailable.')
     }
   }
 
@@ -357,6 +380,7 @@ app.post('/:id/ticket', async (c) => {
     matchId,
     robotData: driverRobot?.data || JSON.stringify({ kind: adminBypass ? 'admin-test-cube' : 'human-player' }),
     robotId: driverRobot?.id,
+    robotRevision: driverRobot?.revision,
     slotId: station?.id || 'red-driver-1',
     role: station?.role || 'driver',
     alliance: station?.alliance || 'red'
@@ -432,6 +456,7 @@ app.post('/arena/open-join', async (c) => {
     matchId: ARENA_ID,
     robotData: driverRobot.data,
     robotId: driverRobot.id,
+    robotRevision: driverRobot.revision,
     slotId: `${alliance}-driver-1`,
     role: 'driver',
     alliance

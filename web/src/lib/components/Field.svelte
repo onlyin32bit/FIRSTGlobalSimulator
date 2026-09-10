@@ -14,7 +14,7 @@
 		Raycaster,
 		type Intersection
 	} from 'three';
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
 	import { get } from 'svelte/store';
 	import type { ZoneAABB } from '$lib/scoreStore';
@@ -107,7 +107,7 @@
 	});
 	const BRACE_COLLIDER_IDS = new Set(['Cylinder', 'Cylinder.001', 'Cylinder.002', 'Cylinder.003']);
 	const meshoptDecoder = useMeshopt();
-	const visualGltf = useGltf(assetUrls.visual, { meshoptDecoder });
+	const visualGltf = useGltf(untrack(() => assetUrls.visual), { meshoptDecoder });
 	const configuredScenes = new WeakSet<Object3D>();
 
 	let colliders = $state<ParsedCollider[]>([]);

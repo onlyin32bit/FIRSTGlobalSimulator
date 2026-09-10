@@ -90,7 +90,7 @@ pub(super) fn load_robot_definition(
         wheel_parts.iter().any(|part| part == id)
             || (wheel_parts.is_empty() && id.starts_with("ClimbWheel"))
     };
-    let mut raw_colliders = assimp_obb_nodes(physics)
+    let raw_colliders = assimp_obb_nodes(physics)
         .into_iter()
         .filter(|collider| {
             collider
@@ -153,7 +153,8 @@ pub(super) fn load_robot_definition(
                         target_pos[1] - node_pos[1],
                         target_pos[2] - node_pos[2],
                     ];
-                    let len = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+                    let len =
+                        (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
                     if len > 1.0e-6 {
                         [delta[0] / len, delta[1] / len, delta[2] / len]
                     } else {
@@ -197,21 +198,54 @@ pub(super) fn load_robot_definition(
         }
     }
 
-    let intake_zone = zones.iter().find(|zone| zone.kind == RobotSemanticKind::Intake);
-    let transfer_zone = zones.iter().find(|zone| zone.kind == RobotSemanticKind::Transfer);
-    let outtake_zone = zones.iter().find(|zone| zone.kind == RobotSemanticKind::Outtake);
+    let intake_zone = zones
+        .iter()
+        .find(|zone| zone.kind == RobotSemanticKind::Intake);
+    let transfer_zone = zones
+        .iter()
+        .find(|zone| zone.kind == RobotSemanticKind::Transfer);
+    let outtake_zone = zones
+        .iter()
+        .find(|zone| zone.kind == RobotSemanticKind::Outtake);
 
     let is_intake_collider = colliders
         .iter()
-        .map(|c| intake_zone.map_or(false, |z| crate::game::sphere_runtime::collision::sphere_authored_obb_contact(c.center, 1.0e-5, &z.collider).is_some()))
+        .map(|c| {
+            intake_zone.map_or(false, |z| {
+                crate::game::sphere_runtime::collision::sphere_authored_obb_contact(
+                    c.center,
+                    1.0e-5,
+                    &z.collider,
+                )
+                .is_some()
+            })
+        })
         .collect();
     let is_transfer_collider = colliders
         .iter()
-        .map(|c| transfer_zone.map_or(false, |z| crate::game::sphere_runtime::collision::sphere_authored_obb_contact(c.center, 1.0e-5, &z.collider).is_some()))
+        .map(|c| {
+            transfer_zone.map_or(false, |z| {
+                crate::game::sphere_runtime::collision::sphere_authored_obb_contact(
+                    c.center,
+                    1.0e-5,
+                    &z.collider,
+                )
+                .is_some()
+            })
+        })
         .collect();
     let is_outtake_collider = colliders
         .iter()
-        .map(|c| outtake_zone.map_or(false, |z| crate::game::sphere_runtime::collision::sphere_authored_obb_contact(c.center, 1.0e-5, &z.collider).is_some()))
+        .map(|c| {
+            outtake_zone.map_or(false, |z| {
+                crate::game::sphere_runtime::collision::sphere_authored_obb_contact(
+                    c.center,
+                    1.0e-5,
+                    &z.collider,
+                )
+                .is_some()
+            })
+        })
         .collect();
 
     info!(
@@ -234,7 +268,9 @@ pub(super) fn load_robot_definition(
     })
 }
 
-fn assimp_node_positions(scene: &serde_json::Value) -> std::collections::BTreeMap<String, [f32; 3]> {
+fn assimp_node_positions(
+    scene: &serde_json::Value,
+) -> std::collections::BTreeMap<String, [f32; 3]> {
     let mut positions = std::collections::BTreeMap::new();
     if let Some(root) = scene.get("rootnode") {
         collect_node_positions_recursive(root, &mut positions, None);
@@ -250,10 +286,7 @@ fn collect_node_positions_recursive(
     let local_matrix = match assimp_matrix(node) {
         Some(m) => m,
         None => [
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ],
     };
 
@@ -298,13 +331,10 @@ fn collect_nodes_recursive(
     out: &mut Vec<FieldCollider>,
     parent_matrix: Option<[f32; 16]>,
 ) {
-    let mut local_matrix = match assimp_matrix(node) {
+    let local_matrix = match assimp_matrix(node) {
         Some(m) => m,
         None => [
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ],
     };
 
@@ -465,7 +495,8 @@ mod test {
     use super::*;
     #[test]
     fn test_target_positions() {
-        let json_str = include_str!("../../../../pkgs/games/fgc-2026/robots/starter-bot/bot.semantics.json");
+        let json_str =
+            include_str!("../../../../pkgs/games/fgc-2026/robots/starter-bot/bot.semantics.json");
         let scene: serde_json::Value = serde_json::from_str(json_str).unwrap();
         let positions = assimp_node_positions(&scene);
         let colliders = assimp_obb_nodes(&scene);

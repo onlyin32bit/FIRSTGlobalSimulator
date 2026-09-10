@@ -114,17 +114,18 @@ mod tests {
             outtake_power: 0.0,
             climb_power: 0.0,
             sequence: 0,
+            connection_id: None,
             color: "#ef4444",
             wall_contact_normal: None,
             stored: VecDeque::new(),
             outtake_accumulator: 0.0,
             intake_accumulator: 0.0,
-            mech: MechSpec::default(),
             climbing_brace: Some("Cylinder.003".into()),
             floor_supported: true,
             brace_support_impulse: 0.0,
             climb_wheel_angle: 0.0,
             climb_wheel_radps: 0.0,
+            collider_cache: None,
         }
     }
 

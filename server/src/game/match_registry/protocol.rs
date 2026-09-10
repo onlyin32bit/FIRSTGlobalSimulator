@@ -8,6 +8,21 @@ pub(super) fn encode_state(
     process: ProcessMetrics,
     include_physics: bool,
 ) -> Vec<u8> {
+    encode_snapshot(state, process, include_physics, false)
+}
+
+/// A join baseline includes sleeping-object positions so a reconnect never
+/// depends on deltas observed by an older socket.
+pub(super) fn encode_baseline(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
+    encode_snapshot(state, process, true, true)
+}
+
+fn encode_snapshot(
+    state: &MatchStateSync,
+    process: ProcessMetrics,
+    include_physics: bool,
+    baseline: bool,
+) -> Vec<u8> {
     const METADATA: u16 = 1;
     const CLOCKS: u16 = 2;
     const METRICS: u16 = 3;
@@ -20,7 +35,13 @@ pub(super) fn encode_state(
     const PLAYER_PHYSICS: u16 = 10;
     const TRANSFER_DEBUG: u16 = 11;
     const BALL_DEBUG: u16 = 12;
-    let mut output = Vec::with_capacity(1024 + state.object_positions.count as usize * 12);
+    const INPUT_ACKS: u16 = 13;
+    let object_positions = if baseline {
+        &state.baseline_object_positions
+    } else {
+        &state.object_positions
+    };
+    let mut output = Vec::with_capacity(1024 + object_positions.count as usize * 12);
     output.extend_from_slice(b"FGS1");
     put_u16(&mut output, 1);
     put_u16(&mut output, 5);
@@ -109,11 +130,18 @@ pub(super) fn encode_state(
         }
     });
     section(&mut output, OBJECTS, |bytes| {
-        put_u32(bytes, state.object_positions.count);
-        bytes.extend_from_slice(&state.object_positions.active_mask);
-        bytes.extend_from_slice(&state.object_positions.moving_mask);
-        for value in &state.object_positions.quantized_positions {
+        put_u32(bytes, object_positions.count);
+        bytes.extend_from_slice(&object_positions.active_mask);
+        bytes.extend_from_slice(&object_positions.moving_mask);
+        for value in &object_positions.quantized_positions {
             put_u16(bytes, *value);
+        }
+    });
+    section(&mut output, INPUT_ACKS, |bytes| {
+        put_u16(bytes, state.input_acknowledgements.len() as u16);
+        for acknowledgement in &state.input_acknowledgements {
+            put_string(bytes, &acknowledgement.player_id);
+            put_u64(bytes, acknowledgement.sequence);
         }
     });
     if include_physics {
@@ -240,9 +268,9 @@ pub(super) fn encode_state(
     // Per active ball: u8 flags, u8 contact_count, then contact_count × string collider id
     // (the authored robot collision box the ball is touching).
     section(&mut output, BALL_DEBUG, |bytes| {
-        let count = state.object_positions.quantized_positions.len() / 3;
+        let count = object_positions.quantized_positions.len() / 3;
         put_u16(bytes, count as u16);
-        for (i, active) in state.object_positions.active_mask.iter().enumerate() {
+        for (i, active) in object_positions.active_mask.iter().enumerate() {
             if *active != 0 {
                 if i < state.ball_debug.len() {
                     put_u8(bytes, state.ball_debug[i]);

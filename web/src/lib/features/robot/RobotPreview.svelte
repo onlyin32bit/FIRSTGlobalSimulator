@@ -1,11 +1,12 @@
 <script lang="ts">
 	import { T } from '@threlte/core';
 	import { useGltf, useMeshopt } from '@threlte/extras';
+	import { untrack } from 'svelte';
 	import { Box3, Mesh, Object3D, Vector3 } from 'three';
 
 	let { assetUrl }: { assetUrl: string } = $props();
 	const meshoptDecoder = useMeshopt();
-	const robotGltf = useGltf(assetUrl, { meshoptDecoder });
+	const robotGltf = useGltf(untrack(() => assetUrl), { meshoptDecoder });
 	const configuredScenes = new WeakSet<Object3D>();
 	const bounds = new Box3();
 	const center = new Vector3();

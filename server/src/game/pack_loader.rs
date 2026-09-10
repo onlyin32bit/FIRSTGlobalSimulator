@@ -76,25 +76,12 @@ pub struct ScoringTargetConfig {
     #[serde(default)]
     pub requires_robot_outtake: bool,
     pub area: Option<ScoringAreaConfig>,
-    /// Open-top physical pocket that retains scored balls. This is separate
-    /// from the scoring area because a sensor can be much thinner than the
-    /// hopper behind it.
-    pub retention: Option<ScoringRetentionConfig>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ScoringAreaConfig {
     pub min: [f32; 3],
     pub max: [f32; 3],
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ScoringRetentionConfig {
-    pub min: [f32; 3],
-    pub max: [f32; 3],
-    #[serde(default = "default_true")]
-    pub open_top: bool,
 }
 
 fn default_true() -> bool {
@@ -208,7 +195,6 @@ pub struct FieldScoringTarget {
     pub requires_robot_outtake: bool,
     pub min: [f32; 3],
     pub max: [f32; 3],
-    pub retention: Option<ScoringRetentionConfig>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

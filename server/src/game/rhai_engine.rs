@@ -226,7 +226,8 @@ impl RhaiEngine {
                 .map_err(|_| format!("arena_config.{section}.{key} must be a number"))
         };
         let nested_number_opt = |map: &Map, key: &str| {
-            map.get(key).and_then(|v| v.as_float().ok().map(|n| n as f32))
+            map.get(key)
+                .and_then(|v| v.as_float().ok().map(|n| n as f32))
         };
         let nested_bool = |map: &Map, section: &str, key: &str| {
             map.get(key)

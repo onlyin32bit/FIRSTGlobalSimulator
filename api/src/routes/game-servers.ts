@@ -194,6 +194,7 @@ app.post('/tickets/verify', async (c) => {
     const displayName = typeof payload.display_name === 'string' ? payload.display_name : null
     const robotData = typeof payload.robot_data === 'string' ? payload.robot_data : null
     const robotId = typeof payload.robot_id === 'string' ? payload.robot_id : undefined
+    const robotRevision = typeof payload.robot_revision === 'number' ? payload.robot_revision : undefined
     const exp = typeof payload.exp === 'number' ? payload.exp : null
     if (!sub || !matchId || !teamName || !displayName || !robotData || !exp) {
       return jsonError(c, 401, 'AUTH_FAILED', 'The ticket claims are incomplete.')
@@ -211,7 +212,7 @@ app.post('/tickets/verify', async (c) => {
       const alliance = typeof payload.alliance === 'string' ? payload.alliance : undefined
       const isHost = role === 'host' && sub === bootstrap.hostId
       const isObserver = role === 'spectator' || role === 'reviewer' || isHost
-      if (!isObserver && (!participant || participant.role !== role || participant.slotId !== slotId || participant.alliance !== alliance || participant.robotId !== (robotId ?? null))) {
+      if (!isObserver && (!participant || participant.role !== role || participant.slotId !== slotId || participant.alliance !== alliance || participant.robotId !== (robotId ?? null) || participant.robotRevision !== (robotRevision ?? null))) {
         return jsonError(c, 403, 'AUTH_FAILED', 'This ticket no longer matches the locked roster.')
       }
     }
@@ -223,6 +224,7 @@ app.post('/tickets/verify', async (c) => {
         display_name: displayName,
         robot_data: robotData,
         robot_id: robotId,
+        robot_revision: robotRevision,
         slot_id: typeof payload.slot_id === 'string' ? payload.slot_id : undefined,
         role: typeof payload.role === 'string' ? payload.role : undefined,
         alliance: typeof payload.alliance === 'string' ? payload.alliance : undefined,
@@ -249,20 +251,7 @@ app.get('/matches/:id/bootstrap', async (c) => {
   try {
     const bootstrap = await lobbyFor(c, match.id).getBootstrap()
     if (bootstrap.assignedServerId !== server.id) return jsonError(c, 403, 'AUTH_FAILED', 'This server does not own the locked roster.')
-    const db = drizzle(c.env.DB, { schema })
-    const participants = await Promise.all(bootstrap.participants.map(async (entry) => {
-      if (entry.robotId?.startsWith('pack:')) {
-        const robotId = entry.robotId.slice('pack:'.length)
-        return {
-          ...entry,
-          robotRevision: null,
-          robotData: JSON.stringify({ kind: 'pack-robot', gamePackId: match.gamePackId, robotId })
-        }
-      }
-      const robot = entry.robotId ? await db.query.robots.findFirst({ where: eq(schema.robots.id, entry.robotId) }) : null
-      return { ...entry, robotRevision: robot?.updatedAt.getTime() ?? null, robotData: robot?.buildData ?? null }
-    }))
-    return jsonSuccess(c, { bootstrap: { ...bootstrap, participants } })
+    return jsonSuccess(c, { bootstrap })
   } catch {
     return jsonError(c, 409, 'LOBBY_INVALID_STATE', 'The match has no locked bootstrap.')
   }
@@ -275,10 +264,13 @@ app.post('/matches/:id/events', async (c) => {
   if (!server) return jsonError(c, 401, 'AUTH_FAILED', 'The game server key is invalid or disabled.')
   if (!match || match.status !== 'IN_PROGRESS' || body.events.some((event) => event.gamePackVersion !== match.packVersion)) return jsonError(c, 403, 'AUTH_FAILED', 'These events are not valid for the assigned match.')
   const db = drizzle(c.env.DB, { schema })
-  await db.batch(body.events.map((event) => db.insert(schema.matchEvents).values({
+  const statements: BatchItem<'sqlite'>[] = body.events.map((event) => db.insert(schema.matchEvents).values({
     id: `${match.id}:${event.eventId}`, matchId: match.id, eventId: event.eventId, tick: event.tick,
     kind: event.kind, payloadJson: JSON.stringify(event.payload), gamePackVersion: event.gamePackVersion, createdAt: new Date()
-  }).onConflictDoNothing()) as [ReturnType<typeof db.insert>, ...ReturnType<typeof db.insert>[]])
+  }).onConflictDoNothing())
+  if (statements.length > 0) {
+    await db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+  }
   return jsonSuccess(c, { accepted: body.events.length })
 })
 
