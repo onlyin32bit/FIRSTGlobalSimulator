@@ -13,11 +13,12 @@ const BRACE_GROUP: Group = Group::GROUP_3;
 const WHEEL_GROUP: Group = Group::GROUP_4;
 const GROUND_GROUP: Group = Group::GROUP_5;
 const DRIVEBASE_GROUP: Group = Group::GROUP_6;
+const BALL_GROUP: Group = Group::GROUP_7;
 
 fn field_groups() -> InteractionGroups {
     InteractionGroups::new(
         FIELD_GROUP,
-        ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP,
+        ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP | BALL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -25,7 +26,7 @@ fn field_groups() -> InteractionGroups {
 fn ground_groups() -> InteractionGroups {
     InteractionGroups::new(
         GROUND_GROUP,
-        DRIVEBASE_GROUP | WHEEL_GROUP,
+        DRIVEBASE_GROUP | WHEEL_GROUP | BALL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -33,7 +34,7 @@ fn ground_groups() -> InteractionGroups {
 fn brace_groups() -> InteractionGroups {
     InteractionGroups::new(
         BRACE_GROUP,
-        WHEEL_GROUP | ROBOT_GROUP,
+        WHEEL_GROUP | ROBOT_GROUP | BALL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -41,7 +42,7 @@ fn brace_groups() -> InteractionGroups {
 fn robot_groups() -> InteractionGroups {
     InteractionGroups::new(
         ROBOT_GROUP,
-        FIELD_GROUP | BRACE_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP,
+        FIELD_GROUP | BRACE_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP | BALL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -49,7 +50,7 @@ fn robot_groups() -> InteractionGroups {
 fn climb_support_groups() -> InteractionGroups {
     InteractionGroups::new(
         ROBOT_GROUP,
-        FIELD_GROUP | BRACE_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP,
+        FIELD_GROUP | BRACE_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP | BALL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -57,7 +58,13 @@ fn climb_support_groups() -> InteractionGroups {
 fn drivebase_groups() -> InteractionGroups {
     InteractionGroups::new(
         DRIVEBASE_GROUP,
-        FIELD_GROUP | BRACE_GROUP | GROUND_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP,
+        FIELD_GROUP
+            | BRACE_GROUP
+            | GROUND_GROUP
+            | ROBOT_GROUP
+            | DRIVEBASE_GROUP
+            | WHEEL_GROUP
+            | BALL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -65,9 +72,24 @@ fn drivebase_groups() -> InteractionGroups {
 fn wheel_groups() -> InteractionGroups {
     InteractionGroups::new(
         WHEEL_GROUP,
-        FIELD_GROUP | GROUND_GROUP | BRACE_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP,
+        FIELD_GROUP
+            | GROUND_GROUP
+            | BRACE_GROUP
+            | ROBOT_GROUP
+            | DRIVEBASE_GROUP
+            | WHEEL_GROUP
+            | BALL_GROUP,
         InteractionTestMode::And,
     )
+}
+
+fn ball_groups(ball_to_ball_collisions: bool) -> InteractionGroups {
+    let mut filter =
+        FIELD_GROUP | GROUND_GROUP | BRACE_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP;
+    if ball_to_ball_collisions {
+        filter |= BALL_GROUP;
+    }
+    InteractionGroups::new(BALL_GROUP, filter, InteractionTestMode::And)
 }
 
 struct RobotHandles {
@@ -111,6 +133,10 @@ pub(super) struct HybridRobotWorld {
     definition: RobotDefinition,
     support_colliders: HashSet<ColliderHandle>,
     braces: HashMap<String, BraceRail>,
+    balls: Vec<RigidBodyHandle>,
+    full_rapier: bool,
+    floor_y: f32,
+    ball_radius: f32,
 }
 
 impl HybridRobotWorld {
@@ -120,6 +146,7 @@ impl HybridRobotWorld {
         field_colliders: &[FieldCollider],
         boundary: &FieldBoundary,
         floor_y: f32,
+        full_rapier: bool,
     ) -> Self {
         let mut world = Self {
             pipeline: PhysicsPipeline::new(),
@@ -143,6 +170,10 @@ impl HybridRobotWorld {
             definition: definition.clone(),
             support_colliders: HashSet::new(),
             braces: HashMap::new(),
+            balls: Vec::new(),
+            full_rapier,
+            floor_y,
+            ball_radius: arena.ball.radius_m(),
         };
         let floor = world.colliders.insert(
             ColliderBuilder::cuboid(
@@ -255,6 +286,116 @@ impl HybridRobotWorld {
             );
             self.support_colliders.insert(handle);
         }
+    }
+
+    /// Add the pack's game pieces to the same Rapier world as the authored
+    /// field and robot. SphereRuntime keeps semantic ownership/scoring state;
+    /// Rapier owns every physical pose and impulse in this mode.
+    pub(super) fn add_balls(&mut self, balls: &mut [super::Ball], arena: &ArenaConfig) {
+        if !self.full_rapier || !self.balls.is_empty() {
+            return;
+        }
+        self.balls.reserve(balls.len());
+        for ball in balls {
+            let body = self.bodies.insert(
+                RigidBodyBuilder::dynamic()
+                    .translation(
+                        vector![ball.position[0], ball.position[1], ball.position[2]].into(),
+                    )
+                    .linvel(vector![ball.velocity[0], ball.velocity[1], ball.velocity[2]].into())
+                    .angvel(
+                        vector![
+                            ball.angular_velocity[0],
+                            ball.angular_velocity[1],
+                            ball.angular_velocity[2]
+                        ]
+                        .into(),
+                    )
+                    .linear_damping(arena.ball.linear_damping.max(0.0))
+                    .angular_damping(arena.ball.angular_damping.max(0.0))
+                    .gravity_scale(arena.gravity_scale)
+                    .ccd_enabled(true)
+                    .soft_ccd_prediction(arena.ball.soft_ccd_prediction_m.max(0.0))
+                    .build(),
+            );
+            self.bodies[body].set_enabled(ball.active);
+            self.colliders.insert_with_parent(
+                ColliderBuilder::ball(arena.ball.radius_m())
+                    .mass(arena.ball.mass_kg.max(0.001))
+                    .friction(arena.ball.ball_friction.max(0.0))
+                    .restitution(arena.ball.restitution.clamp(0.0, 1.0))
+                    .restitution_combine_rule(CoefficientCombineRule::Max)
+                    .collision_groups(ball_groups(arena.ball_to_ball_collisions))
+                    .build(),
+                body,
+                &mut self.bodies,
+            );
+            ball.physics_dirty = false;
+            self.balls.push(body);
+        }
+    }
+
+    pub(super) fn push_dirty_balls(&mut self, balls: &mut [super::Ball]) {
+        if !self.full_rapier {
+            return;
+        }
+        for (ball, handle) in balls.iter_mut().zip(&self.balls) {
+            let Some(body) = self.bodies.get_mut(*handle) else {
+                continue;
+            };
+            if !ball.active {
+                body.set_enabled(false);
+                continue;
+            }
+            if !body.is_enabled() || ball.physics_dirty {
+                body.set_enabled(true);
+                body.set_translation(
+                    Vector::new(ball.position[0], ball.position[1], ball.position[2]),
+                    true,
+                );
+                body.set_linvel(
+                    Vector::new(ball.velocity[0], ball.velocity[1], ball.velocity[2]),
+                    true,
+                );
+                body.set_angvel(
+                    Vector::new(
+                        ball.angular_velocity[0],
+                        ball.angular_velocity[1],
+                        ball.angular_velocity[2],
+                    ),
+                    true,
+                );
+                ball.physics_dirty = false;
+            }
+        }
+    }
+
+    pub(super) fn pull_balls(&self, balls: &mut [super::Ball]) {
+        if !self.full_rapier {
+            return;
+        }
+        for (ball, handle) in balls.iter_mut().zip(&self.balls) {
+            let Some(body) = self.bodies.get(*handle) else {
+                continue;
+            };
+            if !body.is_enabled() {
+                continue;
+            }
+            let position = body.translation();
+            let velocity = body.linvel();
+            let angular_velocity = body.angvel();
+            ball.position = [position.x, position.y, position.z];
+            ball.velocity = [velocity.x, velocity.y, velocity.z];
+            ball.pre_solve_velocity = ball.velocity;
+            ball.angular_velocity = [angular_velocity.x, angular_velocity.y, angular_velocity.z];
+            ball.sleeping = body.is_sleeping();
+            ball.grounded = position.y <= self.floor_y + self.ball_radius + 0.003;
+            ball.on_ramp = false;
+        }
+    }
+
+    pub(super) fn contact_count(&self) -> usize {
+        self.narrow_phase.contact_pairs().count()
     }
 
     pub(super) fn add_robot(&mut self, id: &str, player: &PlayerBody, arena: &ArenaConfig) {
@@ -539,6 +680,7 @@ impl HybridRobotWorld {
         self.apply_controls(players, arena, dt);
         self.integration.dt = dt / ROBOT_SUBSTEPS as f32;
         for _ in 0..ROBOT_SUBSTEPS {
+            self.apply_ball_rolling_resistance(arena, self.integration.dt);
             self.pipeline.step(
                 self.gravity,
                 &self.integration,
@@ -555,6 +697,30 @@ impl HybridRobotWorld {
             );
         }
         self.sync_players(players, dt);
+    }
+
+    fn apply_ball_rolling_resistance(&mut self, arena: &ArenaConfig, dt: f32) {
+        if !self.full_rapier {
+            return;
+        }
+        let ground_height = self.floor_y + self.ball_radius + 0.004;
+        let deceleration = arena.floor.rolling_resistance_mps2.max(0.0) * dt;
+        for handle in &self.balls {
+            let Some(body) = self.bodies.get_mut(*handle) else {
+                continue;
+            };
+            if !body.is_enabled() || body.is_sleeping() || body.translation().y > ground_height {
+                continue;
+            }
+            let velocity = body.linvel();
+            let horizontal = Vector::new(velocity.x, 0.0, velocity.z);
+            let speed = horizontal.length();
+            if speed <= f32::EPSILON {
+                continue;
+            }
+            let delta = deceleration.min(speed);
+            body.apply_impulse(-horizontal / speed * (body.mass() * delta), true);
+        }
     }
 
     fn apply_controls(
@@ -575,7 +741,8 @@ impl HybridRobotWorld {
                     .and_then(|joint| self.joints.get_mut(joint, true))
                 && let Some(revolute) = joint.data.as_revolute_mut()
             {
-                let reverse_climb = !handles.floor_supported && player.move_z < -CONTROL_DEADBAND && !powered;
+                let reverse_climb =
+                    !handles.floor_supported && player.move_z < -CONTROL_DEADBAND && !powered;
                 let target = if powered {
                     climber.free_speed_radps * player.climb_power
                 } else if reverse_climb {
@@ -697,7 +864,8 @@ impl HybridRobotWorld {
                             let motor_impulse = motor_force * dt;
                             let normal_impulse = support_impulse + guide.length();
                             let friction_impulse = climber.dynamic_friction * normal_impulse;
-                            let max_impulse = speed_impulse.min(motor_impulse).min(friction_impulse);
+                            let max_impulse =
+                                speed_impulse.min(motor_impulse).min(friction_impulse);
                             brace.ascent * (speed_delta.signum() * max_impulse)
                         } else {
                             Vector::ZERO

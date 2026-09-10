@@ -2,10 +2,70 @@ use super::*;
 use std::time::Instant;
 
 fn arena() -> ArenaConfig {
-    crate::game::pack_loader::PackLoader::new("0.1.0")
+    let mut arena = crate::game::pack_loader::PackLoader::new("0.1.0")
         .load_pack("../pkgs/games/fgc-2026/manifest.json")
         .unwrap()
-        .arena
+        .arena;
+    arena.physics_backend = "sphere_xpbd".into();
+    arena
+}
+
+#[test]
+#[ignore = "manual release-mode authoritative Rapier benchmark"]
+fn benchmark_rapier_authored_500_ball_world() {
+    let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.spawn_release_seconds = 0.0;
+    let mut runtime = SphereRuntime::new("rapier-benchmark".into(), "fgc-2026".into(), 0);
+    runtime.create_test_arena(&arena);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.add_player(
+        "player".into(),
+        "Player".into(),
+        "blue".into(),
+        None,
+        &arena,
+    );
+    runtime.set_player_input("player", 0.35, 1.0, 1.0, 0.0, 1);
+
+    for _ in 0..120 {
+        runtime.apply_player_drive(&arena, 1.0 / 60.0);
+        runtime.tick(1.0 / 60.0);
+    }
+
+    let mut samples = Vec::with_capacity(300);
+    for tick in 0..300 {
+        if tick % 60 == 0 {
+            for (index, ball) in runtime.balls.iter_mut().enumerate() {
+                let angle = index as f32 * 0.618_034;
+                ball.velocity[0] += angle.cos() * 1.5;
+                ball.velocity[2] += angle.sin() * 1.5;
+                ball.sleeping = false;
+                ball.physics_dirty = true;
+            }
+        }
+        let started = Instant::now();
+        runtime.apply_player_drive(&arena, 1.0 / 60.0);
+        runtime.tick(1.0 / 60.0);
+        samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    let p95 = samples[(samples.len() as f32 * 0.95) as usize];
+    let metrics = runtime.step_metrics();
+    eprintln!(
+        "rapier balls={} p95={p95:.3}ms solve={:.3}ms contacts={} active={} sleeping={}",
+        arena.object_count,
+        metrics.solve_ms,
+        metrics.contacts,
+        metrics.active_balls,
+        metrics.sleeping_balls,
+    );
+    assert_eq!(
+        runtime.field_object_positions().count as usize,
+        arena.object_count
+    );
 }
 
 #[test]

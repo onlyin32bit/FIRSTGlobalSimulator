@@ -9,7 +9,7 @@ use tracing::info;
 use super::match_runtime::{MatchRuntime, PlayerSnapshot, ScoreState};
 use super::pack_loader::{ArenaConfig, GamePackMetadata};
 use super::rhai_engine::RhaiEngine;
-use super::sphere_runtime::{MechSpec, SphereRuntime, StepMetrics, TransferDebug, BallDebugFlag};
+use super::sphere_runtime::{BallDebugFlag, SphereRuntime, StepMetrics, TransferDebug};
 
 pub struct MatchRegistry {
     matches: RwLock<HashMap<String, MatchHandle>>,
@@ -17,7 +17,7 @@ pub struct MatchRegistry {
     reports: Option<mpsc::UnboundedSender<MatchReport>>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapParticipant {
     pub user_id: String,
@@ -26,9 +26,10 @@ pub struct BootstrapParticipant {
     pub alliance: String,
     pub robot_id: Option<String>,
     pub robot_revision: Option<u64>,
+    pub robot_data: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchBootstrap {
     pub match_id: String,
@@ -46,6 +47,52 @@ pub struct MatchBootstrap {
     pub open_arena: bool,
     #[serde(default)]
     pub participants: Vec<BootstrapParticipant>,
+}
+
+fn validate_bootstrap_robot_revisions(bootstrap: &MatchBootstrap) -> Result<(), String> {
+    for participant in bootstrap
+        .participants
+        .iter()
+        .filter(|participant| participant.role == "driver")
+    {
+        let robot_id = participant
+            .robot_id
+            .as_deref()
+            .ok_or_else(|| format!("Driver {} has no locked robot.", participant.user_id))?;
+        let robot_data = participant.robot_data.as_deref().ok_or_else(|| {
+            format!(
+                "Driver {} has no robot revision snapshot.",
+                participant.user_id
+            )
+        })?;
+        let data: serde_json::Value = serde_json::from_str(robot_data).map_err(|_| {
+            format!(
+                "Driver {} has an invalid locked robot revision.",
+                participant.user_id
+            )
+        })?;
+        if !data.is_object() {
+            return Err(format!(
+                "Driver {} has a non-object robot revision.",
+                participant.user_id
+            ));
+        }
+        if robot_id.starts_with("pack:") {
+            let robot_id_from_data = data.get("robotId").and_then(serde_json::Value::as_str);
+            if robot_id_from_data != Some(&robot_id["pack:".len()..]) {
+                return Err(format!(
+                    "Driver {} pack robot snapshot does not match its locked id.",
+                    participant.user_id
+                ));
+            }
+        } else if participant.robot_revision.is_none() {
+            return Err(format!(
+                "Driver {} has no immutable custom robot revision.",
+                participant.user_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -83,11 +130,21 @@ pub struct MatchHandle {
     shutdown: Arc<AtomicBool>,
     kicked_users: Arc<Mutex<HashSet<String>>>,
     telemetry: Arc<Mutex<RuntimeMatchTelemetry>>,
+    latest_state: Arc<Mutex<Option<Arc<MatchStateSync>>>>,
     pub bootstrap: Arc<MatchBootstrap>,
     reports: Option<mpsc::UnboundedSender<MatchReport>>,
 }
 
 impl MatchHandle {
+    /// A complete snapshot lets a new socket hydrate before receiving deltas.
+    pub fn reconnect_baseline(&self) -> Option<Bytes> {
+        self.latest_state
+            .lock()
+            .ok()
+            .and_then(|state| state.as_ref().cloned())
+            .map(|state| Bytes::from(encode_baseline(&state, ProcessMetrics::default())))
+    }
+
     pub fn report_input_rejection(&self, user_id: &str, reason: &str) {
         if let Some(reports) = &self.reports {
             let _ = reports.send(MatchReport::Event(MatchEventReport {
@@ -133,22 +190,21 @@ pub enum MatchInput {
         name: String,
         team_name: String,
         slot_id: Option<String>,
+        connection_id: String,
     },
     PlayerLeave {
         user_id: String,
+        connection_id: Option<String>,
     },
     PlayerInput {
         user_id: String,
+        connection_id: String,
         move_x: f32,
         move_z: f32,
         intake_power: f32,
         outtake_power: f32,
         climb_power: f32,
         sequence: u64,
-    },
-    PlayerMech {
-        user_id: String,
-        mech: MechSpec,
     },
     /// Keep simulating past the 150 s clock so teams can keep practising with
     /// the same field. Scoring stays disabled while practice continues.
@@ -164,6 +220,12 @@ pub struct ObjectPositionsSync {
     pub quantized_positions: Vec<u16>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputAcknowledgement {
+    pub player_id: String,
+    pub sequence: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct MatchStateSync {
     pub tick: u64,
@@ -174,6 +236,9 @@ pub struct MatchStateSync {
     pub object_radius: f32,
     pub object_color: String,
     pub object_positions: ObjectPositionsSync,
+    /// Complete object positions used only for a joining client's baseline.
+    pub baseline_object_positions: ObjectPositionsSync,
+    pub input_acknowledgements: Vec<InputAcknowledgement>,
     pub contacts: usize,
     pub match_clock: f64,
     pub match_duration_seconds: f64,
@@ -235,7 +300,13 @@ enum RuntimeBackend {
 
 impl RuntimeBackend {
     fn new(match_id: String, pack: &GamePackMetadata, seed: u64) -> Self {
-        if pack.arena.physics_backend == "sphere_xpbd" {
+        // Both supported pack backends use the authored runtime. Its Rapier
+        // mode owns all rigid bodies; sphere_xpbd remains the dense-ball
+        // fallback. MatchRuntime is kept only for legacy packs.
+        if matches!(
+            pack.arena.physics_backend.as_str(),
+            "sphere_xpbd" | "rapier"
+        ) {
             let mut runtime = SphereRuntime::new(match_id, pack.manifest.id.clone(), seed);
             runtime.context.game_pack_version = pack.manifest.version.clone();
             runtime.create_field_arena(&pack.arena, &pack.field_definition);
@@ -255,24 +326,32 @@ impl RuntimeBackend {
         name: String,
         team: String,
         slot_id: Option<String>,
+        connection_id: String,
         arena: &ArenaConfig,
     ) {
         match self {
-            Self::Rapier(runtime) => runtime.add_player(id, name, team, arena),
-            Self::Sphere(runtime) => runtime.add_player(id, name, team, slot_id.as_deref(), arena),
+            Self::Rapier(runtime) => {
+                runtime.add_player(id.clone(), name, team, arena);
+                runtime.bind_player_connection(&id, connection_id);
+            }
+            Self::Sphere(runtime) => {
+                runtime.add_player(id.clone(), name, team, slot_id.as_deref(), arena);
+                runtime.bind_player_connection(&id, connection_id);
+            }
         }
     }
 
-    fn remove_player(&mut self, id: &str) {
+    fn remove_player(&mut self, id: &str, connection_id: Option<&str>) {
         match self {
-            Self::Rapier(runtime) => runtime.remove_player(id),
-            Self::Sphere(runtime) => runtime.remove_player(id),
+            Self::Rapier(runtime) => runtime.remove_player_from_connection(id, connection_id),
+            Self::Sphere(runtime) => runtime.remove_player_from_connection(id, connection_id),
         }
     }
 
     fn set_player_input(
         &mut self,
         id: &str,
+        connection_id: &str,
         x: f32,
         z: f32,
         intake: f32,
@@ -281,10 +360,19 @@ impl RuntimeBackend {
         sequence: u64,
     ) {
         match self {
-            Self::Rapier(runtime) => runtime.set_player_input(id, x, z, sequence),
-            Self::Sphere(runtime) => {
-                runtime.set_player_input_with_climb(id, x, z, intake, outtake, climb, sequence)
+            Self::Rapier(runtime) => {
+                runtime.set_player_input_from_connection(id, connection_id, x, z, sequence)
             }
+            Self::Sphere(runtime) => runtime.set_player_input_from_connection(
+                id,
+                connection_id,
+                x,
+                z,
+                intake,
+                outtake,
+                climb,
+                sequence,
+            ),
         }
     }
 
@@ -304,12 +392,6 @@ impl RuntimeBackend {
     fn set_scoring_enabled(&mut self, enabled: bool) {
         if let Self::Sphere(runtime) = self {
             runtime.set_scoring_enabled(enabled);
-        }
-    }
-
-    fn set_player_mech(&mut self, id: &str, mech: MechSpec) {
-        if let Self::Sphere(runtime) = self {
-            runtime.set_player_mech(id, mech);
         }
     }
 
@@ -399,6 +481,20 @@ impl RuntimeBackend {
         match self {
             Self::Rapier(runtime) => runtime.field_object_positions(),
             Self::Sphere(runtime) => runtime.field_object_positions(),
+        }
+    }
+
+    fn baseline_positions(&self) -> ObjectPositionsSync {
+        match self {
+            Self::Rapier(runtime) => runtime.field_object_positions_full(),
+            Self::Sphere(runtime) => runtime.field_object_positions_full(),
+        }
+    }
+
+    fn input_acknowledgements(&self) -> Vec<InputAcknowledgement> {
+        match self {
+            Self::Rapier(runtime) => runtime.input_acknowledgements(),
+            Self::Sphere(runtime) => runtime.input_acknowledgements(),
         }
     }
 
@@ -637,6 +733,7 @@ impl MatchRegistry {
             .input_tx
             .send(MatchInput::PlayerLeave {
                 user_id: user_id.to_string(),
+                connection_id: None,
             })
             .await;
         Ok(())
@@ -728,10 +825,11 @@ impl MatchRegistry {
         {
             return Err("The assigned game-pack version is not loaded on this host.".to_string());
         }
+        validate_bootstrap_robot_revisions(&bootstrap)?;
         let match_id = bootstrap.match_id.clone();
         let mut matches = self.matches.write().await;
         if let Some(handle) = matches.get(&match_id) {
-            if handle.bootstrap.match_seed != bootstrap.match_seed {
+            if handle.bootstrap.as_ref() != &bootstrap {
                 return Err("The match bootstrap changed after startup.".to_string());
             }
             return Ok(handle.clone());
@@ -739,6 +837,7 @@ impl MatchRegistry {
 
         let (input_tx, mut input_rx) = mpsc::channel(256);
         let (state_tx, _) = broadcast::channel(16);
+        let latest_state = Arc::new(Mutex::new(None::<Arc<MatchStateSync>>));
         let handle = MatchHandle {
             input_tx,
             state_tx: state_tx.clone(),
@@ -748,12 +847,12 @@ impl MatchRegistry {
                 id: match_id.clone(),
                 ..Default::default()
             })),
+            latest_state: latest_state.clone(),
             bootstrap: Arc::new(bootstrap.clone()),
             reports: self.reports.clone(),
         };
         matches.insert(match_id.clone(), handle.clone());
         let pack = self.pack.clone();
-        let latest_state = Arc::new(Mutex::new(None::<Arc<MatchStateSync>>));
         let telemetry = handle.telemetry.clone();
         let publisher_shutdown = handle.shutdown.clone();
         let report_tx = self.reports.clone();
@@ -877,18 +976,19 @@ impl MatchRegistry {
                                 name,
                                 team_name,
                                 slot_id,
-                            } if !controls_locked => runtime.add_player(user_id, name, team_name, slot_id, &pack.arena),
-                            MatchInput::PlayerLeave { user_id } => runtime.remove_player(&user_id),
+                                connection_id,
+                            } if !controls_locked => runtime.add_player(user_id, name, team_name, slot_id, connection_id, &pack.arena),
+                            MatchInput::PlayerLeave { user_id, connection_id } => runtime.remove_player(&user_id, connection_id.as_deref()),
                             MatchInput::PlayerInput {
                                 user_id,
+                                connection_id,
                                 move_x,
                                 move_z,
                                 intake_power,
                                 outtake_power,
                                 climb_power,
                                 sequence,
-                            } if !controls_locked => runtime.set_player_input(&user_id, move_x, move_z, intake_power, outtake_power, climb_power, sequence),
-                            MatchInput::PlayerMech { user_id, mech } if !controls_locked => runtime.set_player_mech(&user_id, mech),
+                            } if !controls_locked => runtime.set_player_input(&user_id, &connection_id, move_x, move_z, intake_power, outtake_power, climb_power, sequence),
                             MatchInput::ContinuePractice if !controls_locked => practice_continue = true,
                             MatchInput::EndPractice if !controls_locked => practice_continue = false,
                             _ => {}
@@ -999,6 +1099,8 @@ impl MatchRegistry {
                             object_radius: pack.arena.ball.radius_m(),
                             object_color: pack.arena.color.clone(),
                             object_positions: runtime.positions(),
+                            baseline_object_positions: runtime.baseline_positions(),
+                            input_acknowledgements: runtime.input_acknowledgements(),
                             contacts: runtime.contacts(),
                             match_clock,
                             match_duration_seconds: match_duration.as_secs_f64(),
@@ -1064,7 +1166,7 @@ impl MatchRegistry {
 }
 
 mod protocol;
-use protocol::encode_state;
+use protocol::{encode_baseline, encode_state};
 
 #[derive(Clone, Copy, Default)]
 struct ProcessMetrics {

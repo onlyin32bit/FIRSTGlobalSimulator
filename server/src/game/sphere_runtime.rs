@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
-use super::match_registry::ObjectPositionsSync;
+use super::match_registry::{InputAcknowledgement, ObjectPositionsSync};
 use super::match_runtime::{MatchContext, MatchPhase, PlayerSnapshot, ScoreState};
 use super::pack_loader::{
     ArenaConfig, FieldBoundary, FieldCollider, FieldDefinition, FieldScoringTarget, FieldTrigger,
@@ -38,10 +38,12 @@ fn apply_control_deadband(value: f32) -> f32 {
 /// own centre is inside the active zone; skipping every robot collider turns
 /// the whole chassis (including hopper ramps and walls) into a hole.
 #[allow(dead_code)]
-pub(crate) fn collider_is_inside_mechanism_zone(collider: &FieldCollider, zone: &FieldCollider) -> bool {
+pub(crate) fn collider_is_inside_mechanism_zone(
+    collider: &FieldCollider,
+    zone: &FieldCollider,
+) -> bool {
     sphere_authored_obb_contact(collider.center, 1.0e-5, zone).is_some()
 }
-
 
 #[derive(Debug, Clone)]
 pub struct TransferDebug {
@@ -97,10 +99,15 @@ struct Ball {
     grounded: bool,
     on_ramp: bool,
     active: bool,
+    /// A semantic operation changed this proxy state. The Rapier body is
+    /// updated once at the boundary between gameplay and the next physics step.
+    physics_dirty: bool,
     release_at_seconds: f32,
     /// Whether the EXT dispenser has poured this piece. A released piece that
     /// is later captured or contained must never be poured again.
     released: bool,
+    /// At most one robot may contain a ball at a time.
+    owner: Option<String>,
     last_outtake_alliance: Option<String>,
 }
 
@@ -119,6 +126,7 @@ struct PlayerBody {
     outtake_power: f32,
     climb_power: f32,
     sequence: u64,
+    connection_id: Option<String>,
     color: &'static str,
     /// Outward normal of a static surface touched during the previous solver
     /// step. This keeps the drivetrain from turning shallow wall contact into
@@ -131,76 +139,113 @@ struct PlayerBody {
     outtake_accumulator: f32,
     /// Fractional intake accumulator (capture is rate-limited too).
     intake_accumulator: f32,
-    /// Per-player adjustable mech spec overrides (capacity, flywheel, rates).
-    mech: MechSpec,
     /// Authored brace currently touching the powered groove wheel.
     climbing_brace: Option<String>,
     floor_supported: bool,
     brace_support_impulse: f32,
     climb_wheel_angle: f32,
     climb_wheel_radps: f32,
+    collider_cache: Option<CachedRobotColliders>,
 }
 
-/// Adjustable robot mechanic spec. Unset fields fall back to the arena pack.
-#[derive(Debug, Clone, Default)]
-pub struct MechSpec {
-    pub capacity: Option<usize>,
-    pub intake_rate_bps: Option<f32>,
-    pub intake_surface_speed_mps: Option<f32>,
-    pub intake_normal_force_n: Option<f32>,
-    pub transfer_surface_speed_mps: Option<f32>,
-    pub transfer_normal_force_n: Option<f32>,
-    pub outtake_rate_bps: Option<f32>,
-    pub outtake_velocity_mps: Option<f32>,
-    pub outtake_normal_force_n: Option<f32>,
-    pub outtake_angle_deg: Option<f32>,
-    pub flywheel_width_m: Option<f32>,
+/// A small XZ grid over authored collision bounds. The narrow phase still
+/// receives colliders in authored order, so this only removes impossible work.
+#[derive(Default)]
+struct ColliderSpatialIndex {
+    min_x: f32,
+    min_z: f32,
+    width: usize,
+    depth: usize,
+    cells: Vec<Vec<usize>>,
 }
 
-impl MechSpec {
-    pub fn capacity_with(&self, base: usize) -> usize {
-        self.capacity.unwrap_or(base)
+impl ColliderSpatialIndex {
+    const CELL_SIZE_M: f32 = 1.0;
+
+    fn rebuild(&mut self, boundary: &FieldBoundary, colliders: &[FieldCollider]) {
+        self.min_x = boundary.min[0];
+        self.min_z = boundary.min[2];
+        self.width = ((boundary.max[0] - boundary.min[0]) / Self::CELL_SIZE_M)
+            .ceil()
+            .max(1.0) as usize;
+        self.depth = ((boundary.max[2] - boundary.min[2]) / Self::CELL_SIZE_M)
+            .ceil()
+            .max(1.0) as usize;
+        self.cells.clear();
+        self.cells.resize_with(self.width * self.depth, Vec::new);
+
+        for (index, collider) in colliders.iter().enumerate() {
+            let (min_x, max_x, min_z, max_z) = self.cell_range(collider.min, collider.max);
+            for z in min_z..=max_z {
+                for x in min_x..=max_x {
+                    self.cells[z * self.width + x].push(index);
+                }
+            }
+        }
+    }
+
+    fn query(&self, min: Vec3, max: Vec3, candidates: &mut Vec<usize>) {
+        candidates.clear();
+        if self.cells.is_empty() {
+            return;
+        }
+        let (min_x, max_x, min_z, max_z) = self.cell_range(min, max);
+        for z in min_z..=max_z {
+            for x in min_x..=max_x {
+                candidates.extend_from_slice(&self.cells[z * self.width + x]);
+            }
+        }
+        // A collider can span multiple cells. Restoring its source order keeps
+        // the iterative solver's response identical to a full linear scan.
+        candidates.sort_unstable();
+        candidates.dedup();
+    }
+
+    fn cell_range(&self, min: Vec3, max: Vec3) -> (usize, usize, usize, usize) {
+        let to_x = |value: f32| {
+            ((value - self.min_x) / Self::CELL_SIZE_M)
+                .floor()
+                .clamp(0.0, self.width.saturating_sub(1) as f32) as usize
+        };
+        let to_z = |value: f32| {
+            ((value - self.min_z) / Self::CELL_SIZE_M)
+                .floor()
+                .clamp(0.0, self.depth.saturating_sub(1) as f32) as usize
+        };
+        (to_x(min[0]), to_x(max[0]), to_z(min[2]), to_z(max[2]))
     }
 }
 
-/// Effective robot config = arena pack defaults merged with the player's
-/// adjustable mechanic overrides.
-fn effective_robot<'a>(base: &'a RobotPhysicsConfig, mech: &MechSpec) -> RobotPhysicsConfig {
-    let mut robot = base.clone();
-    if let Some(capacity) = mech.capacity {
-        robot.storage_capacity = capacity;
+struct CachedRobotColliders {
+    position: Vec3,
+    rotation: [f32; 4],
+    colliders: Vec<FieldCollider>,
+    index: ColliderSpatialIndex,
+}
+
+impl CachedRobotColliders {
+    fn refresh(
+        &mut self,
+        definition: &RobotDefinition,
+        position: Vec3,
+        rotation: [f32; 4],
+        ground_offset_y: f32,
+        boundary: &FieldBoundary,
+    ) {
+        if self.position == position && self.rotation == rotation {
+            return;
+        }
+        self.position = position;
+        self.rotation = rotation;
+        self.colliders.clear();
+        self.colliders.extend(
+            definition
+                .colliders
+                .iter()
+                .map(|local| robot_local_collider_pose(local, position, rotation, ground_offset_y)),
+        );
+        self.index.rebuild(boundary, &self.colliders);
     }
-    if let Some(rate) = mech.intake_rate_bps {
-        robot.intake_rate_bps = rate;
-    }
-    if let Some(speed) = mech.intake_surface_speed_mps {
-        robot.intake_surface_speed_mps = speed;
-    }
-    if let Some(force) = mech.intake_normal_force_n {
-        robot.intake_normal_force_n = force;
-    }
-    if let Some(speed) = mech.transfer_surface_speed_mps {
-        robot.transfer_surface_speed_mps = speed;
-    }
-    if let Some(force) = mech.transfer_normal_force_n {
-        robot.transfer_normal_force_n = force;
-    }
-    if let Some(rate) = mech.outtake_rate_bps {
-        robot.outtake_rate_bps = rate;
-    }
-    if let Some(velocity) = mech.outtake_velocity_mps {
-        robot.outtake_velocity_mps = velocity;
-    }
-    if let Some(force) = mech.outtake_normal_force_n {
-        robot.outtake_normal_force_n = force;
-    }
-    if let Some(angle) = mech.outtake_angle_deg {
-        robot.outtake_angle_deg = angle;
-    }
-    if let Some(width) = mech.flywheel_width_m {
-        robot.flywheel_width_m = width;
-    }
-    robot
 }
 
 /// A narrow, deterministic physics backend for the simulator's dominant case:
@@ -225,6 +270,7 @@ pub struct SphereRuntime {
     ball_spawn: Vec3,
     ball_release_elapsed: Option<f32>,
     field_colliders: Vec<FieldCollider>,
+    field_collider_index: ColliderSpatialIndex,
     field_anchors: BTreeMap<String, Vec3>,
     scoring_targets: Vec<FieldScoringTarget>,
     scored_target_by_ball: Vec<Option<usize>>,
@@ -233,11 +279,12 @@ pub struct SphereRuntime {
     intake_candidates: Vec<(f32, usize)>,
     robot_definition: Option<RobotDefinition>,
     robot_physics: Option<HybridRobotWorld>,
+    use_rapier_balls: bool,
 }
 
 impl SphereRuntime {
     pub fn ball_contact_collider_ids(&self) -> Vec<Vec<String>> {
-        self.balls.iter().map(|b| Vec::new()).collect()
+        self.balls.iter().map(|_| Vec::new()).collect()
     }
 
     const GRID_BUCKETS: usize = 1 << 14;
@@ -271,6 +318,7 @@ impl SphereRuntime {
             ball_spawn: [0.0; 3],
             ball_release_elapsed: None,
             field_colliders: Vec::new(),
+            field_collider_index: ColliderSpatialIndex::default(),
             field_anchors: BTreeMap::new(),
             scoring_targets: Vec::new(),
             scored_target_by_ball: Vec::new(),
@@ -279,6 +327,7 @@ impl SphereRuntime {
             intake_candidates: Vec::with_capacity(16),
             robot_definition: None,
             robot_physics: None,
+            use_rapier_balls: false,
         }
     }
 
@@ -308,7 +357,10 @@ impl SphereRuntime {
         self.arena = Some(arena.clone());
         self.field_boundary = field.boundary.clone();
         self.field_floor_y = field.floor_height_m;
+        self.use_rapier_balls = arena.physics_backend == "rapier";
         self.field_colliders = field.colliders.clone();
+        self.field_collider_index
+            .rebuild(&self.field_boundary, &self.field_colliders);
         self.field_anchors = field.anchors.clone();
         self.scoring_targets = field.scoring_targets.clone();
         self.ball_spawn = self.field_anchors.get("EXTballspawn").copied().unwrap_or([
@@ -338,8 +390,10 @@ impl SphereRuntime {
                 grounded: false,
                 on_ramp: false,
                 active: false,
+                physics_dirty: false,
                 release_at_seconds: arena.spawn_release_seconds.max(0.0) * index as f32 / count,
                 released: false,
+                owner: None,
                 last_outtake_alliance: None,
             });
         }
@@ -359,12 +413,16 @@ impl SphereRuntime {
                     &self.field_colliders,
                     &self.field_boundary,
                     self.field_floor_y,
+                    self.use_rapier_balls,
                 )
             })
         });
         if let (Some(world), Some(arena)) = (self.robot_physics.as_mut(), self.arena.as_ref()) {
             for (id, player) in &self.players {
                 world.add_robot(id, player, arena);
+            }
+            if self.use_rapier_balls {
+                world.add_balls(&mut self.balls, arena);
             }
         }
     }
@@ -447,6 +505,7 @@ impl SphereRuntime {
             ball.sleeping = false;
             ball.released = true;
             ball.active = true;
+            ball.physics_dirty = true;
         }
     }
 
@@ -514,17 +573,18 @@ impl SphereRuntime {
                 outtake_power: 0.0,
                 climb_power: 0.0,
                 sequence: 0,
+                connection_id: None,
                 color,
                 wall_contact_normal: None,
                 stored: VecDeque::new(),
                 outtake_accumulator: 0.0,
                 intake_accumulator: 0.0,
-                mech: MechSpec::default(),
                 climbing_brace: None,
                 floor_supported: true,
                 brace_support_impulse: 0.0,
                 climb_wheel_angle: 0.0,
                 climb_wheel_radps: 0.0,
+                collider_cache: None,
             },
         );
         if let (Some(world), Some(player)) =
@@ -535,7 +595,15 @@ impl SphereRuntime {
     }
 
     pub fn remove_player(&mut self, user_id: &str) {
-        self.players.remove(user_id);
+        if let Some(player) = self.players.remove(user_id) {
+            for index in player.stored {
+                if let Some(ball) = self.balls.get_mut(index) {
+                    if ball.owner.as_deref() == Some(user_id) {
+                        ball.owner = None;
+                    }
+                }
+            }
+        }
         if let Some(world) = &mut self.robot_physics {
             world.remove_robot(user_id);
         }
@@ -583,6 +651,60 @@ impl SphereRuntime {
         }
     }
 
+    pub fn bind_player_connection(&mut self, user_id: &str, connection_id: String) {
+        if let Some(player) = self.players.get_mut(user_id) {
+            player.connection_id = Some(connection_id);
+            player.sequence = 0;
+            player.move_x = 0.0;
+            player.move_z = 0.0;
+            player.intake_power = 0.0;
+            player.outtake_power = 0.0;
+            player.climb_power = 0.0;
+        }
+    }
+
+    pub fn set_player_input_from_connection(
+        &mut self,
+        user_id: &str,
+        connection_id: &str,
+        move_x: f32,
+        move_z: f32,
+        intake_power: f32,
+        outtake_power: f32,
+        climb_power: f32,
+        sequence: u64,
+    ) {
+        if self
+            .players
+            .get(user_id)
+            .and_then(|player| player.connection_id.as_deref())
+            == Some(connection_id)
+        {
+            self.set_player_input_with_climb(
+                user_id,
+                move_x,
+                move_z,
+                intake_power,
+                outtake_power,
+                climb_power,
+                sequence,
+            );
+        }
+    }
+
+    pub fn remove_player_from_connection(&mut self, user_id: &str, connection_id: Option<&str>) {
+        let matches = self
+            .players
+            .get(user_id)
+            .map(|player| {
+                connection_id.is_none() || player.connection_id.as_deref() == connection_id
+            })
+            .unwrap_or(false);
+        if matches {
+            self.remove_player(user_id);
+        }
+    }
+
     pub fn disable_player_controls(&mut self) {
         for player in self.players.values_mut() {
             player.move_x = 0.0;
@@ -594,33 +716,21 @@ impl SphereRuntime {
         }
     }
 
-    pub fn set_player_mech(&mut self, user_id: &str, mech: MechSpec) {
-        if let Some(player) = self.players.get_mut(user_id) {
-            player.mech = mech;
-        }
-    }
-
     pub fn apply_player_drive(&mut self, arena: &ArenaConfig, dt: f32) {
         if self.robot_physics.is_some() {
             return;
         }
         let robot = &arena.robot;
         for player in self.players.values_mut() {
-            let driving = player.move_z.abs() > CONTROL_DEADBAND || player.move_x.abs() > CONTROL_DEADBAND;
+            let driving =
+                player.move_z.abs() > CONTROL_DEADBAND || player.move_x.abs() > CONTROL_DEADBAND;
             if player.floor_supported && player.climb_power <= CONTROL_DEADBAND && driving {
                 player.climbing_brace = None;
             }
-            let drive_enabled = player.floor_supported && (player.climb_power <= CONTROL_DEADBAND || player.climbing_brace.is_none());
-            let move_x = if drive_enabled {
-                player.move_x
-            } else {
-                0.0
-            };
-            let move_z = if drive_enabled {
-                player.move_z
-            } else {
-                0.0
-            };
+            let drive_enabled = player.floor_supported
+                && (player.climb_power <= CONTROL_DEADBAND || player.climbing_brace.is_none());
+            let move_x = if drive_enabled { player.move_x } else { 0.0 };
+            let move_z = if drive_enabled { player.move_z } else { 0.0 };
             let forward = [-player.yaw.sin(), 0.0, -player.yaw.cos()];
             let right = [-forward[2], 0.0, forward[0]];
             let forward_speed = dot(player.velocity, forward);
@@ -719,6 +829,43 @@ impl SphereRuntime {
                 ball.previous_position = ball.position;
             }
         }
+        if self.use_rapier_balls && self.robot_physics.is_some() {
+            let solve_started = Instant::now();
+            {
+                let world = self
+                    .robot_physics
+                    .as_mut()
+                    .expect("Rapier balls require an authored robot world");
+                world.push_dirty_balls(&mut self.balls);
+                world.step(&mut self.players, &arena, dt);
+                world.pull_balls(&mut self.balls);
+            }
+            self.step_mechanics(&arena, dt);
+            let world = self
+                .robot_physics
+                .as_mut()
+                .expect("Rapier balls require an authored robot world");
+            world.push_dirty_balls(&mut self.balls);
+            self.metrics.integrate_ms = 0.0;
+            self.metrics.broad_phase_ms = 0.0;
+            self.metrics.solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
+            self.metrics.candidate_pairs = 0;
+            self.metrics.contacts = world.contact_count();
+            self.metrics.sleeping_balls = self
+                .balls
+                .iter()
+                .filter(|ball| ball.active && ball.sleeping)
+                .count();
+            self.metrics.active_balls = self
+                .balls
+                .iter()
+                .filter(|ball| ball.active && !ball.sleeping)
+                .count();
+            if self.scoring_enabled {
+                self.reconcile_scoring();
+            }
+            return;
+        }
         let integrate_started = Instant::now();
         self.integrate(&arena, dt);
         self.metrics.integrate_ms = integrate_started.elapsed().as_secs_f64() * 1_000.0;
@@ -741,7 +888,6 @@ impl SphereRuntime {
         }
         self.limit_ball_energy(&arena);
         self.step_mechanics(&arena, dt);
-        self.settle_retained_balls(dt);
         self.update_sleeping(&arena, dt);
         if let Some(world) = &mut self.robot_physics {
             world.accept_sphere_response(&self.players);
@@ -888,21 +1034,34 @@ impl SphereRuntime {
         let robot_fully_dynamic = self.robot_physics.is_some();
         let mut contacts = 0;
 
+        let field_colliders = &self.field_colliders;
+        let field_index = &self.field_collider_index;
+        let mut static_candidates = Vec::with_capacity(16);
         for ball in &mut self.balls {
             if !ball.active {
                 continue;
             }
+            let query_min = [
+                ball.position[0].min(ball.previous_position[0]) - radius,
+                ball.position[1].min(ball.previous_position[1]) - radius,
+                ball.position[2].min(ball.previous_position[2]) - radius,
+            ];
+            let query_max = [
+                ball.position[0].max(ball.previous_position[0]) + radius,
+                ball.position[1].max(ball.previous_position[1]) + radius,
+                ball.position[2].max(ball.previous_position[2]) + radius,
+            ];
+            field_index.query(query_min, query_max, &mut static_candidates);
             contacts += project_static_position(
                 ball,
                 arena,
                 radius,
                 self.field_floor_y,
                 &self.field_boundary,
-                &self.field_colliders,
+                field_colliders,
+                &static_candidates,
             );
         }
-        contacts += self.retain_scored_balls(radius);
-
         for &(left, right) in &self.pairs {
             let delta = sub(self.balls[right].position, self.balls[left].position);
             let distance_sq = length_sq(delta);
@@ -960,28 +1119,25 @@ impl SphereRuntime {
         }
 
         let field_colliders = &self.field_colliders;
+        let field_index = &self.field_collider_index;
         let robot_definition = self.robot_definition.clone();
         let robot_center_y = self.robot_center_y(arena);
         let robot_half = self.robot_collision_half_extents(arena);
         let field_boundary = self.field_boundary.clone();
         for player in self.players.values_mut() {
             let ground_offset_y = -arena.robot.height_m * 0.5;
-            let world_robot_colliders: Vec<FieldCollider> = if let Some(definition) = &robot_definition {
-                definition
-                    .colliders
-                    .iter()
-                    .map(|local| {
-                        robot_local_collider_pose(
-                            local,
-                            player.position,
-                            player.rotation,
-                            ground_offset_y,
-                        )
+            let mut robot_cache = robot_definition.as_ref().map(|definition| {
+                player
+                    .collider_cache
+                    .take()
+                    .unwrap_or_else(|| CachedRobotColliders {
+                        position: [f32::NAN; 3],
+                        rotation: [f32::NAN; 4],
+                        colliders: Vec::with_capacity(definition.colliders.len()),
+                        index: ColliderSpatialIndex::default(),
                     })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            });
+            let mut robot_candidates = Vec::with_capacity(16);
 
             let intake_mouth = robot_definition.as_ref().and_then(|definition| {
                 definition
@@ -1033,7 +1189,7 @@ impl SphereRuntime {
                     let dx = ball.position[0] - player.position[0];
                     let dy = ball.position[1] - player.position[1];
                     let dz = ball.position[2] - player.position[2];
-                    if dx*dx + dy*dy + dz*dz > 2.0 {
+                    if dx * dx + dy * dy + dz * dz > 2.0 {
                         continue;
                     }
                     if let Some((normal, penetration, _, _)) = roller_contact(
@@ -1069,7 +1225,7 @@ impl SphereRuntime {
                 let dx = ball.position[0] - player.position[0];
                 let dy = ball.position[1] - player.position[1];
                 let dz = ball.position[2] - player.position[2];
-                if dx*dx + dy*dy + dz*dz > 2.0 {
+                if dx * dx + dy * dy + dz * dz > 2.0 {
                     continue;
                 }
                 let touches_intake = intake_mouth.as_ref().is_some_and(|mouth| {
@@ -1098,13 +1254,53 @@ impl SphereRuntime {
 
                 let bypass_intake_collider = player.intake_power > 0.0 && touches_intake;
                 let bypass_transfer_collider = player.outtake_power > 0.0 && touches_transfer;
-                let bypass_outtake_collider = player.outtake_power > 0.0 && (touches_outtake || is_shooting_out);
+                let bypass_outtake_collider =
+                    player.outtake_power > 0.0 && (touches_outtake || is_shooting_out);
                 if let Some(definition) = &robot_definition {
+                    let cache = robot_cache
+                        .as_mut()
+                        .expect("authored robot collider cache exists");
+                    cache.refresh(
+                        definition,
+                        player.position,
+                        player.rotation,
+                        ground_offset_y,
+                        &field_boundary,
+                    );
+                    cache.index.query(
+                        [
+                            ball.position[0] - radius,
+                            ball.position[1] - radius,
+                            ball.position[2] - radius,
+                        ],
+                        [
+                            ball.position[0] + radius,
+                            ball.position[1] + radius,
+                            ball.position[2] + radius,
+                        ],
+                        &mut robot_candidates,
+                    );
                     // Resolve authored physics OBBs with broadphase AABB filtering.
-                    for (i, collider) in world_robot_colliders.iter().enumerate() {
-                        if (bypass_intake_collider && definition.is_intake_collider.get(i).copied().unwrap_or(false))
-                            || (bypass_transfer_collider && definition.is_transfer_collider.get(i).copied().unwrap_or(false))
-                            || (bypass_outtake_collider && definition.is_outtake_collider.get(i).copied().unwrap_or(false))
+                    for &i in &robot_candidates {
+                        let collider = &cache.colliders[i];
+                        if (bypass_intake_collider
+                            && definition
+                                .is_intake_collider
+                                .get(i)
+                                .copied()
+                                .unwrap_or(false))
+                            || (bypass_transfer_collider
+                                && definition
+                                    .is_transfer_collider
+                                    .get(i)
+                                    .copied()
+                                    .unwrap_or(false))
+                            || (bypass_outtake_collider
+                                && definition
+                                    .is_outtake_collider
+                                    .get(i)
+                                    .copied()
+                                    .unwrap_or(false))
                         {
                             continue;
                         }
@@ -1187,12 +1383,45 @@ impl SphereRuntime {
                 ) {
                     player.wall_contact_normal = Some(normal);
                 }
+                let robot_bounds = robot_definition.as_ref().map_or_else(
+                    || FieldCollider {
+                        id: String::new(),
+                        min: [
+                            player.position[0] - robot_half[0],
+                            player.position[1] - robot_half[1],
+                            player.position[2] - robot_half[2],
+                        ],
+                        max: [
+                            player.position[0] + robot_half[0],
+                            player.position[1] + robot_half[1],
+                            player.position[2] + robot_half[2],
+                        ],
+                        center: player.position,
+                        half_extents: robot_half,
+                        axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    },
+                    |definition| {
+                        robot_local_collider_pose(
+                            &definition.bounds,
+                            player.position,
+                            player.rotation,
+                            -arena.robot.height_m * 0.5,
+                        )
+                    },
+                );
+                let mut robot_field_candidates = Vec::with_capacity(16);
+                field_index.query(
+                    robot_bounds.min,
+                    robot_bounds.max,
+                    &mut robot_field_candidates,
+                );
                 let (field_contacts, wall_normal) = project_robot_field_colliders(
                     player,
                     robot_half,
                     robot_definition.as_ref(),
                     -arena.robot.height_m * 0.5,
                     field_colliders,
+                    &robot_field_candidates,
                     false,
                 );
                 contacts += field_contacts;
@@ -1200,15 +1429,28 @@ impl SphereRuntime {
                     player.wall_contact_normal = wall_normal;
                 }
             }
+            player.collider_cache = robot_cache;
         }
         // Dynamic contacts can push a ball through a static boundary. End
         // every iteration by projecting onto the field/ramp so the last
         // solver iteration cannot leave an object outside the arena.
         let field_colliders = &self.field_colliders;
+        let field_index = &self.field_collider_index;
         for ball in &mut self.balls {
             if !ball.active {
                 continue;
             }
+            let query_min = [
+                ball.position[0].min(ball.previous_position[0]) - radius,
+                ball.position[1].min(ball.previous_position[1]) - radius,
+                ball.position[2].min(ball.previous_position[2]) - radius,
+            ];
+            let query_max = [
+                ball.position[0].max(ball.previous_position[0]) + radius,
+                ball.position[1].max(ball.previous_position[1]) + radius,
+                ball.position[2].max(ball.previous_position[2]) + radius,
+            ];
+            field_index.query(query_min, query_max, &mut static_candidates);
             contacts += project_static_position(
                 ball,
                 arena,
@@ -1216,9 +1458,9 @@ impl SphereRuntime {
                 self.field_floor_y,
                 &self.field_boundary,
                 field_colliders,
+                &static_candidates,
             );
         }
-        contacts += self.retain_scored_balls(radius);
         contacts
     }
 
@@ -1248,6 +1490,9 @@ impl SphereRuntime {
     ) {
         let (min_x, max_x, min_z, max_z) =
             self.planar_limits(arena.ball.radius_m(), arena.ball.radius_m());
+        let field_colliders = &self.field_colliders;
+        let field_index = &self.field_collider_index;
+        let mut static_candidates = Vec::with_capacity(16);
         for ball in &mut self.balls {
             if !ball.active {
                 continue;
@@ -1340,15 +1585,31 @@ impl SphereRuntime {
 
             // Resolve velocity, restitution (bouncing), and friction for all 3D field colliders (including SU goal walls)
             let r = arena.ball.radius_m() * 1.01;
-            for collider in &self.field_colliders {
-                if ball.position[0] + r < collider.min[0] || ball.position[0] - r > collider.max[0] ||
-                   ball.position[1] + r < collider.min[1] || ball.position[1] - r > collider.max[1] ||
-                   ball.position[2] + r < collider.min[2] || ball.position[2] - r > collider.max[2] {
+            field_index.query(
+                [
+                    ball.position[0] - r,
+                    ball.position[1] - r,
+                    ball.position[2] - r,
+                ],
+                [
+                    ball.position[0] + r,
+                    ball.position[1] + r,
+                    ball.position[2] + r,
+                ],
+                &mut static_candidates,
+            );
+            for &index in &static_candidates {
+                let collider = &field_colliders[index];
+                if ball.position[0] + r < collider.min[0]
+                    || ball.position[0] - r > collider.max[0]
+                    || ball.position[1] + r < collider.min[1]
+                    || ball.position[1] - r > collider.max[1]
+                    || ball.position[2] + r < collider.min[2]
+                    || ball.position[2] - r > collider.max[2]
+                {
                     continue;
                 }
-                if let Some(normal) =
-                    sphere_collider_contact(ball.position, r, collider)
-                {
+                if let Some(normal) = sphere_collider_contact(ball.position, r, collider) {
                     let id_lower = collider.id.to_lowercase();
                     let surface = if id_lower.contains("su")
                         || id_lower.contains("goal")
@@ -1452,18 +1713,11 @@ impl SphereRuntime {
             );
             let current_contact_relative = sub(current_right, current_left);
             let current_relative = dot(current_contact_relative, normal);
-            let same_retention = self.scored_target_by_ball[left]
-                .zip(self.scored_target_by_ball[right])
-                .is_some_and(|(left_target, right_target)| {
-                    left_target == right_target
-                        && self.scoring_targets[left_target].retention.is_some()
-                });
-            let target_relative =
-                if !same_retention && relative < -arena.solver.restitution_velocity_threshold_mps {
-                    -arena.ball.restitution_curve.at_speed(-relative) * relative
-                } else {
-                    0.0
-                };
+            let target_relative = if relative < -arena.solver.restitution_velocity_threshold_mps {
+                -arena.ball.restitution_curve.at_speed(-relative) * relative
+            } else {
+                0.0
+            };
             let inverse_mass = 1.0 / mass;
             let left_inverse_mass = if boundary_blocks_motion(
                 self.balls[left].position,
@@ -1513,13 +1767,7 @@ impl SphereRuntime {
                 let tangent = mul(tangent_velocity, 1.0 / tangent_speed_sq.sqrt());
                 let tangent_relative = dot(current_contact_relative, tangent);
                 let tangent_inverse_mass = 2.0 / mass + 2.0 * radius * radius / inertia;
-                let friction = if same_retention {
-                    // A scored hopper is a deadened pocket, not a pinball
-                    // launcher. High tangential loss lets its pile settle.
-                    0.72
-                } else {
-                    arena.ball.ball_friction
-                };
+                let friction = arena.ball.ball_friction;
                 let friction_limit = friction * normal_impulse_magnitude.abs();
                 let friction_impulse_magnitude = (-tangent_relative / tangent_inverse_mass)
                     .clamp(-friction_limit, friction_limit);
@@ -1538,7 +1786,7 @@ impl SphereRuntime {
             }
         }
 
-        for player in self.players.values_mut() {
+        for (player_id, player) in self.players.iter_mut() {
             let ground_offset_y = -arena.robot.height_m * 0.5;
             let intake_zone_info = robot_definition.as_ref().and_then(|definition| {
                 let zone = definition
@@ -1591,22 +1839,23 @@ impl SphereRuntime {
                 Some((mouth, dir_world))
             });
 
-            let world_robot_colliders: Vec<FieldCollider> = if let Some(definition) = &robot_definition {
-                definition
-                    .colliders
-                    .iter()
-                    .map(|local| {
-                        robot_local_collider_pose(
-                            local,
-                            player.position,
-                            player.rotation,
-                            ground_offset_y,
-                        )
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let world_robot_colliders: Vec<FieldCollider> =
+                if let Some(definition) = &robot_definition {
+                    definition
+                        .colliders
+                        .iter()
+                        .map(|local| {
+                            robot_local_collider_pose(
+                                local,
+                                player.position,
+                                player.rotation,
+                                ground_offset_y,
+                            )
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
             if arena.robot.intake_enabled && robot_definition.is_none() {
                 for ball in &mut self.balls {
@@ -1616,7 +1865,7 @@ impl SphereRuntime {
                     let dx = ball.position[0] - player.position[0];
                     let dy = ball.position[1] - player.position[1];
                     let dz = ball.position[2] - player.position[2];
-                    if dx*dx + dy*dy + dz*dz > 2.0 {
+                    if dx * dx + dy * dy + dz * dz > 2.0 {
                         continue;
                     }
                     let Some((normal, _, roller_point, roller_axis)) = roller_contact(
@@ -1658,32 +1907,60 @@ impl SphereRuntime {
                     );
                 }
             }
-            let robot = effective_robot(&arena.robot, &player.mech);
+            let robot = &arena.robot;
 
             let mut active_transfer_ball = None;
             if player.outtake_power > 0.0 {
                 if let Some((mouth, dir_world)) = &transfer_zone_info {
                     let mut max_progress = f32::NEG_INFINITY;
                     for (index, ball) in self.balls.iter().enumerate() {
-                        if !ball.active { continue; }
+                        if !ball.active || ball.owner.as_deref() != Some(player_id) {
+                            continue;
+                        }
                         let dx = ball.position[0] - player.position[0];
                         let dy = ball.position[1] - player.position[1];
                         let dz = ball.position[2] - player.position[2];
-                        if dx*dx + dy*dy + dz*dz > 2.0 { continue; }
+                        if dx * dx + dy * dy + dz * dz > 2.0 {
+                            continue;
+                        }
 
-                        let touches_transfer = sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth).is_some();
+                        let touches_transfer = sphere_authored_obb_contact(
+                            ball.position,
+                            arena.ball.radius_m(),
+                            mouth,
+                        )
+                        .is_some();
                         let inside_robot = if let Some((_, _, envelope)) = &intake_zone_info {
-                            sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), envelope).is_some()
-                        } else { false };
+                            sphere_authored_obb_contact(
+                                ball.position,
+                                arena.ball.radius_m(),
+                                envelope,
+                            )
+                            .is_some()
+                        } else {
+                            false
+                        };
                         let touches_outtake = if let Some((outtake_mouth, _)) = &outtake_zone_info {
-                            sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), outtake_mouth).is_some()
-                        } else { false };
+                            sphere_authored_obb_contact(
+                                ball.position,
+                                arena.ball.radius_m(),
+                                outtake_mouth,
+                            )
+                            .is_some()
+                        } else {
+                            false
+                        };
                         let is_shooting_out = if let Some((_, outtake_dir)) = &outtake_zone_info {
                             let rel_vel = sub(ball.velocity, player.velocity);
                             dot(rel_vel, *outtake_dir) > 1.5
-                        } else { false };
+                        } else {
+                            false
+                        };
 
-                        if !touches_outtake && !is_shooting_out && (touches_transfer || inside_robot) {
+                        if !touches_outtake
+                            && !is_shooting_out
+                            && (touches_transfer || inside_robot)
+                        {
                             let progress = dot(ball.position, *dir_world);
                             if progress > max_progress {
                                 max_progress = progress;
@@ -1701,25 +1978,33 @@ impl SphereRuntime {
                 let dx = ball.position[0] - player.position[0];
                 let dy = ball.position[1] - player.position[1];
                 let dz = ball.position[2] - player.position[2];
-                if dx*dx + dy*dy + dz*dz > 2.0 {
+                if dx * dx + dy * dy + dz * dz > 2.0 {
                     continue;
                 }
-                let (touches_intake_mouth, inside_robot) = if let Some((mouth, _, envelope)) = &intake_zone_info {
-                    let in_mouth = sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth).is_some();
-                    let in_env = sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), envelope).is_some();
+                let (touches_intake_mouth, inside_robot) = if let Some((mouth, _, envelope)) =
+                    &intake_zone_info
+                {
+                    let in_mouth =
+                        sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth)
+                            .is_some();
+                    let in_env =
+                        sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), envelope)
+                            .is_some();
                     (in_mouth, in_env)
                 } else {
                     (false, false)
                 };
 
                 let touches_transfer = if let Some((mouth, _)) = &transfer_zone_info {
-                    sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth).is_some()
+                    sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth)
+                        .is_some()
                 } else {
                     false
                 };
 
                 let touches_outtake = if let Some((mouth, _)) = &outtake_zone_info {
-                    sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth).is_some()
+                    sphere_authored_obb_contact(ball.position, arena.ball.radius_m(), mouth)
+                        .is_some()
                 } else {
                     false
                 };
@@ -1734,6 +2019,7 @@ impl SphereRuntime {
                 // Sync balls inside the robot's mechanical zones to prevent them from falling back during fast movement,
                 // but do not drag balls that are currently being actively launched out of the outtake.
                 if (inside_robot || touches_transfer || touches_outtake)
+                    && ball.owner.as_deref() == Some(player_id)
                     && !(touches_outtake && player.outtake_power > 0.0)
                     && !is_shooting_out
                 {
@@ -1758,7 +2044,8 @@ impl SphereRuntime {
                         // behave like it also powered the transfer conveyor.
                         if touches_intake_mouth {
                             let target_speed = robot.intake_surface_speed_mps * player.intake_power;
-                            let force_n = (robot.intake_normal_force_n * player.intake_power * 4.0).max(10.0 * player.intake_power);
+                            let force_n = (robot.intake_normal_force_n * player.intake_power * 4.0)
+                                .max(10.0 * player.intake_power);
                             let mass = arena.ball.mass_kg.max(0.001);
                             let rel_vel = sub(ball.velocity, player.velocity);
                             let current_speed = dot(rel_vel, dir_world);
@@ -1782,12 +2069,17 @@ impl SphereRuntime {
                 // The transfer only feeds balls toward the shooter while the
                 // outtake is commanded. Intake runs its own roller path and
                 // must not also energize the internal transfer.
-                if player.outtake_power > 0.0 && !touches_outtake && !is_shooting_out && (touches_transfer || inside_robot) {
+                if player.outtake_power > 0.0
+                    && !touches_outtake
+                    && !is_shooting_out
+                    && (touches_transfer || inside_robot)
+                {
                     if Some(ball_index) == active_transfer_ball {
                         if let Some((_, dir_world)) = &transfer_zone_info {
                             let power = player.outtake_power;
                             let target_speed = robot.transfer_surface_speed_mps * power;
-                            let force_n = (robot.transfer_normal_force_n * power * 4.0).max(10.0 * power);
+                            let force_n =
+                                (robot.transfer_normal_force_n * power * 4.0).max(10.0 * power);
                             let mass = arena.ball.mass_kg.max(0.001);
                             let rel_vel = sub(ball.velocity, player.velocity);
                             let current_speed = dot(rel_vel, *dir_world);
@@ -1795,10 +2087,13 @@ impl SphereRuntime {
                             if current_speed < target_speed {
                                 let dv = force_n / mass * dt;
                                 ball.velocity = add(ball.velocity, mul(*dir_world, dv));
-                                let after_speed = dot(sub(ball.velocity, player.velocity), *dir_world);
+                                let after_speed =
+                                    dot(sub(ball.velocity, player.velocity), *dir_world);
                                 if after_speed > target_speed {
-                                    ball.velocity =
-                                        sub(ball.velocity, mul(*dir_world, after_speed - target_speed));
+                                    ball.velocity = sub(
+                                        ball.velocity,
+                                        mul(*dir_world, after_speed - target_speed),
+                                    );
                                 }
                             }
 
@@ -1820,7 +2115,8 @@ impl SphereRuntime {
                         rotate_robot_local_pose([0.0, 0.0, 1.0], player.rotation)
                     };
                     let target_speed = robot.outtake_velocity_mps * player.outtake_power;
-                    let force_n = (robot.outtake_normal_force_n * player.outtake_power * 4.0).max(10.0 * player.outtake_power);
+                    let force_n = (robot.outtake_normal_force_n * player.outtake_power * 4.0)
+                        .max(10.0 * player.outtake_power);
                     let mass = arena.ball.mass_kg.max(0.001);
                     let rel_vel = sub(ball.velocity, player.velocity);
                     let current_speed = dot(rel_vel, outtake_dir);
@@ -1842,7 +2138,8 @@ impl SphereRuntime {
 
                 let bypass_intake_collider = player.intake_power > 0.0 && touches_intake_mouth;
                 let bypass_transfer_collider = player.outtake_power > 0.0 && touches_transfer;
-                let bypass_outtake_collider = player.outtake_power > 0.0 && (touches_outtake || is_shooting_out);
+                let bypass_outtake_collider =
+                    player.outtake_power > 0.0 && (touches_outtake || is_shooting_out);
                 let authored_contact = robot_definition.as_ref().and_then(|definition| {
                     let envelope = robot_local_collider_pose(
                         &definition.bounds,
@@ -1860,9 +2157,24 @@ impl SphereRuntime {
                         .iter()
                         .enumerate()
                         .filter_map(|(i, collider)| {
-                            if (bypass_intake_collider && definition.is_intake_collider.get(i).copied().unwrap_or(false))
-                                || (bypass_transfer_collider && definition.is_transfer_collider.get(i).copied().unwrap_or(false))
-                                || (bypass_outtake_collider && definition.is_outtake_collider.get(i).copied().unwrap_or(false))
+                            if (bypass_intake_collider
+                                && definition
+                                    .is_intake_collider
+                                    .get(i)
+                                    .copied()
+                                    .unwrap_or(false))
+                                || (bypass_transfer_collider
+                                    && definition
+                                        .is_transfer_collider
+                                        .get(i)
+                                        .copied()
+                                        .unwrap_or(false))
+                                || (bypass_outtake_collider
+                                    && definition
+                                        .is_outtake_collider
+                                        .get(i)
+                                        .copied()
+                                        .unwrap_or(false))
                             {
                                 return None;
                             }
@@ -1875,11 +2187,7 @@ impl SphereRuntime {
                             {
                                 return None;
                             }
-                            sphere_authored_obb_contact(
-                                ball.position,
-                                radius,
-                                collider,
-                            )
+                            sphere_authored_obb_contact(ball.position, radius, collider)
                         })
                         .max_by(|left, right| left.1.total_cmp(&right.1))
                 });
@@ -2058,10 +2366,8 @@ impl SphereRuntime {
                         .is_some()
                     {
                         outtake_contact_balls = outtake_contact_balls.saturating_add(1);
-                        max_outtake_contact_speed_mps = max_outtake_contact_speed_mps.max(dot(
-                            sub(ball.velocity, player.velocity),
-                            *direction,
-                        ));
+                        max_outtake_contact_speed_mps = max_outtake_contact_speed_mps
+                            .max(dot(sub(ball.velocity, player.velocity), *direction));
                     }
                 }
             }
@@ -2164,7 +2470,7 @@ impl SphereRuntime {
                     angular_velocity_z: player.angular_velocity[2],
                     color: player.color.into(),
                     stored_balls: player.stored.len(),
-                    capacity: player.mech.capacity_with(base_capacity),
+                    capacity: base_capacity,
                     brace_zone: brace.zone,
                     brace_multiplier: brace.multiplier,
                     floor_supported: player.floor_supported,
@@ -2236,6 +2542,14 @@ impl SphereRuntime {
     }
 
     pub fn field_object_positions(&self) -> ObjectPositionsSync {
+        self.object_positions(false)
+    }
+
+    pub fn field_object_positions_full(&self) -> ObjectPositionsSync {
+        self.object_positions(true)
+    }
+
+    fn object_positions(&self, include_sleeping: bool) -> ObjectPositionsSync {
         let count = self.balls.len() as u32;
         let mask_bytes = (count as usize + 7) / 8;
         let mut active_mask = vec![0u8; mask_bytes];
@@ -2245,7 +2559,7 @@ impl SphereRuntime {
         for (i, ball) in self.balls.iter().enumerate() {
             if ball.active {
                 active_mask[i / 8] |= 1 << (i % 8);
-                if !ball.sleeping {
+                if include_sleeping || !ball.sleeping {
                     moving_mask[i / 8] |= 1 << (i % 8);
                     let quantize =
                         |v: f32| -> u16 { ((v + 8.0) * 4095.9375).clamp(0.0, 65535.0) as u16 };
@@ -2262,6 +2576,16 @@ impl SphereRuntime {
             moving_mask,
             quantized_positions,
         }
+    }
+
+    pub fn input_acknowledgements(&self) -> Vec<InputAcknowledgement> {
+        self.players
+            .iter()
+            .map(|(player_id, player)| InputAcknowledgement {
+                player_id: player_id.clone(),
+                sequence: player.sequence,
+            })
+            .collect()
     }
 
     pub fn contact_count(&self) -> usize {

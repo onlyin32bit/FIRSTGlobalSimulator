@@ -3,10 +3,9 @@
 // and does not hard-code the object count, shape, or motion parameters.
 fn arena_config() {
     #{
-        physics_backend: "sphere_xpbd",
+        physics_backend: "rapier",
         solver: #{
-            // The sphere-specialized solver keeps dense ball contacts stable
-            // without paying for a general rigid-body constraint graph.
+            // Kept for the sphere_xpbd fallback pack profile.
             position_iterations: 3.0,
             velocity_iterations: 4.0,
             contact_compliance: 0.0000002,
