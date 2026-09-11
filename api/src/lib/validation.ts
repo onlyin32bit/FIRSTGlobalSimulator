@@ -147,15 +147,24 @@ export const gameServerHeartbeatSchema = z.object({
 }).strict()
 
 export const gameServerCommandSchema = z.object({
-  type: z.enum(['bootstrap_match', 'kick_player', 'stop_match', 'clear_match', 'cleanup_idle', 'reset_host']),
+  type: z.enum(['bootstrap_match', 'kick_player', 'stop_match', 'clear_match', 'reset_match', 'clear_balls', 'cleanup_idle', 'reset_host']),
   matchId: z.string().trim().min(1).max(255).optional(),
   userId: z.string().trim().min(1).max(255).optional()
 }).strict().superRefine((value, ctx) => {
-  if (['bootstrap_match', 'kick_player', 'stop_match', 'clear_match'].includes(value.type) && !value.matchId) {
+  if (['bootstrap_match', 'kick_player', 'stop_match', 'clear_match', 'reset_match', 'clear_balls'].includes(value.type) && !value.matchId) {
     ctx.addIssue({ code: 'custom', message: 'matchId is required for this command.' })
   }
   if (value.type === 'kick_player' && !value.userId) {
     ctx.addIssue({ code: 'custom', message: 'userId is required when kicking a player.' })
+  }
+})
+
+export const adminMatchActionSchema = z.object({
+  action: z.enum(['reset_match', 'clear_balls', 'end_match', 'kick_player']),
+  userId: z.string().trim().min(1).max(255).optional()
+}).strict().superRefine((value, ctx) => {
+  if (value.action === 'kick_player' && !value.userId) {
+    ctx.addIssue({ code: 'custom', message: 'userId is required when removing a player.' })
   }
 })
 

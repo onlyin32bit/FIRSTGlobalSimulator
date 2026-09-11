@@ -5,8 +5,8 @@ use rapier3d::prelude::*;
 use super::*;
 
 const ROBOT_SUBSTEPS: usize = 2;
-const MOTOR_DAMPING: f32 = 1.0;
 const DRIVETRAIN_CONTACT_FRICTION: f32 = 0.08;
+const GROOVE_SEGMENTS: usize = 48;
 const FIELD_GROUP: Group = Group::GROUP_1;
 const ROBOT_GROUP: Group = Group::GROUP_2;
 const BRACE_GROUP: Group = Group::GROUP_3;
@@ -34,7 +34,10 @@ fn ground_groups() -> InteractionGroups {
 fn brace_groups() -> InteractionGroups {
     InteractionGroups::new(
         BRACE_GROUP,
-        WHEEL_GROUP | ROBOT_GROUP | BALL_GROUP,
+        // The brace is a climbing rail, not a chassis obstacle. Letting every
+        // robot box touch it over-constrains the wheel joint and makes the bot
+        // chatter while it drives underneath. Only the drive wheel loads it.
+        WHEEL_GROUP | BALL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -42,7 +45,7 @@ fn brace_groups() -> InteractionGroups {
 fn robot_groups() -> InteractionGroups {
     InteractionGroups::new(
         ROBOT_GROUP,
-        FIELD_GROUP | BRACE_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP | BALL_GROUP,
+        FIELD_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP | BALL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -50,7 +53,7 @@ fn robot_groups() -> InteractionGroups {
 fn climb_support_groups() -> InteractionGroups {
     InteractionGroups::new(
         ROBOT_GROUP,
-        FIELD_GROUP | BRACE_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP | BALL_GROUP,
+        FIELD_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP | BALL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -58,13 +61,7 @@ fn climb_support_groups() -> InteractionGroups {
 fn drivebase_groups() -> InteractionGroups {
     InteractionGroups::new(
         DRIVEBASE_GROUP,
-        FIELD_GROUP
-            | BRACE_GROUP
-            | GROUND_GROUP
-            | ROBOT_GROUP
-            | DRIVEBASE_GROUP
-            | WHEEL_GROUP
-            | BALL_GROUP,
+        FIELD_GROUP | GROUND_GROUP | ROBOT_GROUP | DRIVEBASE_GROUP | WHEEL_GROUP | BALL_GROUP,
         InteractionTestMode::And,
     )
 }
@@ -98,23 +95,13 @@ struct RobotHandles {
     wheel: Option<RigidBodyHandle>,
     wheel_colliders: Vec<ColliderHandle>,
     wheel_joint: Option<ImpulseJointHandle>,
-    climb_zone: Option<ColliderHandle>,
     floor_supported: bool,
     wheel_angle: f32,
     brace_contact: Option<String>,
-    brace_capture: Option<BraceCapture>,
-}
-
-struct BraceCapture {
-    id: String,
 }
 
 struct BraceRail {
     handle: ColliderHandle,
-    center: Vector,
-    ascent: Vector,
-    half_length: f32,
-    radius: f32,
 }
 
 pub(super) struct HybridRobotWorld {
@@ -213,39 +200,9 @@ impl HybridRobotWorld {
             .build();
             let handle = world.colliders.insert(collider);
             if is_brace(authored) {
-                world.braces.insert(
-                    authored.id.clone(),
-                    BraceRail {
-                        handle,
-                        center: Vector::new(
-                            authored.center[0],
-                            authored.center[1],
-                            authored.center[2],
-                        ),
-                        ascent: collider_ascent_axis(authored),
-                        half_length: authored
-                            .half_extents
-                            .iter()
-                            .copied()
-                            .fold(0.0_f32, f32::max),
-                        radius: authored
-                            .half_extents
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, _)| {
-                                *index
-                                    != authored
-                                        .half_extents
-                                        .iter()
-                                        .enumerate()
-                                        .max_by(|(_, left), (_, right)| left.total_cmp(right))
-                                        .map(|(index, _)| index)
-                                        .unwrap_or(1)
-                            })
-                            .map(|(_, radius)| *radius)
-                            .fold(0.0_f32, f32::max),
-                    },
-                );
+                world
+                    .braces
+                    .insert(authored.id.clone(), BraceRail { handle });
             } else {
                 world.support_colliders.insert(handle);
             }
@@ -451,7 +408,7 @@ impl HybridRobotWorld {
                 .soft_ccd_prediction(0.02)
                 .build(),
         );
-        self.bodies[chassis].set_additional_solver_iterations(4);
+        self.bodies[chassis].set_additional_solver_iterations(8);
 
         let ground_offset = -arena.robot.height_m * 0.5;
         let mut chassis_colliders = Vec::new();
@@ -510,34 +467,15 @@ impl HybridRobotWorld {
             &mut self.bodies,
         );
         chassis_colliders.push(wheelbase);
-        let climb_zone = self
-            .definition
-            .zones
-            .iter()
-            .find(|zone| zone.kind == RobotSemanticKind::Climb || zone.id == "ClimbZone")
-            .map(|zone| {
-                let corrected = robot_local_collider(&zone.collider, [0.0; 3], 0.0, ground_offset);
-                self.colliders.insert_with_parent(
-                    obb_collider(&corrected)
-                        .sensor(true)
-                        .collision_groups(climb_support_groups())
-                        .build(),
-                    chassis,
-                    &mut self.bodies,
-                )
-            });
-
         let mut handles = RobotHandles {
             chassis,
             chassis_colliders,
             wheel: None,
             wheel_colliders: Vec::new(),
             wheel_joint: None,
-            climb_zone,
             floor_supported: true,
             wheel_angle: 0.0,
             brace_contact: None,
-            brace_capture: None,
         };
         if let Some(climber) = self.definition.climber.as_ref()
             && !self.definition.climb_colliders.is_empty()
@@ -557,7 +495,8 @@ impl HybridRobotWorld {
                 .iter()
                 .flat_map(|wheel| wheel.half_extents)
                 .fold(0.0_f32, f32::max);
-            let wheel_inertia = 0.4 * climber.wheel_mass_kg * wheel_radius * wheel_radius;
+            // Include the geared motor's inertia reflected at the axle.
+            let wheel_inertia = 2.0 * 0.4 * climber.wheel_mass_kg * wheel_radius * wheel_radius;
             let wheel = self.bodies.insert(
                 RigidBodyBuilder::dynamic()
                     .pose(wheel_pose)
@@ -571,7 +510,7 @@ impl HybridRobotWorld {
                     .soft_ccd_prediction(0.01)
                     .build(),
             );
-            self.bodies[wheel].set_additional_solver_iterations(6);
+            self.bodies[wheel].set_additional_solver_iterations(10);
             for cone in &corrected {
                 let axle_index = cone
                     .half_extents
@@ -596,9 +535,9 @@ impl HybridRobotWorld {
                 let cone_rotation = Rotation::from_rotation_arc(Vector::Y, axis);
                 let center = cone_center - wheel_center;
                 let half_width = cone.half_extents[axle_index].max(0.002);
-                let mut points = Vec::with_capacity(32);
-                for segment in 0..16 {
-                    let angle = segment as f32 * std::f32::consts::TAU / 16.0;
+                let mut points = Vec::with_capacity(GROOVE_SEGMENTS * 2);
+                for segment in 0..GROOVE_SEGMENTS {
+                    let angle = segment as f32 * std::f32::consts::TAU / GROOVE_SEGMENTS as f32;
                     let (sin, cos) = angle.sin_cos();
                     points.push(Vector::new(
                         cos * climber.groove_outer_radius_m,
@@ -612,14 +551,14 @@ impl HybridRobotWorld {
                     ));
                 }
                 let handle = self.colliders.insert_with_parent(
-                    ColliderBuilder::convex_hull(&points)
+                    ColliderBuilder::round_convex_hull(&points, climber.contact_skin_m * 0.35)
                         .expect("a sampled groove frustum must form a convex hull")
                         .position(Pose::from_parts(center, cone_rotation))
                         .density(0.0)
-                        // Rapier resolves the groove's normal contacts. The
-                        // reduced wheel constraint below owns longitudinal
-                        // traction so it is applied once with the right sign.
-                        .friction(0.0)
+                        // Each half is a convex frustum. Together they form
+                        // the non-convex V groove around the brace.
+                        .friction(climber.static_friction.max(climber.dynamic_friction))
+                        .friction_combine_rule(CoefficientCombineRule::Max)
                         .restitution(0.0)
                         .contact_skin(climber.contact_skin_m.max(0.0))
                         .collision_groups(wheel_groups())
@@ -635,9 +574,7 @@ impl HybridRobotWorld {
             let joint = RevoluteJointBuilder::new(axle)
                 .local_anchor1(wheel_center)
                 .local_anchor2(Vector::ZERO)
-                .contacts_enabled(false)
-                .motor_velocity(0.0, MOTOR_DAMPING)
-                .motor_max_force(climber.brake_torque_nm.max(0.0));
+                .contacts_enabled(false);
             handles.wheel_joint = Some(self.joints.insert(chassis, wheel, joint, true));
             handles.wheel = Some(wheel);
         }
@@ -734,161 +671,44 @@ impl HybridRobotWorld {
                 continue;
             };
             let powered = player.climb_power > CONTROL_DEADBAND;
-            let mut wheel_constraint = None;
             if let Some(climber) = self.definition.climber.as_ref()
-                && let Some(joint) = handles
-                    .wheel_joint
-                    .and_then(|joint| self.joints.get_mut(joint, true))
-                && let Some(revolute) = joint.data.as_revolute_mut()
+                && let Some(wheel_handle) = handles.wheel
+                && let (Some(chassis), Some(wheel)) = (
+                    self.bodies.get(handles.chassis),
+                    self.bodies.get(wheel_handle),
+                )
             {
-                let reverse_climb =
-                    !handles.floor_supported && player.move_z < -CONTROL_DEADBAND && !powered;
-                let target = if powered {
-                    climber.free_speed_radps * player.climb_power
-                } else if reverse_climb {
-                    -climber.free_speed_radps * player.move_z.abs()
-                } else {
-                    0.0
-                };
-                let torque = if powered || reverse_climb {
+                let authored_axle = rotate_robot_local(climber.axle, 0.0);
+                let axle = *chassis.rotation()
+                    * Vector::new(authored_axle[0], authored_axle[1], authored_axle[2])
+                        .normalize_or_zero();
+                let relative_radps = (wheel.angvel() - chassis.angvel()).dot(axle);
+                let torque = if powered {
+                    let free_speed = climber
+                        .free_speed_radps
+                        .min(climber.max_climb_speed_mps / climber.groove_outer_radius_m);
+                    let target = free_speed * player.climb_power;
                     climber.stall_torque_nm
+                        * ((target - relative_radps) / free_speed).clamp(-1.0, 1.0)
+                        * player.climb_power
                 } else {
-                    climber.brake_torque_nm
+                    -relative_radps.signum() * climber.brake_torque_nm
                 };
-                revolute.set_motor_velocity(target, MOTOR_DAMPING);
-                revolute.set_motor_max_force(torque.max(0.0));
-
-                if let Some(brace_id) = alliance_brace(&player.team_name)
-                    && let Some(brace) = self.braces.get(brace_id)
-                    && let Some(wheel_handle) = handles.wheel
-                    && let Some(wheel) = self.bodies.get(wheel_handle)
-                {
-                    let mut point_sum = Vector::ZERO;
-                    let mut point_count = 0_u32;
-                    let mut support_impulse = 0.0;
-                    for collider in &handles.wheel_colliders {
-                        let Some(pair) = self.narrow_phase.contact_pair(*collider, brace.handle)
-                        else {
-                            continue;
-                        };
-                        support_impulse += pair.total_impulse_magnitude();
-                        for contact in pair
-                            .manifolds
-                            .iter()
-                            .flat_map(|manifold| &manifold.data.solver_contacts)
-                        {
-                            point_sum += contact.point;
-                            point_count += 1;
-                        }
-                    }
-                    let relative = wheel.translation() - brace.center;
-                    let along = relative.dot(brace.ascent);
-                    let closest = brace.center
-                        + brace.ascent * along.clamp(-brace.half_length, brace.half_length);
-                    let groove_radial = wheel.translation() - closest;
-                    let seated_radius = brace.radius + climber.groove_root_radius_m
-                        - (climber.contact_skin_m + 0.001).min(climber.groove_root_radius_m * 0.5);
-                    let capture_radius = brace.radius + climber.groove_outer_radius_m + 0.02;
-                    let in_climb_zone = match handles.climb_zone {
-                        Some(zone) => {
-                            self.narrow_phase.intersection_pair(zone, brace.handle) == Some(true)
-                                || self
-                                    .narrow_phase
-                                    .contact_pair(zone, brace.handle)
-                                    .is_some_and(|pair| pair.has_any_active_contact())
-                        }
-                        None => point_count > 0,
-                    };
-                    if powered
-                        && in_climb_zone
-                        && groove_radial.length() <= capture_radius
-                        && handles.brace_capture.is_none()
-                    {
-                        handles.brace_capture = Some(BraceCapture {
-                            id: brace_id.to_owned(),
-                        });
-                    }
-                    let driving_away_on_floor = handles.floor_supported
-                        && !powered
-                        && (player.move_z.abs() > CONTROL_DEADBAND
-                            || player.move_x.abs() > CONTROL_DEADBAND);
-                    let capture_valid = !driving_away_on_floor
-                        && handles.brace_capture.as_ref().is_some_and(|capture| {
-                            capture.id == brace_id
-                                && along.abs() <= brace.half_length + 0.06
-                                && groove_radial.length() <= capture_radius + 0.04
-                        });
-                    if !capture_valid {
-                        handles.brace_capture = None;
-                    }
-                    if handles.brace_capture.is_some() {
-                        let radial_direction = groove_radial.normalize_or_zero();
-                        let point = if point_count > 0 {
-                            point_sum / point_count as f32
-                        } else {
-                            closest + radial_direction * brace.radius
-                        };
-                        let Some(chassis) = self.bodies.get(handles.chassis) else {
-                            continue;
-                        };
-                        let arm = point - chassis.translation();
-                        let point_velocity = chassis.linvel() + chassis.angvel().cross(arm);
-                        let radial_velocity =
-                            point_velocity - brace.ascent * point_velocity.dot(brace.ascent);
-                        let mass = chassis.mass();
-                        let seated = radial_direction * seated_radius;
-                        let guide_force =
-                            (seated - groove_radial) * 20_000.0 - radial_velocity * 120.0;
-                        let guide = (guide_force * dt).clamp_length_max(4.5);
-
-                        let traction = if powered || reverse_climb {
-                            let contact_radius = climber.groove_outer_radius_m.max(0.005);
-                            let along_speed = point_velocity.dot(brace.ascent);
-                            let climb_factor = if powered {
-                                player.climb_power
-                            } else {
-                                player.move_z.abs()
-                            };
-                            let desired_speed = if powered {
-                                climber.max_climb_speed_mps * player.climb_power
-                            } else {
-                                -climber.max_climb_speed_mps * player.move_z.abs()
-                            };
-                            let free_surface_speed = climber.free_speed_radps * contact_radius;
-                            let motor_force = climber.stall_torque_nm / contact_radius
-                                * (1.0 - along_speed.abs() / free_surface_speed.max(0.1))
-                                    .clamp(0.0, 1.0)
-                                * climb_factor;
-                            let speed_delta = desired_speed - along_speed;
-                            let speed_impulse = mass * speed_delta.abs();
-                            let motor_impulse = motor_force * dt;
-                            let normal_impulse = support_impulse + guide.length();
-                            let friction_impulse = climber.dynamic_friction * normal_impulse;
-                            let max_impulse =
-                                speed_impulse.min(motor_impulse).min(friction_impulse);
-                            brace.ascent * (speed_delta.signum() * max_impulse)
-                        } else {
-                            Vector::ZERO
-                        };
-                        wheel_constraint = Some((guide + traction, point));
-                    }
+                let impulse = axle * (torque * dt);
+                if let Some(wheel) = self.bodies.get_mut(wheel_handle) {
+                    wheel.apply_torque_impulse(impulse, true);
+                }
+                if let Some(chassis) = self.bodies.get_mut(handles.chassis) {
+                    // The motor reacts against its mount, as a real gearbox does.
+                    chassis.apply_torque_impulse(-impulse, true);
                 }
             }
             let Some(body) = self.bodies.get_mut(handles.chassis) else {
                 continue;
             };
-            if let Some((impulse, point)) = wheel_constraint {
-                // The wheel is a reduced articulated body. Apply its resolved
-                // external traction to the chassis at the same world point so
-                // the net force and moment match the wheel/joint assembly.
-                body.apply_impulse_at_point(impulse, point, true);
-            }
             let rotation = body.rotation();
             let local_up = *rotation * Vector::Y;
-            if !handles.floor_supported
-                || (handles.brace_capture.is_some() && powered)
-                || local_up.y < 0.70
-            {
+            if !handles.floor_supported || local_up.y < 0.70 {
                 continue;
             }
             let raw_forward = *rotation * Vector::NEG_Z;
@@ -960,20 +780,22 @@ impl HybridRobotWorld {
                     });
             let brace_id = alliance_brace(&player.team_name);
             let brace_handle = brace_id.and_then(|id| self.braces.get(id).map(|rail| rail.handle));
-            handles.brace_contact = handles
-                .brace_capture
-                .as_ref()
-                .map(|capture| capture.id.clone());
             let mut support_impulse = 0.0;
+            let mut wheel_contacts = 0;
             if let Some(brace) = brace_handle {
                 for wheel in &handles.wheel_colliders {
                     if let Some(pair) = self.narrow_phase.contact_pair(*wheel, brace)
                         && pair.has_any_active_contact()
                     {
                         support_impulse += pair.total_impulse_magnitude();
+                        wheel_contacts += 1;
                     }
                 }
             }
+            // A seated groove touches both authored frustums. This is only
+            // state reporting; it never creates a constraint or a force.
+            handles.brace_contact = (wheel_contacts >= 2)
+                .then(|| brace_id.expect("brace handle always has an id").to_owned());
             let Some(body) = self.bodies.get(handles.chassis) else {
                 continue;
             };
@@ -1083,23 +905,6 @@ fn is_brace(collider: &FieldCollider) -> bool {
     matches!(collider.id.as_str(), "Cylinder.002" | "Cylinder.003")
 }
 
-fn collider_ascent_axis(collider: &FieldCollider) -> Vector {
-    let axis_index = collider
-        .half_extents
-        .iter()
-        .enumerate()
-        .max_by(|(_, left), (_, right)| left.total_cmp(right))
-        .map(|(index, _)| index)
-        .unwrap_or(1);
-    let axis = Vector::new(
-        collider.axes[axis_index][0],
-        collider.axes[axis_index][1],
-        collider.axes[axis_index][2],
-    )
-    .normalize_or_zero();
-    if axis.y >= 0.0 { axis } else { -axis }
-}
-
 fn has_upward_support(
     narrow_phase: &NarrowPhase,
     robot: ColliderHandle,
@@ -1188,4 +993,18 @@ fn collider_pose(collider: &FieldCollider) -> Pose {
         Vector::new(collider.center[0], collider.center[1], collider.center[2]),
         rotation.normalize(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brace_only_contacts_the_drive_wheel() {
+        let brace = brace_groups();
+        assert!(!brace.test(robot_groups()));
+        assert!(!brace.test(drivebase_groups()));
+        assert!(!brace.test(climb_support_groups()));
+        assert!(brace.test(wheel_groups()));
+    }
 }

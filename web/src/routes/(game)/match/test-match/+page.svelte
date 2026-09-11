@@ -134,6 +134,10 @@
 	let status = $state('Connecting…');
 	let error = $state('');
 	let localId = $state('');
+	let isAdmin = $state(false);
+	let adminControlsOpen = $state(false);
+	let adminActionBusy = $state<string | null>(null);
+	let adminActionError = $state('');
 	let socket = $state.raw<WebSocket | undefined>(undefined);
 	let predictor = $state.raw<DrivePredictor | undefined>(undefined);
 	let predictionErrorM = $state(0);
@@ -656,6 +660,11 @@
 		pendingPings.set(nonce, performance.now());
 		socket.send(JSON.stringify({ type: 'ping', nonce }));
 	}
+	function syncDebugSubscription() {
+		if (!socket || socket.readyState !== WebSocket.OPEN) return;
+		const enabled = debugOpen || fieldDebugOpen || robotDebugOpen || transferDebugOpen;
+		socket.send(JSON.stringify({ type: 'set_debug', enabled }));
+	}
 	function continuePractice() {
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
 		socket.send(JSON.stringify({ type: 'continue_practice' }));
@@ -663,6 +672,35 @@
 	function endPractice() {
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
 		socket.send(JSON.stringify({ type: 'end_practice' }));
+	}
+
+	async function runAdminMatchAction(
+		action: 'reset_match' | 'clear_balls' | 'end_match' | 'kick_player',
+		userId?: string
+	) {
+		if (!isAdmin || !activeMatchId || adminActionBusy) return;
+		const labels = {
+			reset_match: 'Reset this match? The field, score, and robots will return to their starting state after a new countdown.',
+			clear_balls: 'Remove every active ball from this match?',
+			end_match: 'End this match for everyone? This cannot be resumed.',
+			kick_player: 'Remove this player from the match?'
+		};
+		if (!window.confirm(labels[action])) return;
+		adminActionBusy = action;
+		adminActionError = '';
+		try {
+			await api.adminMatchAction(activeMatchId, { action, userId });
+			if (action === 'end_match') {
+				status = 'Ending match…';
+			} else if (action === 'reset_match') {
+				matchOverviewVisible = false;
+				matchHadStarted = false;
+			}
+		} catch (cause) {
+			adminActionError = cause instanceof ApiError ? cause.message : 'The admin action could not be queued.';
+		} finally {
+			adminActionBusy = null;
+		}
 	}
 	function driveParams(): DriveParams | null {
 		if (!physicsLoaded || !fieldDefinition) return null;
@@ -1064,6 +1102,7 @@
 		const keydown = (event: KeyboardEvent) => {
 			if (event.ctrlKey && event.code === 'F3') {
 				debugOpen = !debugOpen;
+				syncDebugSubscription();
 				event.preventDefault();
 				return;
 			}
@@ -1079,6 +1118,7 @@
 			}
 			if (!event.repeat && event.key.toLowerCase() === 'b') {
 				fieldDebugOpen = !fieldDebugOpen;
+				syncDebugSubscription();
 				event.preventDefault();
 				return;
 			}
@@ -1120,6 +1160,7 @@
 				if (disposed) return;
 
 				localId = currentUser.user.id;
+				isAdmin = currentUser.user.role === 'admin';
 				const savedPreferences = loadPreferences(localId);
 				userPreferences = savedPreferences;
 				overviewCameraFov = savedPreferences.graphics.cameraFov;
@@ -1152,6 +1193,7 @@
 					status = 'Connected';
 					error = '';
 					sendPing();
+					syncDebugSubscription();
 					sendInput(true);
 				};
 				nextSocket.onclose = (event) => {
@@ -1500,7 +1542,10 @@
 		<Button
 			variant="outline"
 			class="border-cyan-300/30 bg-black/40 text-cyan-100 hover:bg-cyan-300/10"
-			onclick={() => (debugOpen = !debugOpen)}
+			onclick={() => {
+				debugOpen = !debugOpen;
+				syncDebugSubscription();
+			}}
 		>
 			{debugOpen ? 'Hide diagnostics' : 'Diagnostics'}
 		</Button>
@@ -1509,7 +1554,10 @@
 			class={fieldDebugOpen
 				? 'border-emerald-300/60 bg-emerald-300/15 text-emerald-100 hover:bg-emerald-300/25'
 				: 'border-sky-300/30 bg-black/40 text-sky-100 hover:bg-sky-300/10'}
-			onclick={() => (fieldDebugOpen = !fieldDebugOpen)}
+			onclick={() => {
+				fieldDebugOpen = !fieldDebugOpen;
+				syncDebugSubscription();
+			}}
 		>
 			{fieldDebugOpen ? 'Hide field volumes' : 'Field volumes'}
 		</Button>
@@ -1518,7 +1566,10 @@
 			class={robotDebugOpen
 				? 'border-amber-300/60 bg-amber-300/15 text-amber-100 hover:bg-amber-300/25'
 				: 'border-amber-300/30 bg-black/40 text-amber-100 hover:bg-amber-300/10'}
-			onclick={() => (robotDebugOpen = !robotDebugOpen)}
+			onclick={() => {
+				robotDebugOpen = !robotDebugOpen;
+				syncDebugSubscription();
+			}}
 		>
 			{robotDebugOpen ? 'Hide robot debug' : 'Robot debug'}
 		</Button>
@@ -1527,7 +1578,10 @@
 			class={transferDebugOpen
 				? 'border-amber-300/60 bg-amber-300/15 text-amber-100 hover:bg-amber-300/25'
 				: 'border-amber-300/30 bg-black/40 text-amber-100 hover:bg-amber-300/10'}
-			onclick={() => (transferDebugOpen = !transferDebugOpen)}
+			onclick={() => {
+				transferDebugOpen = !transferDebugOpen;
+				syncDebugSubscription();
+			}}
 		>
 			{transferDebugOpen ? 'Hide transfer debug' : 'Transfer debug'}
 		</Button>
@@ -1540,12 +1594,81 @@
 		>
 			{potatoMode ? 'Potato mode' : 'High poly'}
 		</Button>
+		{#if isAdmin}
+			<Button
+				variant="outline"
+				class={adminControlsOpen
+					? 'border-red-300/60 bg-red-300/15 text-red-100 hover:bg-red-300/25'
+					: 'border-red-300/30 bg-black/40 text-red-100 hover:bg-red-300/10'}
+				onclick={() => (adminControlsOpen = !adminControlsOpen)}
+			>
+				{adminControlsOpen ? 'Hide admin controls' : 'Admin controls'}
+			</Button>
+		{/if}
 		<Button
 			href="/dashboard"
 			variant="outline"
 			class="border-white/20 bg-black/40 text-white hover:bg-white/10">Leave match</Button
 		>
 	</div>
+	{#if isAdmin && adminControlsOpen}
+		<section
+			class="absolute top-18 left-4 z-20 w-[20rem] rounded-lg border border-red-300/35 bg-slate-950/95 p-3 text-sm text-slate-100 shadow-xl backdrop-blur"
+			aria-label="Match administrator controls"
+		>
+			<div class="flex items-baseline justify-between gap-3">
+				<h2 class="font-semibold text-red-100">MATCH ADMIN</h2>
+				<span class="text-[10px] tracking-wide text-red-200 uppercase">server-authorized</span>
+			</div>
+			<p class="mt-1 text-xs leading-relaxed text-slate-300">
+				These commands are queued to the assigned game server and recorded in the admin audit log.
+			</p>
+			<div class="mt-3 grid grid-cols-2 gap-2">
+				<Button
+					variant="outline"
+					class="border-amber-300/35 bg-amber-300/10 text-amber-100 hover:bg-amber-300/20"
+					disabled={adminActionBusy !== null}
+					onclick={() => runAdminMatchAction('reset_match')}
+				>
+					{adminActionBusy === 'reset_match' ? 'Queuing…' : 'Reset match'}
+				</Button>
+				<Button
+					variant="outline"
+					class="border-cyan-300/35 bg-cyan-300/10 text-cyan-100 hover:bg-cyan-300/20"
+					disabled={adminActionBusy !== null}
+					onclick={() => runAdminMatchAction('clear_balls')}
+				>
+					{adminActionBusy === 'clear_balls' ? 'Queuing…' : 'Clear field'}
+				</Button>
+			</div>
+			<div class="mt-3 border-t border-white/10 pt-3">
+				<p class="mb-2 text-xs font-medium text-slate-300">Remove a connected player</p>
+				<div class="max-h-28 space-y-1 overflow-y-auto pr-1">
+					{#each players.filter((player) => player.id !== localId) as player (player.id)}
+						<button
+							type="button"
+							class="flex w-full items-center justify-between rounded border border-white/10 px-2 py-1.5 text-left text-xs text-slate-200 hover:border-red-300/45 hover:bg-red-300/10 disabled:opacity-50"
+							disabled={adminActionBusy !== null}
+							onclick={() => runAdminMatchAction('kick_player', player.id)}
+						>
+							<span class="truncate">{player.name}</span><span class="text-red-200">Remove</span>
+						</button>
+					{:else}
+						<p class="px-1 py-1 text-xs text-slate-500">No other players are connected.</p>
+					{/each}
+				</div>
+			</div>
+			<Button
+				variant="outline"
+				class="mt-3 w-full border-red-400/45 bg-red-500/15 text-red-100 hover:bg-red-500/25"
+				disabled={adminActionBusy !== null}
+				onclick={() => runAdminMatchAction('end_match')}
+			>
+				{adminActionBusy === 'end_match' ? 'Queuing…' : 'End match for everyone'}
+			</Button>
+			{#if adminActionError}<p class="mt-2 text-xs text-red-200">✖ {adminActionError}</p>{/if}
+		</section>
+	{/if}
 	{#if robotDebugOpen}
 		<section
 			class="absolute top-18 right-4 z-10 w-[19rem] rounded-lg border border-amber-300/40 bg-slate-950/90 p-3 text-sm text-slate-100 shadow-xl backdrop-blur"

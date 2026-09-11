@@ -107,7 +107,7 @@ fn binary_state_has_versioned_header_and_compact_positions() {
         ball_debug: Vec::new(),
         ball_contact_colliders: Vec::new(),
     };
-    let encoded = encode_state(&state, ProcessMetrics::default(), false);
+    let encoded = encode_state(&state, ProcessMetrics::default(), false, false);
     assert_eq!(&encoded[..4], b"FGS1");
     assert_eq!(u16::from_le_bytes(encoded[4..6].try_into().unwrap()), 1);
     assert_eq!(u16::from_le_bytes(encoded[6..8].try_into().unwrap()), 5);

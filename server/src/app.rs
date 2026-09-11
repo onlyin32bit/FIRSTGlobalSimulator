@@ -230,6 +230,9 @@ enum ClientMessage {
     },
     ContinuePractice,
     EndPractice,
+    SetDebug {
+        enabled: bool,
+    },
     Ping {
         nonce: u64,
     },
@@ -481,6 +484,14 @@ async fn execute_command(
         "kick_player" => match (command.match_id.as_deref(), command.user_id.as_deref()) {
             (Some(match_id), Some(user_id)) => registry.kick_player(match_id, user_id).await,
             _ => Err("kick_player requires matchId and userId".to_string()),
+        },
+        "reset_match" => match command.match_id.as_deref() {
+            Some(match_id) => registry.reset_match(match_id).await,
+            None => Err("reset_match requires matchId".to_string()),
+        },
+        "clear_balls" => match command.match_id.as_deref() {
+            Some(match_id) => registry.clear_balls(match_id).await,
+            None => Err("clear_balls requires matchId".to_string()),
         },
         "stop_match" | "clear_match" => match command.match_id.as_deref() {
             Some(match_id) => registry.stop_match(match_id).await,
@@ -788,6 +799,7 @@ async fn handle_socket(
         return;
     }
     let mut input_gate = InputGate::new();
+    let mut debug_subscribed = false;
     loop {
         tokio::select! {
             message = receiver.next() => match message {
@@ -838,6 +850,12 @@ async fn handle_socket(
                         if access != ConnectionAccess::Driver { if input_gate.rejected() { break; } continue; }
                         let _ = match_handle.input_tx.send(MatchInput::EndPractice).await;
                     }
+                    Ok(ClientMessage::SetDebug { enabled }) => {
+                        if enabled != debug_subscribed {
+                            match_handle.set_debug_subscription(enabled);
+                            debug_subscribed = enabled;
+                        }
+                    }
                     Ok(ClientMessage::Ping { nonce }) => {
                         if let Ok(message) = serde_json::to_string(&PongMessage { r#type: "pong", nonce })
                             && sender.send(Message::Text(message.into())).await.is_err()
@@ -854,6 +872,9 @@ async fn handle_socket(
                 if sender.send(Message::Binary(state)).await.is_err() { break; }
             }
         }
+    }
+    if debug_subscribed {
+        match_handle.set_debug_subscription(false);
     }
     if access == ConnectionAccess::Driver {
         let _ = match_handle

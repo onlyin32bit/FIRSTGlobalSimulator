@@ -121,6 +121,12 @@ const CONTROL_DEADBAND = 0.08;
 const TURN_BRAKE_MULTIPLIER = 2.5;
 const TURN_STOP_EPSILON_RADPS = 0.04;
 
+// Brace contacts belong to the articulated climb wheel in the authoritative
+// Rapier world. The client predicts one chassis OBB, so treating either rail
+// as a chassis wall would create a correction loop while driving beneath it.
+const isBraceRail = (collider: FieldCollider) =>
+	collider.id === 'Cylinder.002' || collider.id === 'Cylinder.003';
+
 const applyControlDeadband = (value: number) => {
 	const clamped = clamp(value, -1, 1);
 	const magnitude = Math.abs(clamped);
@@ -214,6 +220,7 @@ const projectFieldColliders = (
 	const candidates = fieldIndex.query(p.x - planarX, p.x + planarX, p.z - planarZ, p.z + planarZ);
 	for (const index of candidates) {
 		const collider = params.colliders[index];
+		if (isBraceRail(collider)) continue;
 		if (robotMaxY <= collider.min[1] || robotMinY >= collider.max[1]) continue;
 		if (
 			p.x + planarX <= collider.min[0] ||

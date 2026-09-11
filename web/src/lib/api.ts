@@ -604,13 +604,36 @@ export class APIClient {
 	commandGameServer(
 		id: string,
 		input: {
-			type: 'kick_player' | 'stop_match' | 'clear_match' | 'cleanup_idle' | 'reset_host';
+			type:
+				| 'kick_player'
+				| 'stop_match'
+				| 'clear_match'
+				| 'reset_match'
+				| 'clear_balls'
+				| 'cleanup_idle'
+				| 'reset_host';
 			matchId?: string;
 			userId?: string;
 		}
 	) {
 		return this.request<{ command: GameServerCommand }>(
 			`/api/admin/game-servers/${encodeURIComponent(id)}/commands`,
+			{
+				method: 'POST',
+				body: JSON.stringify(input)
+			}
+		);
+	}
+
+	adminMatchAction(
+		matchId: string,
+		input: {
+			action: 'reset_match' | 'clear_balls' | 'end_match' | 'kick_player';
+			userId?: string;
+		}
+	) {
+		return this.request<{ command: GameServerCommand }>(
+			`/api/matches/${encodeURIComponent(matchId)}/admin/actions`,
 			{
 				method: 'POST',
 				body: JSON.stringify(input)

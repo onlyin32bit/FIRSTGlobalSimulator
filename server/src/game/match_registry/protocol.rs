@@ -7,20 +7,22 @@ pub(super) fn encode_state(
     state: &MatchStateSync,
     process: ProcessMetrics,
     include_physics: bool,
+    include_debug: bool,
 ) -> Vec<u8> {
-    encode_snapshot(state, process, include_physics, false)
+    encode_snapshot(state, process, include_physics, include_debug, false)
 }
 
 /// A join baseline includes sleeping-object positions so a reconnect never
 /// depends on deltas observed by an older socket.
 pub(super) fn encode_baseline(state: &MatchStateSync, process: ProcessMetrics) -> Vec<u8> {
-    encode_snapshot(state, process, true, true)
+    encode_snapshot(state, process, true, false, true)
 }
 
 fn encode_snapshot(
     state: &MatchStateSync,
     process: ProcessMetrics,
     include_physics: bool,
+    include_debug: bool,
     baseline: bool,
 ) -> Vec<u8> {
     const METADATA: u16 = 1;
@@ -219,12 +221,14 @@ fn encode_snapshot(
             put_i32(bytes, *points);
         }
     });
-    section(&mut output, SEMANTIC_EVENTS, |bytes| {
-        put_u16(bytes, state.semantic_events.len() as u16);
-        for event in &state.semantic_events {
-            put_string(bytes, event);
-        }
-    });
+    if include_debug {
+        section(&mut output, SEMANTIC_EVENTS, |bytes| {
+            put_u16(bytes, state.semantic_events.len() as u16);
+            for event in &state.semantic_events {
+                put_string(bytes, event);
+            }
+        });
+    }
     if include_physics {
         section(&mut output, DRIVE, |bytes| {
             for value in [
@@ -240,7 +244,13 @@ fn encode_snapshot(
             }
         });
     }
-    // Transfer debug section — always emitted so the client can diagnose issues.
+    if !include_debug {
+        let payload_len = (output.len() - 16) as u32;
+        output[12..16].copy_from_slice(&payload_len.to_le_bytes());
+        return output;
+    }
+    // Transfer debug section is reviewer-only. It includes live mechanism
+    // internals and can become large when every ball has contacts.
     // Format: u8 count, then per-player: string name, u8 flags, f32 intake, f32 outtake,
     // f32 outtake force, f32 outtake target speed, u16 contact count, f32 contact speed.
     // Flags bitmask: bit0=has_ball, bit1=transfer_power_ok, bit2=inside_robot,

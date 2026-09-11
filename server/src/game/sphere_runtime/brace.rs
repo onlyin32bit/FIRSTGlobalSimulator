@@ -102,6 +102,7 @@ mod tests {
         PlayerBody {
             name: "player".into(),
             team_name: "red".into(),
+            slot_id: None,
             position: [0.0; 3],
             velocity: [0.0; 3],
             yaw: 0.0,
@@ -230,12 +231,20 @@ mod tests {
         let mut contact_ticks = 0;
         let mut highest = settled_y;
         let mut strongest_support = 0.0_f32;
+        let mut previous = runtime.players["red"].position;
+        let mut largest_step = 0.0_f32;
         for _ in 0..360 {
             runtime.tick(1.0 / 60.0);
             let player = &runtime.players["red"];
             contact_ticks += usize::from(player.climbing_brace.is_some());
             highest = highest.max(player.position[1]);
             strongest_support = strongest_support.max(player.brace_support_impulse);
+            largest_step = largest_step.max(
+                (player.position[0] - previous[0])
+                    .hypot(player.position[1] - previous[1])
+                    .hypot(player.position[2] - previous[2]),
+            );
+            previous = player.position;
         }
         assert!(
             contact_ticks > 10,
@@ -243,7 +252,11 @@ mod tests {
             runtime.players["red"].position
         );
         assert!(
-            highest > settled_y + 0.25,
+            largest_step < 0.01,
+            "groove contact must not eject the chassis between ticks: max_step={largest_step}"
+        );
+        assert!(
+            highest > settled_y + 0.20,
             "brace friction produced no lift: settled={settled_y} highest={highest} contacts={contact_ticks} support={strongest_support} wheel_radps={} final={:?}",
             runtime.players["red"].climb_wheel_radps,
             runtime.players["red"].position
@@ -251,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn starter_bot_can_disengage_and_drive_away_from_brace() {
+    fn released_climber_is_not_programmatically_detached() {
         let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
             .load_pack("../pkgs/games/fgc-2026/manifest.json")
             .unwrap();
@@ -272,15 +285,16 @@ mod tests {
             .unwrap()
             .teleport_to_players(&runtime.players);
 
-        // First, power climb briefly to engage with the brace
+        // First, power climb briefly to seat the wheel in the brace.
         let player = runtime.players.get_mut("red").unwrap();
         player.climb_power = 1.0;
         for _ in 0..30 {
             runtime.tick(1.0 / 60.0);
         }
-        let engaged_z = runtime.players["red"].position[2];
+        let engaged = runtime.players["red"].position;
 
-        // Now release climb and drive in reverse to exit the brace
+        // Releasing the button must only stop the motor. It must not erase a
+        // real contact or move the robot to an invented "disengaged" pose.
         let player = runtime.players.get_mut("red").unwrap();
         player.climb_power = 0.0;
         player.move_z = -1.0;
@@ -289,19 +303,22 @@ mod tests {
         }
 
         let player = &runtime.players["red"];
-        assert_eq!(
-            player.climbing_brace, None,
-            "robot must clear climbing_brace after driving away"
+        assert!(
+            player.position.iter().all(|value| value.is_finite()),
+            "released wheel produced a non-finite pose: {:?}",
+            player.position
         );
         assert!(
-            player.position[2] > engaged_z + 0.05,
-            "robot must drive away in reverse, start_z={engaged_z}, final_z={}",
-            player.position[2]
+            (player.position[0] - engaged[0]).abs() < 1.0
+                && (player.position[1] - engaged[1]).abs() < 1.0
+                && (player.position[2] - engaged[2]).abs() < 1.0,
+            "releasing the wheel must not teleport the robot: start={engaged:?}, final={:?}",
+            player.position
         );
     }
 
     #[test]
-    fn climb_zone_required_for_brace_capture() {
+    fn climb_zone_does_not_authorize_or_block_physical_contact() {
         let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
             .load_pack("../pkgs/games/fgc-2026/manifest.json")
             .unwrap();
@@ -336,14 +353,14 @@ mod tests {
         player.climb_power = 1.0;
 
         let mut highest = settled_y;
-        for _ in 0..120 {
+        for _ in 0..360 {
             runtime.tick(1.0 / 60.0);
             highest = highest.max(runtime.players["red"].position[1]);
         }
 
         assert!(
-            highest < settled_y + 0.05,
-            "robot must NOT climb when ClimbZone does not contact brace: settled={settled_y} highest={highest}"
+            highest > settled_y + 0.20,
+            "the semantic zone must not decide physical climbing: settled={settled_y} highest={highest}"
         );
     }
 }

@@ -1,6 +1,6 @@
 use axum::body::Bytes;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -131,6 +131,7 @@ pub struct MatchHandle {
     kicked_users: Arc<Mutex<HashSet<String>>>,
     telemetry: Arc<Mutex<RuntimeMatchTelemetry>>,
     latest_state: Arc<Mutex<Option<Arc<MatchStateSync>>>>,
+    debug_subscribers: Arc<AtomicUsize>,
     pub bootstrap: Arc<MatchBootstrap>,
     reports: Option<mpsc::UnboundedSender<MatchReport>>,
 }
@@ -165,6 +166,18 @@ impl MatchHandle {
                 payload: serde_json::json!({ "userId": user_id, "reason": reason }),
                 game_pack_version: self.bootstrap.game_pack_version.clone(),
             }));
+        }
+    }
+
+    pub fn set_debug_subscription(&self, enabled: bool) {
+        if enabled {
+            self.debug_subscribers.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.debug_subscribers
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    count.checked_sub(1)
+                })
+                .ok();
         }
     }
 }
@@ -210,6 +223,10 @@ pub enum MatchInput {
     /// the same field. Scoring stays disabled while practice continues.
     ContinuePractice,
     EndPractice,
+    /// Control-plane-only actions. They are never reachable from a player
+    /// socket, and keep active connections attached to the same match.
+    ResetMatch,
+    ClearBalls,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -399,6 +416,28 @@ impl RuntimeBackend {
         match self {
             Self::Rapier(runtime) => runtime.disable_player_controls(),
             Self::Sphere(runtime) => runtime.disable_player_controls(),
+        }
+    }
+
+    fn reset_match(&mut self, arena: &ArenaConfig) -> Result<(), String> {
+        match self {
+            Self::Sphere(runtime) => {
+                runtime.reset_match(arena);
+                Ok(())
+            }
+            Self::Rapier(_) => Err("This legacy runtime does not support live reset.".to_string()),
+        }
+    }
+
+    fn clear_balls(&mut self) -> Result<(), String> {
+        match self {
+            Self::Sphere(runtime) => {
+                runtime.clear_balls();
+                Ok(())
+            }
+            Self::Rapier(_) => {
+                Err("This legacy runtime does not support clearing field pieces.".to_string())
+            }
         }
     }
 
@@ -756,6 +795,36 @@ impl MatchRegistry {
         Ok(())
     }
 
+    pub async fn reset_match(&self, match_id: &str) -> Result<(), String> {
+        let handle = self
+            .matches
+            .read()
+            .await
+            .get(match_id)
+            .cloned()
+            .ok_or_else(|| "Match is not running on this host.".to_string())?;
+        handle
+            .input_tx
+            .send(MatchInput::ResetMatch)
+            .await
+            .map_err(|_| "Match control channel is unavailable.".to_string())
+    }
+
+    pub async fn clear_balls(&self, match_id: &str) -> Result<(), String> {
+        let handle = self
+            .matches
+            .read()
+            .await
+            .get(match_id)
+            .cloned()
+            .ok_or_else(|| "Match is not running on this host.".to_string())?;
+        handle
+            .input_tx
+            .send(MatchInput::ClearBalls)
+            .await
+            .map_err(|_| "Match control channel is unavailable.".to_string())
+    }
+
     pub async fn cleanup_idle(&self) -> usize {
         let ids = self
             .matches
@@ -848,6 +917,7 @@ impl MatchRegistry {
                 ..Default::default()
             })),
             latest_state: latest_state.clone(),
+            debug_subscribers: Arc::new(AtomicUsize::new(0)),
             bootstrap: Arc::new(bootstrap.clone()),
             reports: self.reports.clone(),
         };
@@ -876,10 +946,14 @@ impl MatchRegistry {
 
         let publisher_state = latest_state.clone();
         let publisher_tx = state_tx.clone();
+        let publisher_debug_subscribers = handle.debug_subscribers.clone();
         std::thread::Builder::new()
             .name(format!("match-publisher-{match_id}"))
             .spawn(move || {
-                let interval = Duration::from_millis(16);
+                // Simulation remains 60 Hz; snapshots are capped at 20 Hz.
+                // Prediction and interpolation handle the gap without making
+                // every connected browser decode diagnostics every frame.
+                let interval = Duration::from_millis(50);
                 let mut next_publish = Instant::now();
                 let mut next_process_sample = next_publish;
                 let mut process_sampler = ProcessSampler::default();
@@ -905,10 +979,12 @@ impl MatchRegistry {
                         .and_then(|state| state.as_ref().cloned());
                     if let Some(state) = state {
                         let include_physics = publish_count % 10 == 1;
+                        let include_debug = publisher_debug_subscribers.load(Ordering::Relaxed) > 0;
                         let _ = publisher_tx.send(Bytes::from(encode_state(
                             &state,
                             process_metrics,
                             include_physics,
+                            include_debug,
                         )));
                     }
                 }
@@ -935,11 +1011,11 @@ impl MatchRegistry {
                 let tick_budget_ms = tick_duration.as_secs_f64() * 1_000.0;
                 let mut next_tick = Instant::now();
                 let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-                let match_started = next_tick + Duration::from_millis(bootstrap.starts_at.saturating_sub(now_ms));
+                let mut match_started = next_tick + Duration::from_millis(bootstrap.starts_at.saturating_sub(now_ms));
                 let match_duration = Duration::from_secs(bootstrap.duration_seconds);
-                let match_ends = match_started + match_duration;
+                let mut match_ends = match_started + match_duration;
                 const POST_MATCH_SETTLE: Duration = Duration::from_millis(3_500);
-                let match_finalizes = match_ends + POST_MATCH_SETTLE;
+                let mut match_finalizes = match_ends + POST_MATCH_SETTLE;
                 let mut live_phase_entered = false;
                 let mut practice_continue = false;
                 let mut controls_disabled = false;
@@ -991,6 +1067,37 @@ impl MatchRegistry {
                             } if !controls_locked => runtime.set_player_input(&user_id, &connection_id, move_x, move_z, intake_power, outtake_power, climb_power, sequence),
                             MatchInput::ContinuePractice if !controls_locked => practice_continue = true,
                             MatchInput::EndPractice if !controls_locked => practice_continue = false,
+                            MatchInput::ResetMatch => {
+                                if let Err(error) = runtime.reset_match(&pack.arena) {
+                                    tracing::warn!(match_id = %match_id, %error, "Admin reset was rejected by the runtime");
+                                    continue;
+                                }
+                                let reset_at = Instant::now();
+                                match_started = reset_at + Duration::from_secs(5);
+                                match_ends = match_started + match_duration;
+                                match_finalizes = match_ends + POST_MATCH_SETTLE;
+                                live_phase_entered = false;
+                                practice_continue = false;
+                                controls_disabled = false;
+                                brace_score_applied = false;
+                                endgame_brace_multipliers = None;
+                                event_sequence = 0;
+                                recent_semantic_events.clear();
+                                if let Some(reports) = &report_tx { let _ = reports.send(MatchReport::Event(MatchEventReport {
+                                    match_id: match_id.clone(), event_id: format!("{match_id}:admin-reset:{tick}"), tick,
+                                    kind: "match.admin_reset".to_string(), payload: serde_json::json!({ "startsInSeconds": 5 }),
+                                    game_pack_version: pack.manifest.version.clone(),
+                                })); }
+                            }
+                            MatchInput::ClearBalls => {
+                                if let Err(error) = runtime.clear_balls() {
+                                    tracing::warn!(match_id = %match_id, %error, "Admin clear-balls was rejected by the runtime");
+                                } else if let Some(reports) = &report_tx { let _ = reports.send(MatchReport::Event(MatchEventReport {
+                                    match_id: match_id.clone(), event_id: format!("{match_id}:admin-clear-balls:{tick}"), tick,
+                                    kind: "field.cleared".to_string(), payload: serde_json::json!({}),
+                                    game_pack_version: pack.manifest.version.clone(),
+                                })); }
+                            }
                             _ => {}
                         }
                     }

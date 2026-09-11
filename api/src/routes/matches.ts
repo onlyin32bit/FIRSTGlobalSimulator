@@ -3,7 +3,8 @@ import { desc, eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { sign } from 'hono/jwt'
 import * as schema from '../db/schema'
-import { isResponse, lobbyReadySchema, lobbySlotSchema, matchSchema, parseJson } from '../lib/validation'
+import { adminMatchActionSchema, isResponse, lobbyReadySchema, lobbySlotSchema, matchSchema, parseJson } from '../lib/validation'
+import { writeAdminAudit } from '../lib/audit'
 import type { BootstrapParticipant, LobbySlotId, LobbyUser, MatchBootstrap } from '../match-lobby'
 import { requireAdmin, requireUser } from '../middleware'
 import { jsonError, jsonSuccess } from '../responses'
@@ -330,6 +331,62 @@ app.post('/:id/lobby/admin-start', async (c) => {
   } catch (error) {
     return lobbyError(c, error)
   }
+})
+
+/** Live controls are deliberately routed through the API so the game host
+ * never has to trust a browser asking to alter an authoritative match. */
+app.post('/:id/admin/actions', async (c) => {
+  const session = await requireAdmin(c)
+  if (!session) return jsonError(c, 403, 'AUTH_FAILED', 'Administrator access is required.')
+  const body = await parseJson(c, adminMatchActionSchema)
+  if (isResponse(body)) return body
+
+  const matchId = c.req.param('id')
+  const db = drizzle(c.env.DB, { schema })
+  const match = await db.query.matches.findFirst({ where: eq(schema.matches.id, matchId) })
+  if (!match) return jsonError(c, 404, 'MATCH_NOT_FOUND', 'Match not found.')
+  if (!match.gameServerId) return jsonError(c, 409, 'GAME_SERVER_UNAVAILABLE', 'This match has not been assigned to a game server.')
+  const server = await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, match.gameServerId) })
+  if (!server || server.disabledAt || !server.lastHeartbeatAt || Date.now() - server.lastHeartbeatAt.getTime() >= 30_000) {
+    return jsonError(c, 503, 'GAME_SERVER_UNAVAILABLE', 'The assigned game server is not healthy.')
+  }
+  if (body.action !== 'end_match' && match.status !== 'IN_PROGRESS') {
+    return jsonError(c, 409, 'LOBBY_INVALID_STATE', 'Only an in-progress match can receive this control.')
+  }
+
+  const now = new Date()
+  const type = body.action === 'end_match' ? 'stop_match' : body.action
+  const command = {
+    id: crypto.randomUUID(),
+    serverId: server.id,
+    type,
+    payload: JSON.stringify({ matchId, userId: body.userId }),
+    status: 'pending' as const,
+    error: null,
+    createdAt: now,
+    deliveredAt: null,
+    completedAt: null
+  }
+  await db.insert(schema.gameServerCommands).values(command)
+
+  if (body.action === 'end_match') {
+    await db.update(schema.matches).set({
+      status: 'CANCELLED',
+      cancelledAt: now,
+      cancelReason: 'Ended by an administrator.',
+      updatedAt: now
+    }).where(eq(schema.matches.id, matchId))
+    try { await lobbyFor(c, matchId).complete('Ended by an administrator.', true) } catch { /* open arena has no persisted lobby */ }
+  }
+
+  await writeAdminAudit(c.env, {
+    actorUserId: session.user.id,
+    action: `match.admin_${body.action}`,
+    targetType: 'match',
+    targetId: matchId,
+    metadata: { commandId: command.id, userId: body.userId ?? null, serverId: server.id }
+  })
+  return jsonSuccess(c, { command: { ...command, payload: JSON.parse(command.payload) } }, 202)
 })
 
 app.post('/:id/ticket', async (c) => {

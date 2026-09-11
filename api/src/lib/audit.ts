@@ -6,6 +6,7 @@ export type AdminAuditAction =
   | 'invitation.created' | 'invitation.revoked' | 'invitation.updated'
   | 'user.role_changed' | 'user.updated' | 'user.sessions_revoked' | 'user.disabled' | 'user.enabled'
   | 'match.created' | 'match.updated' | 'match.cancelled'
+  | 'match.admin_reset_match' | 'match.admin_clear_balls' | 'match.admin_end_match' | 'match.admin_kick_player'
   | 'game_server.created' | 'game_server.updated' | 'game_server.disabled' | 'game_server.commanded' | 'game_server.deleted'
 
 export async function writeAdminAudit(

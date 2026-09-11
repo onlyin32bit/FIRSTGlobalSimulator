@@ -114,6 +114,7 @@ struct Ball {
 struct PlayerBody {
     name: String,
     team_name: String,
+    slot_id: Option<String>,
     position: Vec3,
     velocity: Vec3,
     yaw: f32,
@@ -555,6 +556,7 @@ impl SphereRuntime {
             PlayerBody {
                 name,
                 team_name,
+                slot_id: slot_id.map(str::to_string),
                 position: spawn
                     .map(|point| [point[0], self.robot_center_y(arena), point[2]])
                     .unwrap_or([
@@ -713,6 +715,107 @@ impl SphereRuntime {
             player.outtake_power = 0.0;
             player.climb_power = 0.0;
             player.climbing_brace = None;
+        }
+    }
+
+    /// Restore the authored field to its pre-match state without dropping
+    /// connected drivers. The control plane owns when this may happen.
+    pub fn reset_match(&mut self, arena: &ArenaConfig) {
+        self.context.phase = MatchPhase::PreMatch;
+        self.context.clock = 0.0;
+        self.score_state = ScoreState::default();
+        self.scoring_enabled = false;
+        self.ball_release_elapsed = None;
+        self.semantic_events.clear();
+        self.transfer_debug.clear();
+        self.ball_debug.clear();
+
+        let count = arena.object_count.max(1) as f32;
+        for (index, ball) in self.balls.iter_mut().enumerate() {
+            ball.position = self.ball_spawn;
+            ball.previous_position = self.ball_spawn;
+            ball.velocity = [0.0; 3];
+            ball.pre_solve_velocity = [0.0; 3];
+            ball.angular_velocity = [0.0; 3];
+            ball.quiet_ticks = 0;
+            ball.sleeping = false;
+            ball.grounded = false;
+            ball.on_ramp = false;
+            ball.active = false;
+            ball.physics_dirty = true;
+            ball.release_at_seconds = arena.spawn_release_seconds.max(0.0) * index as f32 / count;
+            ball.released = false;
+            ball.owner = None;
+            ball.last_outtake_alliance = None;
+        }
+        self.scored_target_by_ball.fill(None);
+
+        let robot_center_y = self.robot_center_y(arena);
+        for (index, player) in self.players.values_mut().enumerate() {
+            let angle = index as f32 * std::f32::consts::TAU / 8.0;
+            let anchor_key = player.slot_id.as_deref().and_then(|id| {
+                let (alliance, role) = id.split_once('-')?;
+                let index = role.strip_prefix("driver-")?;
+                Some(format!("{alliance}Spawn{index}"))
+            });
+            let spawn = anchor_key
+                .as_deref()
+                .and_then(|key| self.field_anchors.get(key))
+                .copied();
+            player.position = spawn
+                .map(|point| [point[0], robot_center_y, point[2]])
+                .unwrap_or([angle.cos() * 4.0, robot_center_y, angle.sin() * 4.0]);
+            let center_x = (self.field_boundary.min[0] + self.field_boundary.max[0]) * 0.5;
+            let center_z = (self.field_boundary.min[2] + self.field_boundary.max[2]) * 0.5;
+            player.yaw = spawn
+                .map(|point| (-(center_x - point[0])).atan2(-(center_z - point[2])))
+                .unwrap_or(angle);
+            player.rotation = [0.0, (player.yaw * 0.5).sin(), 0.0, (player.yaw * 0.5).cos()];
+            player.velocity = [0.0; 3];
+            player.angular_velocity = [0.0; 3];
+            player.angular_velocity_y = 0.0;
+            player.move_x = 0.0;
+            player.move_z = 0.0;
+            player.intake_power = 0.0;
+            player.outtake_power = 0.0;
+            player.climb_power = 0.0;
+            player.stored.clear();
+            player.outtake_accumulator = 0.0;
+            player.intake_accumulator = 0.0;
+            player.climbing_brace = None;
+            player.floor_supported = true;
+            player.brace_support_impulse = 0.0;
+            player.climb_wheel_angle = 0.0;
+            player.climb_wheel_radps = 0.0;
+            player.collider_cache = None;
+        }
+
+        // Rebuilding keeps Rapier's robot and ball proxy bodies aligned with
+        // the reset semantic state rather than relying on stale contacts.
+        let definition = self.robot_definition.clone();
+        self.set_robot_definition(definition.as_ref());
+    }
+
+    /// Remove field pieces and all robot possession. Pieces stay retired for
+    /// this match; they are restored only by an explicit match reset.
+    pub fn clear_balls(&mut self) {
+        self.ball_release_elapsed = None;
+        self.semantic_events.clear();
+        self.scored_target_by_ball.fill(None);
+        for ball in &mut self.balls {
+            ball.active = false;
+            ball.owner = None;
+            ball.velocity = [0.0; 3];
+            ball.pre_solve_velocity = [0.0; 3];
+            ball.angular_velocity = [0.0; 3];
+            ball.sleeping = true;
+            ball.released = true;
+            ball.physics_dirty = true;
+        }
+        for player in self.players.values_mut() {
+            player.stored.clear();
+            player.outtake_accumulator = 0.0;
+            player.intake_accumulator = 0.0;
         }
     }
 

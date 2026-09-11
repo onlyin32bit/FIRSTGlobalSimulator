@@ -112,6 +112,61 @@ fn simulates_pack_count_and_keeps_balls_in_bounds() {
 }
 
 #[test]
+fn admin_field_controls_clear_pieces_and_reset_connected_players() {
+    let pack = crate::game::pack_loader::PackLoader::new("0.1.0")
+        .load_pack("../pkgs/games/fgc-2026/manifest.json")
+        .unwrap();
+    let mut arena = pack.arena.clone();
+    arena.object_count = 3;
+    arena.spawn_release_seconds = 0.0;
+    let mut runtime = SphereRuntime::new("admin-controls".into(), "fgc-2026".into(), 3);
+    runtime.create_field_arena(&arena, &pack.field_definition);
+    runtime.set_robot_definition(pack.default_robot.as_ref());
+    runtime.add_player(
+        "driver".into(),
+        "Driver".into(),
+        "red".into(),
+        Some("red-driver-1"),
+        &arena,
+    );
+    runtime.begin_match();
+    runtime.tick(1.0 / 60.0);
+    assert!(runtime.balls.iter().all(|ball| ball.active));
+
+    runtime
+        .players
+        .get_mut("driver")
+        .unwrap()
+        .stored
+        .push_back(0);
+    runtime.balls[0].owner = Some("driver".into());
+    runtime.clear_balls();
+    assert!(
+        runtime
+            .balls
+            .iter()
+            .all(|ball| !ball.active && ball.owner.is_none())
+    );
+    assert!(runtime.players["driver"].stored.is_empty());
+
+    runtime.score_state.red_score = 11;
+    runtime.reset_match(&arena);
+    assert_eq!(runtime.context.phase, MatchPhase::PreMatch);
+    assert_eq!(runtime.score_state.red_score, 0);
+    assert!(
+        runtime
+            .balls
+            .iter()
+            .all(|ball| !ball.active && !ball.released)
+    );
+    assert_eq!(
+        runtime.players.len(),
+        1,
+        "reset must retain the socket-bound driver"
+    );
+}
+
+#[test]
 fn pack_guard_rail_footprint_bounds_the_authoritative_arena() {
     let mut arena = arena();
     arena.object_count = 1;
