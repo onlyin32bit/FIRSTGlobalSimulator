@@ -1,39 +1,55 @@
 ---
 title: Frequently asked questions
-description: Answers about invitations, sessions, robot saving, and support.
+description: Answers for joining, controls, scoring, and account support.
 ---
 
 # Frequently asked questions
 
-## Access and invitations
+## Joining and controls
 
-### Why do I need an invitation code?
+### Why can I watch but not drive?
 
-The simulator is currently invite-only. This helps the maintainers manage access while the platform and multiplayer capabilities continue to develop.
+Your ticket determines your role. Only a driver ticket for a claimed station can send drive and mechanism frames. Spectators receive the same match snapshots and events, but cannot move a robot. Ask the host to assign or correct your station before the room is locked.
 
-### Why is my code not working?
+### I rejoined and the field was empty. What should I do?
 
-Codes contain exactly six letters or digits and must be entered exactly as issued. A code cannot be used again after registration and may be revoked or expired. Contact the administrator or Team Vietnam if you need a new one.
+Reconnect through the same lobby. The first state after a successful reconnect is a complete authoritative baseline; wait for it before judging the field. If the socket repeatedly closes, refresh the page, verify the game-server address configured by the room, and ask the host whether the room was reset or ended.
 
-### Can I request access?
+### Why does the fly camera stop the robot?
 
-Yes. Use **Request Invite** on the [home page](/) and provide your contact details.
+An unlocked fly camera uses the keyboard for camera movement, so driver input is intentionally suppressed. Use **Lock camera & drive** to hold the fly camera in place while returning keyboard control to the robot.
 
-## Account and session
+### Which gamepad buttons run mechanisms?
 
-### Why was I sent to sign in?
+The default mapping uses the left bumper for intake, right bumper for outtake, and the top face button for climb. The current controller mapping is shown in the match HUD and can be adjusted from Settings.
 
-The dashboard and robot builder require an active account. The app remembers the page you requested and returns you after successful sign-in when possible.
+## Match and scoring
 
-### How do I sign out?
+### Why did my outtake not fire?
 
-Use **Sign out** in the header on any protected simulator page. This ends the browser session and returns you to the public home page.
+The flywheel can accelerate only a ball that has physically reached the outtake. Run the intake first, give the transfer path time to feed a ball forward, and check the robot's stored-ball count.
 
-### My robot did not save. What should I do?
+### Why did the robot slide or fall from the BRACE?
 
-Confirm that you are signed in and have a stable connection, then try saving again. If the error continues, include the visible error message when you contact support.
+Climbing is physical. The grooved wheels must be aligned around the tube and carry enough normal load for friction to transmit motor torque. Pressing climb only spins the wheels; it does not create an attachment. Reposition, slow down, and establish a clean wheel-to-tube contact.
 
-## Need help?
+### Why did a ball not score?
+
+Only active authored scoring volumes count. In the FGC 2026 pack, a WILDFIRE scores when it crosses the correct Suppression Unit target after a robot outtake. A ball touching an inactive target, entering from the wrong path, or merely appearing near the visual model does not create a score.
+
+### Does the timer freeze physics at zero?
+
+No. At the buzzer, player input is disabled while the live physics simulation continues for a short settlement period. This allows a final in-flight ball to finish naturally. The full-screen result overlay then fades in with the finalized score.
+
+## Support
+
+### Why is my invitation code not working?
+
+Codes contain exactly six letters or digits and are single-use. Check the code carefully; a redeemed, revoked, or expired code needs to be replaced by its issuer.
+
+### How do I report a match problem?
+
+Capture the match ID, approximate time, browser console or diagnostics output, and a short description of the expected and observed behavior. For physical issues, include a screenshot or recording with the field and robot visible.
 
 For access, account, or project questions, email [vietnamteamfgc@gmail.com](mailto:vietnamteamfgc@gmail.com). You can also follow [Team Vietnam on Facebook](https://www.facebook.com/TeamVietnamFGC) and [Instagram](https://www.instagram.com/teamvietnam.fgc/).
 

@@ -1,0 +1,43 @@
+---
+title: Administration
+description: Operate a live room safely with explicit, auditable match controls.
+---
+
+# Administration
+
+Administrators operate live-match controls through explicit control-plane actions. Room hosts coordinate the lobby; administrator-only controls are applied by the authoritative match service, never by a browser rewriting local state.
+
+## Authority and safety
+
+The lobby's Durable Object owns roster, readiness, capacity, reconnect decisions, lifecycle commands, and room state. The game server owns live simulation. Administrative commands travel through the API to the assigned server and are recorded as typed lifecycle events.
+
+Before starting, verify the following:
+
+- every driver has the intended alliance and station;
+- the intended robot revision is selected for each station;
+- ready state reflects the actual participants;
+- spectators and reviewers have the correct non-driving role;
+- the pack, scenario, duration, and visibility are correct.
+
+Lock only after these are correct. A lock freezes the bootstrap contract and prevents last-second station or robot changes from invalidating the session.
+
+## Live match actions
+
+Open **Admin controls** in a live match to access these actions:
+
+| Action                 | Effect                                                                                                                                        |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reset match            | Restores the field, scores, robot mechanisms, and starting positions, then runs a fresh countdown. Connected participants remain in the room. |
+| Clear field            | Removes live WILDFIRE and clears their ownership, returning the field to a controlled recovery state.                                         |
+| Remove participant     | Disconnects the selected non-host player from the match. Use this for an abandoned station or a disruptive connection.                        |
+| End match for everyone | Stops input, allows the normal settlement flow, and finalizes the room for all participants.                                                  |
+
+Each destructive action asks for confirmation in the client. Treat reset and clear-field as visible match interventions: announce them to participants and use them only when the session needs recovery.
+
+## Operating a room
+
+For a clean practice session, create the room, assign roles, wait for drivers to report controls ready, then lock and start. Use spectator or reviewer connections to monitor the room without consuming a driver station.
+
+If a participant disconnects, let the room authority decide the reconnect outcome and have the participant rejoin through the lobby. Do not try to reproduce the robot manually in a new station; the baseline system preserves the authoritative state for the original claim.
+
+After a match, use the finalized overview and persisted events for debriefing. Capture the match ID and diagnostics before resetting when investigating a problem. For an unrecoverable field issue, end the match rather than repeatedly resetting an uncertain state.

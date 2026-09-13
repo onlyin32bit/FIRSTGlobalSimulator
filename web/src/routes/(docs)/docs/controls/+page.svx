@@ -1,0 +1,51 @@
+---
+title: Controls and cameras
+description: Drive the robot, use mechanisms, and inspect the match from any camera.
+---
+
+# Controls and cameras
+
+Controls are available only to an assigned driver during an active match. The keyboard and gamepad feed the same input stream, so the server applies identical validation, acknowledgement, and rate limits to either source.
+
+## Drive and mechanisms
+
+| Control                   | Action                          |
+| ------------------------- | ------------------------------- |
+| `W` / `S`                 | Drive forward / reverse         |
+| `A` / `D`                 | Turn left / right               |
+| `Space`                   | Run intake                      |
+| `E`                       | Run flywheel outtake            |
+| `Q`                       | Power the BRACE climbing wheels |
+| `A` button (gamepad)      | Brake                           |
+| Left bumper (gamepad)     | Run intake                      |
+| Right bumper (gamepad)    | Run outtake                     |
+| Top face button (gamepad) | Power climb wheels              |
+
+The mechanism controls are physical commands, not score shortcuts. Intake moves a loose ball through the robot's semantic path, outtake requires a ball present at the flywheel, and climb spins the grooved wheel while the BRACE contact geometry and friction decide whether the robot rises.
+
+Your Settings mapping takes precedence for configured controls. The HUD identifies the active source and connected gamepad, which is useful when switching between keyboard and controller.
+
+## Camera workflow
+
+Press `C` to cycle through three views. Each camera has its own field-of-view control; use the on-screen slider to set 30°–100° without changing the others.
+
+| Camera   | Best use                                                 | Extra controls                                                                   |
+| -------- | -------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Overview | Follow the whole field, scores, and traffic.             | Adjust its FOV.                                                                  |
+| Robot    | Line up intake, targets, and the BRACE from the chassis. | `F` or right-stick click flips north/south; adjust follow distance and FOV.      |
+| Fly      | Inspect the field from any position.                     | Unlock it to move freely; lock it again to drive while keeping the current view. |
+
+While Fly is unlocked, keyboard input controls the camera and driver motion is deliberately zeroed. Use **Lock camera & drive** before operating the robot again. Hold Shift for faster fly movement; normal fly movement is intentionally slower for controlled inspection.
+
+## Diagnostics
+
+Press `B` to draw field and active score volumes. Press `Ctrl` + `F3` to open match diagnostics. These views are designed for practice, review, and bug reports:
+
+- connection state, ping, buffered bytes, and snapshot rate;
+- client FPS, frame-time percentiles, slow frames, and heap use;
+- server tick rate, physics load, clock drift, process use, and snapshot size;
+- active/sleeping balls, contacts, candidate pairs, and solver stages;
+- renderer draw calls, triangles, geometries, textures, and current camera;
+- the server-authoritative robot state, mechanism state, and pack physics values.
+
+Diagnostics and geometry overlays are opt-in. Leaving them closed keeps normal rendering and network traffic lean.

@@ -215,4 +215,25 @@
 		padding: 1rem;
 		color: var(--muted-foreground);
 	}
+	:global(.docs-prose table) {
+		margin-top: 1.25rem;
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 0.9rem;
+	}
+	:global(.docs-prose th),
+	:global(.docs-prose td) {
+		border: 1px solid var(--border);
+		padding: 0.7rem 0.8rem;
+		text-align: left;
+		vertical-align: top;
+	}
+	:global(.docs-prose th) {
+		background: color-mix(in oklch, var(--muted) 70%, transparent);
+		font-weight: 600;
+		color: var(--foreground);
+	}
+	:global(.docs-prose td) {
+		color: var(--muted-foreground);
+	}
 </style>

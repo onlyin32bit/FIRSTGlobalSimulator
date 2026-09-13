@@ -1,33 +1,38 @@
 ---
 title: FIRST Global Simulator documentation
-description: Learn how to access, build, and explore the simulator.
+description: A complete guide to playing, operating, and reviewing FIRST Global Simulator matches.
 ---
 
 # FIRST Global Simulator
 
-Design, build, and explore a 2026 **Igniting Innovation** robot with Team Vietnam's community simulator.
+FIRST Global Simulator is Team Vietnam's complete browser-based environment for running and reviewing **FGC 2026: Igniting Innovation** matches. It combines a controlled lobby, an authoritative Rust game server, physical field play, live scoring, and a post-match review surface in one workflow.
 
-> The simulator is actively evolving. Account access, saved robot builds, match creation, and the offline sandbox are available today. Browser-based lobby joining and live multiplayer gameplay are still in development.
+It is built for practice, driver development, demonstrations, and game-design review. It is not an official FIRST® or FIRST® Global scoring system or rulebook; use the official event materials for competition decisions.
 
-## What you can do
+## The complete loop
 
-- Request access or register with an invitation code.
-- Configure and save a robot build in the [Robot Builder](/docs/robot-builder).
-- Create a FGC 2026 lobby from the dashboard.
-- Explore the field through the offline sandbox.
+1. Sign in and open the [dashboard](/dashboard).
+2. Create a FGC 2026 lobby, claim a station, choose the saved robot revision for that station, and ready up.
+3. The host locks the roster and starts the match. The lobby supplies the exact pack, seed, robot revisions, station claims, visibility, and limits to the match service.
+4. Drive the Starter Bot, intake WILDFIRE, score through the Suppression Unit, and use the physically driven grooved wheels to climb the BRACE.
+5. Review the finalized score after the field is allowed to settle, then use the match overview and diagnostics for debriefing.
 
-## Choose your path
+The [match-play guide](/docs/match-play) describes the room lifecycle. Use [controls and cameras](/docs/controls) before driving, and use [FGC 2026 rules](/docs/game-rules) for the pack's scoring model.
 
-### New to the simulator
+## Simulation contract
 
-Start with [Getting started](/docs/getting-started) to learn how access, sign-in, and the dashboard work.
+Every live match has one authoritative simulation. The browser sends bounded, ordered control input; it does not decide scores, ownership, match time, robot specs, or field geometry. The server runs at a fixed 60 Hz, publishes state at 20 Hz, records typed match events, and sends the final outcome to the match service.
 
-### Ready to build
+The field pack is the source of truth for collision, scoring, ball release, and active targets. The client predicts ordinary chassis motion for responsiveness, then reconciles to authoritative snapshots when a ball, BRACE, scoring volume, or other unusual contact requires it.
 
-Open the [Robot Builder](/docs/robot-builder) to configure your drivetrain, intake, and scoring mechanism.
+This separation is deliberate: it keeps matches fair, makes reconnection safe, and gives reviewers a single state to trust.
 
-### Want to simulate
+## Choose a guide
 
-Read the [Simulator guide](/docs/simulator) for lobby creation, sandbox entry, and the current multiplayer status.
+- [Getting started](/docs/getting-started) — accounts, dashboard, and a first room.
+- [Match play](/docs/match-play) — stations, readiness, countdown, and results.
+- [Controls & cameras](/docs/controls) — drive, mechanisms, fly camera, and diagnostics.
+- [Robot & mechanisms](/docs/robot-builder) — the Starter Bot, physical ball path, and locked revisions.
+- [Administration](/docs/administration) — reset, field recovery, participant management, and controlled ending.
 
-If you run into trouble, see the [FAQ](/docs/faq) or contact Team Vietnam at [vietnamteamfgc@gmail.com](mailto:vietnamteamfgc@gmail.com).
+For quick help, see the [FAQ](/docs/faq) or contact Team Vietnam at [vietnamteamfgc@gmail.com](mailto:vietnamteamfgc@gmail.com).

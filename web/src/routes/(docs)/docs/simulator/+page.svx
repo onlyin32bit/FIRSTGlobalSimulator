@@ -1,28 +1,30 @@
 ---
-title: Simulator
-description: Create a lobby, enter the offline sandbox, and understand current simulator status.
+title: Simulator architecture
+description: Learn how authoritative matches, prediction, and review tools work together.
 ---
 
-# Simulator
+# Simulator architecture
 
-The dashboard is the entry point for the available field experiences.
+FIRST Global Simulator separates coordination, simulation, and rendering so a live room stays fair and responsive even when browsers run at different frame rates.
 
-## Create a lobby
+## Authoritative match service
 
-Choose **Create New Match** on the [dashboard](/dashboard) to create a FGC 2026 lobby. The dashboard confirms the generated match ID after the API creates the lobby.
+The API and its Durable Object are the room's control plane. They create and lock the roster, enforce room capacity, decide readiness, manage reconnect and cancellation decisions, and send a one-time bootstrap to the assigned Rust host.
 
-Lobby creation establishes the match record used by the game services. It is useful for development and prepares the backend for the multiplayer flow.
+That bootstrap contains the exact pack version, deterministic seed, scenario, start schedule, visibility, limits, station claims, roles, alliances, and selected robot revisions. The Rust match server is then authoritative for fixed-step physics, collision, ownership, scoring events, and snapshots. It does not invent a new roster because a socket happened to connect.
 
-## Offline sandbox
+Live input is ordered and rate-limited per connection. Malformed or excessive frames are rejected and measured by reason; repeated abuse follows the room's disconnect policy. Typed lifecycle, scoring, reset, cancellation, and completion events are queued and persisted through the API rather than being held only in a browser buffer.
 
-Choose **Enter Sandbox (Offline)** to open the local field experience without joining a remote match. This is the best current way to explore the field and simulator controls while the online client flow is still under construction.
+## Smooth networked play
 
-## Current limitations
+The simulation advances at a fixed **60 Hz** and broadcasts snapshots at **20 Hz**. Inputs carry sequence numbers, and each snapshot acknowledges the latest accepted local input. The browser keeps a small, time-bounded input history, reapplies only unacknowledged controls after a newer acknowledgement, and cheaply adopts the server pose when no local input remains.
 
-The project is transparent about what remains unfinished:
+This approach makes normal driving feel immediate without making the client authoritative. Exact reconciliation remains in force around balls, BRACE contacts, scores, and other unusual physical events. On reconnect, the client receives a complete baseline instead of trying to rebuild the field from partial deltas.
 
-- entering a match ID in the dashboard does not connect you to a live lobby yet;
-- browser WebSocket connection, reconnect behavior, and live game state rendering are still being built;
-- the game server and ticket endpoints exist for development, but the browser-facing multiplayer workflow is not a released feature.
+The server caches transformed colliders and uses field and robot spatial indices for broad-phase filtering. The live Rapier-backed collision world is retained alongside the game's specialized sphere simulation so dense WILDFIRE play, authored geometry, and robot mechanisms can each use an appropriate representation.
 
-> Create and save a robot now, then use the offline sandbox to explore. Follow project updates through [Team Vietnam on Facebook](https://www.facebook.com/TeamVietnamFGC) or [Instagram](https://www.instagram.com/teamvietnam.fgc/).
+## Sandbox and review
+
+The sandbox is a self-contained way to learn the field, test camera framing, inspect the Starter Bot, and practice mechanisms without coordinating a room. Live matches add the lobby, tickets, authority, event persistence, and review workflow.
+
+Use the diagnostics overlay during practice or review to inspect frame rate, snapshot rate, ping, simulation tick rate, physics load, object count, candidate pairs, contacts, and render cost. Debug geometry is opt-in, so normal sessions do not pay to transmit or draw every field, score, and robot semantic volume.

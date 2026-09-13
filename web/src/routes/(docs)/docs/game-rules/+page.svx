@@ -1,0 +1,43 @@
+---
+title: FGC 2026 rules
+description: Learn the Igniting Innovation object flow, scoring, climbing, and field authority.
+---
+
+# FGC 2026: Igniting Innovation
+
+The active game pack is **fgc-2026 · v1.0.0**, named _Igniting Innovation_. It models a 150-second teleoperated match on an authored field. This guide describes the simulator pack; official FIRST Global materials remain the authority for real-world competition rules.
+
+## Match objective
+
+WILDFIRE are orange, foam-like spherical game pieces with a 0.10 m nominal diameter and 0.062 kg mass. At the beginning of teleoperated play, the field releases 500 WILDFIRE from the extinguisher over a deterministic four-second pour. They remain live physical objects: they collide with the carpet, robots, BRACE, field geometry, and each other.
+
+Drive to collect WILDFIRE, transfer them through the Starter Bot, and fire them into your alliance's active Suppression Unit. The pack has Red and Blue Suppression Unit targets. Fire Shield and Extinguisher geometry can be present on the field, but those targets are inactive in this scoring configuration.
+
+## Scoring and climbing
+
+### Suppression Units
+
+Each WILDFIRE that crosses the correct active Suppression Unit after a robot outtake is worth **1 base point**. The scoring volume is authored with the field pack, not approximated from the visual mesh or a client-side distance test.
+
+### BRACE multiplier
+
+At match end, climbing contributes an alliance multiplier to its Suppression Unit total. Each robot adds the value of its highest recognized BRACE state:
+
+| State   | Multiplier contribution |
+| ------- | ----------------------- |
+| Contact | +0.05                   |
+| Zone 1  | +0.10                   |
+| Zone 2  | +0.20                   |
+| Zone 3  | +0.30                   |
+
+The alliance starts at ×1.00. The accumulated contribution is applied to its Suppression Unit score. A robot physically supporting a partner can additionally award 25 partner-climb points. The pack also evaluates the global Zone 3 count for its coopertition bonus: 4 robots earns 10, 5 earns 25, and 6 earns 40.
+
+The climbing wheels are not a score button. A robot has to engage the BRACE tube mechanically; wheel torque and friction do the work, and a robot that loses contact can fall.
+
+## Field authority
+
+The pack owns the field's visual assets, colliders, materials, semantics, active scoring regions, spawn behavior, and physics parameters. This is why a score, collision, or climb can differ from a view that merely _looks_ close in the browser: the server evaluates the authored physical representation.
+
+The server keeps exact collision for robots, balls, field geometry, and BRACE behavior. It applies game-specific ownership rules only where the robot physically captures or releases a ball; it does not use hidden score retention or geometry corrections to force an expected result.
+
+At zero seconds, input stops and the field receives a short 3.5-second settlement window. The final score includes legitimate late motion during that window.

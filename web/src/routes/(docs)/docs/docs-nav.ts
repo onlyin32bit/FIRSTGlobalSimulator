@@ -14,55 +14,105 @@ export type DocsNavSection = {
 
 export const docsNav: DocsNavSection[] = [
 	{
-		title: 'User guide',
+		title: 'Start here',
 		items: [
 			{
 				title: 'Overview',
 				href: '/docs',
-				description: 'What the simulator offers today.',
+				description: 'The simulator at a glance.',
 				headings: [
-					{ id: 'what-you-can-do', title: 'What you can do' },
-					{ id: 'choose-your-path', title: 'Choose your path' }
+					{ id: 'the-complete-loop', title: 'The complete loop' },
+					{ id: 'simulation-contract', title: 'Simulation contract' }
 				]
 			},
 			{
 				title: 'Getting started',
 				href: '/docs/getting-started',
-				description: 'Access, registration, and dashboard basics.',
+				description: 'Accounts, dashboard, and first match.',
 				headings: [
-					{ id: 'request-access', title: 'Request access' },
-					{ id: 'create-your-account', title: 'Create your account' },
-					{ id: 'open-the-dashboard', title: 'Open the dashboard' }
+					{ id: 'access-and-account', title: 'Access and account' },
+					{ id: 'start-a-match', title: 'Start a match' },
+					{ id: 'join-and-rejoin', title: 'Join and rejoin' }
 				]
 			},
 			{
-				title: 'Robot builder',
-				href: '/docs/robot-builder',
-				description: 'Configure and save your robot build.',
+				title: 'Match play',
+				href: '/docs/match-play',
+				description: 'Lobby roles, lifecycle, and results.',
 				headings: [
-					{ id: 'configure-a-build', title: 'Configure a build' },
-					{ id: 'save-your-robot', title: 'Save your robot' },
-					{ id: 'saved-builds', title: 'Saved builds' }
+					{ id: 'lobby-and-roles', title: 'Lobby and roles' },
+					{ id: 'match-lifecycle', title: 'Match lifecycle' },
+					{ id: 'after-the-buzzer', title: 'After the buzzer' }
+				]
+			},
+			{
+				title: 'Controls & cameras',
+				href: '/docs/controls',
+				description: 'Keyboard, gamepad, cameras, and diagnostics.',
+				headings: [
+					{ id: 'drive-and-mechanisms', title: 'Drive and mechanisms' },
+					{ id: 'camera-workflow', title: 'Camera workflow' },
+					{ id: 'diagnostics', title: 'Diagnostics' }
+				]
+			}
+		]
+	},
+	{
+		title: 'Game guide',
+		items: [
+			{
+				title: 'FGC 2026 rules',
+				href: '/docs/game-rules',
+				description: 'Objects, scoring, climbing, and field behavior.',
+				headings: [
+					{ id: 'match-objective', title: 'Match objective' },
+					{ id: 'scoring-and-climbing', title: 'Scoring and climbing' },
+					{ id: 'field-authority', title: 'Field authority' }
+				]
+			},
+			{
+				title: 'Robot & mechanisms',
+				href: '/docs/robot-builder',
+				description: 'Starter Bot runtime, ball flow, and revisions.',
+				headings: [
+					{ id: 'starter-bot', title: 'Starter Bot' },
+					{ id: 'ball-path', title: 'Ball path' },
+					{ id: 'robot-revisions', title: 'Robot revisions' }
 				]
 			},
 			{
 				title: 'Simulator',
 				href: '/docs/simulator',
-				description: 'Dashboard, lobbies, sandbox, and status.',
+				description: 'Authority, networking, and performance model.',
 				headings: [
-					{ id: 'create-a-lobby', title: 'Create a lobby' },
-					{ id: 'offline-sandbox', title: 'Offline sandbox' },
-					{ id: 'current-limitations', title: 'Current limitations' }
+					{ id: 'authoritative-match-service', title: 'Authoritative match service' },
+					{ id: 'smooth-networked-play', title: 'Smooth networked play' },
+					{ id: 'sandbox-and-review', title: 'Sandbox and review' }
+				]
+			}
+		]
+	},
+	{
+		title: 'Operations',
+		items: [
+			{
+				title: 'Administration',
+				href: '/docs/administration',
+				description: 'Host controls, recovery, and room safety.',
+				headings: [
+					{ id: 'authority-and-safety', title: 'Authority and safety' },
+					{ id: 'live-match-actions', title: 'Live match actions' },
+					{ id: 'operating-a-room', title: 'Operating a room' }
 				]
 			},
 			{
 				title: 'FAQ',
 				href: '/docs/faq',
-				description: 'Answers for access and account issues.',
+				description: 'Fast answers and troubleshooting.',
 				headings: [
-					{ id: 'access-and-invitations', title: 'Access and invitations' },
-					{ id: 'account-and-session', title: 'Account and session' },
-					{ id: 'need-help', title: 'Need help?' }
+					{ id: 'joining-and-controls', title: 'Joining and controls' },
+					{ id: 'match-and-scoring', title: 'Match and scoring' },
+					{ id: 'support', title: 'Support' }
 				]
 			}
 		]

@@ -1,32 +1,37 @@
 ---
 title: Getting started
-description: Get an invitation, create an account, and open the dashboard.
+description: Create an account, enter the dashboard, and run your first match.
 ---
 
 # Getting started
 
-The FIRST Global Simulator uses invitation-only accounts so administrators can gradually grow access and support participants.
+This guide takes a new participant from an invitation to an active driver station. A lobby owner can complete the same flow and then follow the [administration guide](/docs/administration).
 
-## Request access
+## Access and account
 
-If you do not already have an invitation code, select **Request Invite** on the [home page](/). Share your name, team or organization, and email address so the Team Vietnam maintainers can follow up.
+Select **Request Invite** on the [home page](/) if you need an invitation. Include your name, team or organization, and email so Team Vietnam can provision access.
 
-An administrator may also send a code directly. Invitation codes are one-time use, so keep yours private until you are ready to register.
+When you receive a code, open [Sign in](/auth), choose **Register**, and provide your name, team, email, password, and invitation code. Codes are single-use and should be kept private until registration is complete. Successful registration opens an authenticated session and returns you to the page you originally requested when possible.
 
-## Create your account
+On a shared computer, use **Sign out** from a protected page when you finish. If a code fails, check each character and ask its issuer for a new code; redeemed, revoked, and expired codes cannot be reused.
 
-Open [Sign in](/auth) and select **Register**. Enter your name, team, email, password, and invitation code.
+## Start a match
 
-After a successful registration, the simulator signs you in and sends you to the dashboard. If you tried to open a protected page first, you return to that page after sign-in.
+Open the [dashboard](/dashboard) and choose **Create New Match**. The creator becomes the room host. Share the lobby with participants, then use the lobby to select one of the pack's eight stations:
 
-> If a code is rejected, check its six characters carefully. A code may already have been redeemed, revoked, or expired. Ask the person who issued it for a replacement if needed.
+| Alliance | Driver stations         | Human-player station |
+| -------- | ----------------------- | -------------------- |
+| Red      | Red Driver 1, 2, and 3  | Red Human            |
+| Blue     | Blue Driver 1, 2, and 3 | Blue Human           |
 
-## Open the dashboard
+Assign the robot revision before the host locks the room. Once locked, the station claim and selected revision are frozen into the match bootstrap so every player, spectator, and server runs the same match specification.
 
-The [dashboard](/dashboard) is the starting point for the simulator experience. From there you can:
+Drivers mark themselves ready. The host starts only when the roster is ready; the service then issues time-limited station tickets and launches the match's countdown.
 
-- create a FGC 2026 match lobby;
-- open the offline sandbox;
-- enter the [Robot Builder](/robot) to create a robot before future match play.
+## Join and rejoin
 
-Use **Sign out** in the protected-page header when you finish on a shared device.
+Open the lobby link, select the station or spectator role that the host has assigned, and obtain a ticket. A driver ticket is bound to its match, alliance, role, and station. It cannot be reused to take another station or send control input as a different participant.
+
+If the browser disconnects, reopen the same lobby and rejoin with a fresh ticket. The authoritative match continues while the client is away. On reconnect, the server supplies a full current baseline before incremental snapshots resume, so balls, robots, score, and clock return together.
+
+> A driver can send drive and mechanism frames. Spectators receive snapshots and match events only. Host and reviewer capabilities are explicit and never implied by a spectator connection.

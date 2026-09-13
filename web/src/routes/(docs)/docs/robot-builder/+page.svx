@@ -1,30 +1,38 @@
 ---
-title: Robot builder
-description: Configure and save a robot for your simulator account.
+title: Robot and mechanisms
+description: Understand the Starter Bot, physical ball path, climbing system, and frozen robot revisions.
 ---
 
-# Robot builder
+# Robot and mechanisms
 
-The [Robot Builder](/robot) lets you assemble a basic FGC 2026 robot configuration and save it to your account.
+The [Robot page](/robot) is where you inspect and save the robot revision used for a station. FGC 2026 ships with the **Starter Bot** as the default live robot. Its visual model, semantic volumes, collision model, mechanisms, and runtime parameters are loaded from the same field pack as the match.
 
-## Configure a build
+## Starter Bot
 
-Give your robot a recognizable name, then select options across the three configuration areas:
+The Starter Bot is an 18 kg, 0.5 m × 0.5 m × 0.5 m competition-style chassis. It uses tank-style drive behavior with a 2.8 m/s maximum speed, controlled acceleration and braking, and a 5 rad/s maximum turn rate. The server uses the complete authored collider set; the client uses a conservative chassis shape only for ordinary local prediction.
 
-- **Drive** — choose a drivetrain such as Mecanum, Tank, Swerve, or H-Drive.
-- **Intake** — select a roller claw, over-the-bumper intake, or no intake.
-- **Scoring** — select a flywheel, catapult, puncher, or no scoring mechanism.
+The robot uses three semantic mechanism areas:
 
-The panel also shows a simple configuration preview and estimated specifications. These are visual guidance for the current prototype, not official FIRST Global robot rules or engineering limits.
+| Area             | Purpose                                                | Physical rule                                                       |
+| ---------------- | ------------------------------------------------------ | ------------------------------------------------------------------- |
+| Intake           | Captures a loose WILDFIRE at the front of the chassis. | A ball must physically enter the intake volume.                     |
+| Transfer/storage | Carries owned balls through the robot.                 | Ownership is exclusive and storage cannot exceed 40 balls.          |
+| Outtake          | Presents a stored ball to the flywheel.                | The flywheel acts only on a ball physically present at the outtake. |
 
-## Save your robot
+## Ball path
 
-Select **Save build** after configuring your robot. The simulator stores the name and selected module data under your account.
+Press the intake control to run the intake surface. Loose WILDFIRE enters the physical intake path, becomes owned by that robot, then moves through its transfer/storage path. The score display reflects the actual balls that cross the active Suppression Unit volumes; it does not synthesize a score from an inventory counter.
 
-A confirmation message appears after the save succeeds. If saving fails, check your connection, sign in again if needed, and retry.
+Storage capacity is hard-capped at 40. Releasing a ball clears ownership immediately, returns it to the live field, and makes it available to any robot. This prevents duplicate possession, invisible ammunition, and balls that remain attached after they have left the machine.
 
-## Saved builds
+The outtake is a physical action rather than a virtual projectile: pressing the flywheel control gives velocity only to a ball that has reached the outtake. If no ball is present, nothing is fired.
 
-Saved robots appear in the list on the builder page, with their most recent update date. The latest saved robot is used by the existing match-ticket API when the game server requests a player build.
+### Climbing the BRACE
 
-> Build persistence is available now. The interactive browser match-joining flow that uses those builds is not yet published.
+The raised grooved wheels are the Starter Bot's climbing mechanism. The `Q` control powers the wheel motors; it does not attach or lift the robot by rule. To climb, place the wheel groove around the BRACE tube, establish normal contact, and let wheel friction, gravity, motor torque, and the rest of the robot's contacts determine motion. Poor alignment can slip or fall off, exactly as a physical mechanism should.
+
+## Robot revisions
+
+Save a named revision before a room is locked. A match bootstrap freezes the selected revision, robot runtime assets, and pack version for each station. Editing a saved robot afterward affects future lobbies only; it cannot mutate an active match or change another player's collision model mid-game.
+
+This gives a replay and review a stable answer to a simple question: _which robot was actually on the field?_

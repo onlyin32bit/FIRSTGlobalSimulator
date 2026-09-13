@@ -1,0 +1,44 @@
+---
+title: Match play
+description: Run a room from lobby assignment through final results.
+---
+
+# Match play
+
+Every match starts as a controlled room and becomes one authoritative simulation. This guide covers the player-facing flow from station selection to the results screen.
+
+## Lobby and roles
+
+The host creates the lobby and assigns the eight available Red and Blue stations. A ticket binds each connection to a match, alliance, role, and station, which prevents a reconnect or copied URL from silently changing who controls a robot.
+
+| Role      | Can do                                                                              | Cannot do                                             |
+| --------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Driver    | Claim an assigned driver station and send drive, intake, outtake, and climb inputs. | Change station or robot revision after lock.          |
+| Spectator | Watch snapshots, score, events, and results.                                        | Send robot controls.                                  |
+| Reviewer  | Watch and use approved review/diagnostic tools.                                     | Take a driver station without an explicit assignment. |
+| Host      | Lock the roster, start the room, and use host controls.                             | Bypass the audit trail of live actions.               |
+
+Select a station, choose the robot revision, and mark ready. The host checks the roster and starts the match when the room is ready. A locked roster is intentionally stable: teams cannot swap an alliance, station, or robot configuration mid-match.
+
+## Match lifecycle
+
+1. **Lobby** — participants join, take their assigned role, choose revisions, and ready up.
+2. **Lock and bootstrap** — the control plane freezes the roster and sends the exact pack, seed, scenario, limits, robot assets, and start schedule to the Rust host.
+3. **Countdown** — the field and clients prepare for the start signal.
+4. **Teleoperated play** — FGC 2026 runs for 150 seconds. The server accepts ordered, rate-limited driver input and publishes snapshots and events.
+5. **Settlement** — at zero, controls stop but gravity and collisions continue for 3.5 seconds. A final ball may still reach a target naturally.
+6. **Results** — the overview fades in with the finalized score, match outcome, and event-backed state.
+
+The countdown, running clock, reset, cancellation, and completion state belong to the room authority. A client connection cannot start a fresh match simply by opening a WebSocket.
+
+## During a match
+
+The HUD shows the remaining clock, alliance score, current stored balls, connection state, and controls. Score changes are event-backed and idempotent: each scoring event has an identifier, simulation tick, payload, and pack version, so retries cannot add the same point twice.
+
+Driver inputs are valid only while the match accepts control. They are sequence-checked, bounded by a token bucket, and validated before reaching the simulation. Invalid frames are rejected without changing the robot.
+
+## After the buzzer
+
+The final overview is the score to use for the simulated match. It is produced after the settlement interval, not at the instant the timer reaches zero. The outcome, reset or cancellation reason, and fatal match errors are retained by the match service for review.
+
+To play again, the host can reset the room. Resetting creates a clean field and score with a fresh countdown while preserving the room's controlled lifecycle. See [Administration](/docs/administration) for the operator workflow.
