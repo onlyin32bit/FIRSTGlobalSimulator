@@ -5,7 +5,7 @@ import { sign } from 'hono/jwt'
 import * as schema from '../db/schema'
 import { adminMatchActionSchema, isResponse, lobbyReadySchema, lobbySlotSchema, matchSchema, parseJson } from '../lib/validation'
 import { writeAdminAudit } from '../lib/audit'
-import type { BootstrapParticipant, LobbySlotId, LobbyUser, MatchBootstrap } from '../match-lobby'
+import type { BootstrapParticipant, LobbySlotId, LobbyState, LobbyUser, MatchBootstrap } from '../match-lobby'
 import { requireAdmin, requireUser } from '../middleware'
 import { jsonError, jsonSuccess } from '../responses'
 import type { Bindings } from '../types'
@@ -33,21 +33,46 @@ function gameServerUrl(origin: string, matchId: string, ticket: string) {
 async function chooseGameServer(c: Parameters<typeof requireUser>[0], matchId: string) {
   const db = drizzle(c.env.DB, { schema })
   const existingMatch = await db.query.matches.findFirst({ where: eq(schema.matches.id, matchId) })
-  if (existingMatch?.gameServerId) {
-    const existing = await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, existingMatch.gameServerId) })
-    if (existing && !existing.disabledAt) return existing
+  if (!existingMatch) return null
+
+  // The open arena predates per-match lobbies. Its assignment remains a
+  // lightweight singleton until it receives its own control-plane object.
+  if (matchId === 'arena') {
+    if (existingMatch.gameServerId) {
+      const existing = await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, existingMatch.gameServerId) })
+      if (existing && !existing.disabledAt) return existing
+    }
+    const candidates = await db.select().from(schema.gameServers).orderBy(desc(schema.gameServers.activeMatches))
+    const now = Date.now()
+    const server = candidates
+      .filter((candidate) => !candidate.disabledAt && candidate.lastHeartbeatAt && now - candidate.lastHeartbeatAt.getTime() < 30_000)
+      .filter((candidate) => candidate.activeMatches < candidate.maxMatches && candidate.activeUsers < candidate.maxUsers)
+      .sort((a, b) => (a.activeMatches / a.maxMatches) - (b.activeMatches / b.maxMatches))[0]
+    if (!server) return null
+    await db.update(schema.matches).set({ gameServerId: server.id, updatedAt: new Date() }).where(eq(schema.matches.id, matchId))
+    return server
   }
+
+  const lobby = lobbyFor(c, matchId)
+  const leased = await lobby.getAllocation()
+  if (leased) {
+    const existing = await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, leased.serverId) })
+    if (existing && !existing.disabledAt && existing.lastHeartbeatAt && Date.now() - existing.lastHeartbeatAt.getTime() < 30_000) return existing
+  }
+
   const servers = await db.select().from(schema.gameServers).orderBy(desc(schema.gameServers.activeMatches))
   const now = Date.now()
-  const server = servers
+  const candidate = servers
     .filter((candidate) => !candidate.disabledAt && candidate.lastHeartbeatAt && now - candidate.lastHeartbeatAt.getTime() < 30_000)
     .filter((candidate) => candidate.activeMatches < candidate.maxMatches && candidate.activeUsers < candidate.maxUsers)
     .sort((a, b) => (a.activeMatches / a.maxMatches) - (b.activeMatches / b.maxMatches))[0]
-  if (!server) return null
-  if (existingMatch) {
-    await db.update(schema.gameServers).set({ activeMatches: server.activeMatches + 1, updatedAt: new Date() }).where(eq(schema.gameServers.id, server.id))
-    await db.update(schema.matches).set({ gameServerId: server.id, updatedAt: new Date() }).where(eq(schema.matches.id, matchId))
-  }
+  if (!candidate) return null
+
+  const allocation = await lobby.acquireServerLease(candidate.id)
+  const server = servers.find((item) => item.id === allocation.serverId)
+    ?? await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, allocation.serverId) })
+  if (!server || server.disabledAt || !server.lastHeartbeatAt || Date.now() - server.lastHeartbeatAt.getTime() >= 30_000) return null
+  await db.update(schema.matches).set({ gameServerId: server.id, updatedAt: new Date() }).where(eq(schema.matches.id, matchId))
   return server
 }
 
@@ -135,7 +160,7 @@ async function resolveDriverRobot(
 async function lockMatchBootstrap(c: Parameters<typeof requireUser>[0], match: typeof schema.matches.$inferSelect, serverId: string): Promise<MatchBootstrap> {
   const startsAt = Date.now() + 5_000
   const lobby = lobbyFor(c, match.id)
-  const state = await lobby.getState()
+  const state = await lobby.getState() as unknown as LobbyState
   const participants: BootstrapParticipant[] = await Promise.all(state.slots.flatMap((slot) => slot.occupant ? [slot] : []).map(async (slot) => {
     const occupant = slot.occupant!
     if (slot.role !== 'driver') {
@@ -153,6 +178,7 @@ async function lockMatchBootstrap(c: Parameters<typeof requireUser>[0], match: t
     }
   }))
   const bootstrap = await lobby.lockBootstrap({
+    bootstrapCommandId: `bootstrap:${match.id}`,
     assignedServerId: serverId,
     gamePackId: match.gamePackId,
     gamePackVersion: await gamePackVersion(c, match.gamePackId),
@@ -169,10 +195,44 @@ async function lockMatchBootstrap(c: Parameters<typeof requireUser>[0], match: t
     startsAt: new Date(bootstrap.startsAt), updatedAt: new Date()
   }).where(eq(schema.matches.id, match.id))
   await drizzle(c.env.DB, { schema }).insert(schema.gameServerCommands).values({
-    id: crypto.randomUUID(), serverId, type: 'bootstrap_match', payload: JSON.stringify({ matchId: match.id }),
-    status: 'pending', createdAt: new Date(), deliveredAt: null, completedAt: null, error: null
-  })
+    id: `bootstrap:${match.id}`,
+    serverId,
+    type: 'bootstrap_match',
+    payload: JSON.stringify({ matchId: match.id, leaseDelivery: true }),
+    status: 'pending',
+    createdAt: new Date(),
+    deliveredAt: null,
+    completedAt: null,
+    error: null
+  }).onConflictDoNothing()
   return bootstrap
+}
+
+async function queueMatchCommand(
+  c: Parameters<typeof requireUser>[0],
+  command: { id: string; serverId: string; matchId: string; type: string; userId?: string }
+) {
+  const createdAt = new Date()
+  await lobbyFor(c, command.matchId).enqueueCommand({
+    id: command.id,
+    serverId: command.serverId,
+    type: command.type,
+    payload: { matchId: command.matchId, ...(command.userId ? { userId: command.userId } : {}) },
+    createdAt: createdAt.getTime()
+  })
+  const record = {
+    id: command.id,
+    serverId: command.serverId,
+    type: command.type,
+    payload: JSON.stringify({ matchId: command.matchId, ...(command.userId ? { userId: command.userId } : {}), leaseDelivery: true }),
+    status: 'pending' as const,
+    error: null,
+    createdAt,
+    deliveredAt: null,
+    completedAt: null
+  }
+  await drizzle(c.env.DB, { schema }).insert(schema.gameServerCommands).values(record).onConflictDoNothing()
+  return record
 }
 
 function lobbyError(c: Parameters<typeof requireUser>[0], error: unknown) {
@@ -314,9 +374,7 @@ app.post('/:id/lobby/admin-start', async (c) => {
     return jsonError(c, 409, 'LOBBY_INVALID_STATE', 'This match cannot be entered immediately.')
   }
 
-  const server = match.gameServerId
-    ? await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, match.gameServerId) })
-    : await chooseGameServer(c, matchId)
+  const server = await chooseGameServer(c, matchId)
   if (!server || server.disabledAt || !server.lastHeartbeatAt || Date.now() - server.lastHeartbeatAt.getTime() >= 30_000) {
     return jsonError(c, 503, 'GAME_SERVER_UNAVAILABLE', 'No healthy game server is available right now.')
   }
@@ -354,22 +412,18 @@ app.post('/:id/admin/actions', async (c) => {
     return jsonError(c, 409, 'LOBBY_INVALID_STATE', 'Only an in-progress match can receive this control.')
   }
 
-  const now = new Date()
   const type = body.action === 'end_match' ? 'stop_match' : body.action
-  const command = {
-    id: crypto.randomUUID(),
-    serverId: server.id,
-    type,
-    payload: JSON.stringify({ matchId, userId: body.userId }),
-    status: 'pending' as const,
-    error: null,
-    createdAt: now,
-    deliveredAt: null,
-    completedAt: null
+  let command
+  try {
+    command = await queueMatchCommand(c, {
+      id: crypto.randomUUID(), serverId: server.id, matchId, type, userId: body.userId
+    })
+  } catch (error) {
+    return lobbyError(c, error)
   }
-  await db.insert(schema.gameServerCommands).values(command)
 
   if (body.action === 'end_match') {
+    const now = new Date()
     await db.update(schema.matches).set({
       status: 'CANCELLED',
       cancelledAt: now,
@@ -404,7 +458,8 @@ app.post('/:id/ticket', async (c) => {
 
   let station
   try {
-    station = (await lobbyFor(c, match.id).getState()).slots.find((slot) => slot.occupant?.userId === session.user.id)
+    station = ((await lobbyFor(c, match.id).getState() as unknown as LobbyState).slots)
+      .find((slot) => slot.occupant?.userId === session.user.id)
   } catch (error) {
     return lobbyError(c, error)
   }

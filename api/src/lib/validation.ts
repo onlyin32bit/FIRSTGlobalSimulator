@@ -141,6 +141,8 @@ export const gameServerHeartbeatSchema = z.object({
   })).max(1000).optional(),
   commandResults: z.array(z.object({
     id: z.string().trim().min(1).max(255),
+    matchId: z.string().trim().min(1).max(255).optional(),
+    deliveryLeaseId: z.string().trim().min(1).max(255).optional(),
     ok: z.boolean(),
     error: z.string().trim().max(1_000).nullable().optional()
   })).max(100).optional()

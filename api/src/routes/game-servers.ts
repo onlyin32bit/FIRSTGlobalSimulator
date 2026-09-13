@@ -7,6 +7,7 @@ import * as schema from '../db/schema'
 import { gameServerHeartbeatSchema, gameServerMatchCompletionSchema, gameServerMatchEventsSchema, gameServerTicketVerifySchema, isResponse, parseJson } from '../lib/validation'
 import { jsonError, jsonSuccess } from '../responses'
 import type { Bindings } from '../types'
+import type { ClaimedMatchCommand } from '../match-lobby'
 
 const app = new Hono<{ Bindings: Bindings }>()
 type GameServerContext = Context<{ Bindings: Bindings }>
@@ -32,6 +33,14 @@ async function assignedMatch(c: GameServerContext, matchId: string) {
   if (!server || server.disabledAt) return { server: null, match: null }
   const match = await drizzle(c.env.DB, { schema }).query.matches.findFirst({ where: eq(schema.matches.id, matchId) })
   if (!match || match.gameServerId !== server.id) return { server, match: null }
+  if (matchId !== 'arena') {
+    try {
+      const allocation = await lobbyFor(c, matchId).getAllocation()
+      if (!allocation || allocation.serverId !== server.id) return { server, match: null }
+    } catch {
+      return { server, match: null }
+    }
+  }
   return { server, match }
 }
 
@@ -46,6 +55,65 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out
 }
 
+type CommandPayload = { matchId?: unknown; leaseDelivery?: unknown }
+
+function commandPayload(command: typeof schema.gameServerCommands.$inferSelect): CommandPayload {
+  try {
+    const payload = JSON.parse(command.payload)
+    return payload && typeof payload === 'object' ? payload as CommandPayload : {}
+  } catch {
+    return {}
+  }
+}
+
+function leasedMatchId(command: typeof schema.gameServerCommands.$inferSelect) {
+  const payload = commandPayload(command)
+  return payload.leaseDelivery === true && typeof payload.matchId === 'string' ? payload.matchId : null
+}
+
+async function settleLeasedResults(
+  c: GameServerContext,
+  serverId: string,
+  results: Array<{ id: string; matchId?: string; deliveryLeaseId?: string; ok: boolean; error?: string | null }>
+) {
+  const settled = await Promise.all(results
+    .filter((result) => result.matchId && result.deliveryLeaseId && result.matchId !== 'arena')
+    .map(async (result) => {
+      try {
+        return {
+          result,
+          accepted: await lobbyFor(c, result.matchId!).settleCommand(
+            serverId,
+            result.id,
+            result.deliveryLeaseId!,
+            result.ok,
+            result.error ?? null
+          )
+        }
+      } catch {
+        return { result, accepted: false }
+      }
+    }))
+  return settled.filter((entry) => entry.accepted).map((entry) => entry.result)
+}
+
+async function claimLeasedCommands(c: GameServerContext, serverId: string, matchIds: string[], limit: number) {
+  const commands: Array<{ id: string; type: string; matchId?: unknown; userId?: unknown; deliveryLeaseId: string }> = []
+  for (const matchId of matchIds) {
+    if (commands.length >= limit) break
+    let claimed: ClaimedMatchCommand[]
+    try {
+      claimed = await lobbyFor(c, matchId).claimCommands(serverId, limit - commands.length) as unknown as ClaimedMatchCommand[]
+    } catch {
+      continue
+    }
+    for (const command of claimed) {
+      commands.push({ id: command.id, type: command.type, ...command.payload, deliveryLeaseId: command.deliveryLeaseId })
+    }
+  }
+  return commands
+}
+
 app.post('/heartbeat', async (c) => {
   const body = await parseJson(c, gameServerHeartbeatSchema)
   if (isResponse(body)) return body
@@ -54,20 +122,46 @@ app.post('/heartbeat', async (c) => {
   const db = drizzle(c.env.DB, { schema })
   const now = new Date()
 
+  // Lease renewals are per-match, so an inactive or replaced host cannot keep
+  // authority merely because an old D1 assignment still exists.
+  const assignedMatches = await db.select({ id: schema.matches.id, status: schema.matches.status }).from(schema.matches)
+    .where(eq(schema.matches.gameServerId, server.id))
+    .limit(100)
+  await Promise.all(assignedMatches
+    .filter((match) => match.id !== 'arena')
+    .filter((match) => match.status === 'IN_PROGRESS')
+    .map((match) => lobbyFor(c, match.id).renewServerLease(server.id).catch(() => false)))
+
   const statements: BatchItem<'sqlite'>[] = []
   let serverUpdateIndex = -1
   let currentMatchesIndex = -1
   let pendingIndex = -1
 
   const results = body.commandResults ?? []
-  for (const group of chunk(results.filter((r) => r.ok), 40)) {
+  const settledLeases = await settleLeasedResults(c, server.id, results)
+  const legacyResults = results.filter((result) => !result.deliveryLeaseId || !result.matchId)
+  for (const group of chunk(legacyResults.filter((r) => r.ok), 40)) {
     statements.push(db.update(schema.gameServerCommands).set({
       status: 'completed',
       error: null,
       completedAt: now
     }).where(and(inArray(schema.gameServerCommands.id, group.map((r) => r.id)), eq(schema.gameServerCommands.serverId, server.id))))
   }
-  for (const result of results.filter((r) => !r.ok)) {
+  for (const result of legacyResults.filter((r) => !r.ok)) {
+    statements.push(db.update(schema.gameServerCommands).set({
+      status: 'failed',
+      error: result.error ?? 'Host rejected the command.',
+      completedAt: now
+    }).where(and(eq(schema.gameServerCommands.id, result.id), eq(schema.gameServerCommands.serverId, server.id))))
+  }
+  for (const group of chunk(settledLeases.filter((result) => result.ok), 40)) {
+    statements.push(db.update(schema.gameServerCommands).set({
+      status: 'completed',
+      error: null,
+      completedAt: now
+    }).where(and(inArray(schema.gameServerCommands.id, group.map((result) => result.id)), eq(schema.gameServerCommands.serverId, server.id))))
+  }
+  for (const result of settledLeases.filter((result) => !result.ok)) {
     statements.push(db.update(schema.gameServerCommands).set({
       status: 'failed',
       error: result.error ?? 'Host rejected the command.',
@@ -145,12 +239,19 @@ app.post('/heartbeat', async (c) => {
   pendingIndex = statements.length
   statements.push(db.select().from(schema.gameServerCommands)
     .where(and(eq(schema.gameServerCommands.serverId, server.id), eq(schema.gameServerCommands.status, 'pending')))
-    .limit(50))
+    .limit(200))
 
   const batchResults = await db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
 
   const updated = batchResults[serverUpdateIndex] as { id: string; status: string }[]
-  const commands = batchResults[pendingIndex] as typeof schema.gameServerCommands.$inferSelect[]
+  const pendingCommands = batchResults[pendingIndex] as typeof schema.gameServerCommands.$inferSelect[]
+  const legacyCommands = pendingCommands.filter((command) => !leasedMatchId(command)).slice(0, 50)
+  const leasedCommands = await claimLeasedCommands(
+    c,
+    server.id,
+    assignedMatches.map((match) => match.id).filter((matchId) => matchId !== 'arena'),
+    50 - legacyCommands.length
+  )
 
   const postStatements: BatchItem<'sqlite'>[] = []
   if (matches) {
@@ -163,16 +264,23 @@ app.post('/heartbeat', async (c) => {
         .where(and(eq(schema.gameServerRuntimeMatches.serverId, server.id), inArray(schema.gameServerRuntimeMatches.matchId, group))))
     }
   }
-  for (const group of chunk(commands, 50)) {
+  for (const group of chunk(legacyCommands, 50)) {
     postStatements.push(db.update(schema.gameServerCommands).set({ status: 'delivered', deliveredAt: now })
       .where(and(inArray(schema.gameServerCommands.id, group.map((command) => command.id)), eq(schema.gameServerCommands.status, 'pending'))))
+  }
+  for (const group of chunk(leasedCommands, 50)) {
+    postStatements.push(db.update(schema.gameServerCommands).set({ status: 'delivered', deliveredAt: now })
+      .where(and(inArray(schema.gameServerCommands.id, group.map((command) => command.id)), eq(schema.gameServerCommands.serverId, server.id))))
   }
   if (postStatements.length > 0) await db.batch(postStatements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
 
   return jsonSuccess(c, {
     server: updated[0],
     heartbeatAt: now,
-    commands: commands.map((command) => ({ id: command.id, type: command.type, ...JSON.parse(command.payload) }))
+    commands: [
+      ...legacyCommands.map((command) => ({ id: command.id, type: command.type, ...JSON.parse(command.payload) })),
+      ...leasedCommands
+    ]
   })
 })
 

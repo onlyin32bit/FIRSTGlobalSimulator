@@ -60,6 +60,41 @@ function newInvitationCode() {
   return crypto.randomUUID().replaceAll('-', '').slice(0, 6).toUpperCase()
 }
 
+async function enqueueServerCommand(
+  c: Parameters<typeof requireAdmin>[0],
+  input: { id: string; serverId: string; type: string; matchId?: string; userId?: string }
+) {
+  const now = new Date()
+  const leased = Boolean(input.matchId && input.matchId !== 'arena')
+  const payload = {
+    ...(input.matchId ? { matchId: input.matchId } : {}),
+    ...(input.userId ? { userId: input.userId } : {}),
+    ...(leased ? { leaseDelivery: true } : {})
+  }
+  if (leased) {
+    await c.env.MATCH_LOBBY.getByName(input.matchId!).enqueueCommand({
+      id: input.id,
+      serverId: input.serverId,
+      type: input.type,
+      payload: { matchId: input.matchId, ...(input.userId ? { userId: input.userId } : {}) },
+      createdAt: now.getTime()
+    })
+  }
+  const command = {
+    id: input.id,
+    serverId: input.serverId,
+    type: input.type,
+    payload: JSON.stringify(payload),
+    status: 'pending' as const,
+    error: null,
+    createdAt: now,
+    deliveredAt: null,
+    completedAt: null
+  }
+  await drizzle(c.env.DB, { schema }).insert(schema.gameServerCommands).values(command).onConflictDoNothing()
+  return command
+}
+
 function pagination(c: Parameters<typeof adminListQuerySchema.parse>[0]) {
   return adminListQuerySchema.parse(c)
 }
@@ -350,11 +385,14 @@ app.post('/matches/:id/cancel', async (c) => {
   if (!match) return jsonError(c, 404, 'MATCH_NOT_FOUND', 'Match not found.')
   if (match.status === 'CANCELLED') return jsonError(c, 409, 'VALIDATION_ERROR', 'Match is already cancelled.')
   const now = new Date()
+  if (match.gameServerId) {
+    try {
+      await enqueueServerCommand(c, { id: crypto.randomUUID(), serverId: match.gameServerId, type: 'stop_match', matchId })
+    } catch {
+      return jsonError(c, 409, 'LOBBY_INVALID_STATE', 'The match command could not be placed on its control lease.')
+    }
+  }
   const updated = await db.update(schema.matches).set({ status: 'CANCELLED', cancelledAt: now, cancelReason: body.reason, updatedAt: now }).where(eq(schema.matches.id, matchId)).returning()
-  if (match.gameServerId) await db.insert(schema.gameServerCommands).values({
-    id: crypto.randomUUID(), serverId: match.gameServerId, type: 'stop_match', payload: JSON.stringify({ matchId }),
-    status: 'pending', error: null, createdAt: now, deliveredAt: null, completedAt: null
-  })
   try { await c.env.MATCH_LOBBY.getByName(matchId).complete(body.reason, true) } catch { /* matches without a lobby, such as arena, have no DO state */ }
   await writeAdminAudit(c.env, { actorUserId: session.user.id, action: 'match.cancelled', targetType: 'match', targetId: matchId, metadata: { reason: body.reason } })
   return jsonSuccess(c, { match: updated[0] })
@@ -441,10 +479,16 @@ app.post('/game-servers/:id/commands', async (c) => {
   const server = await db.query.gameServers.findFirst({ where: eq(schema.gameServers.id, id) })
   if (!server) return jsonError(c, 404, 'VALIDATION_ERROR', 'Game server not found.')
   if (server.disabledAt) return jsonError(c, 409, 'VALIDATION_ERROR', 'Enable this game server before sending control commands.')
-  const now = new Date()
-  const command = { id: crypto.randomUUID(), serverId: id, type: body.type, payload: JSON.stringify({ matchId: body.matchId, userId: body.userId }), status: 'pending', error: null, createdAt: now, deliveredAt: null, completedAt: null }
-  await db.insert(schema.gameServerCommands).values(command)
+  let command
+  try {
+    command = await enqueueServerCommand(c, {
+      id: crypto.randomUUID(), serverId: id, type: body.type, matchId: body.matchId, userId: body.userId
+    })
+  } catch {
+    return jsonError(c, 409, 'LOBBY_INVALID_STATE', 'The match command could not be placed on its control lease.')
+  }
   if (body.type === 'stop_match' && body.matchId) {
+    const now = new Date()
     await db.update(schema.matches).set({ status: 'CANCELLED', cancelledAt: now, cancelReason: 'Stopped by an administrator.', updatedAt: now })
       .where(and(eq(schema.matches.id, body.matchId), eq(schema.matches.gameServerId, id)))
   }

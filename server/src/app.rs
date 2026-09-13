@@ -160,6 +160,7 @@ struct HeartbeatCommand {
     r#type: String,
     match_id: Option<String>,
     user_id: Option<String>,
+    delivery_lease_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -170,6 +171,10 @@ struct HeartbeatResponse {
 #[derive(Serialize)]
 struct CommandResult {
     id: String,
+    #[serde(rename = "matchId")]
+    match_id: Option<String>,
+    #[serde(rename = "deliveryLeaseId")]
+    delivery_lease_id: Option<String>,
     ok: bool,
     error: Option<String>,
 }
@@ -509,6 +514,8 @@ async fn execute_command(
     };
     CommandResult {
         id: command.id,
+        match_id: command.match_id,
+        delivery_lease_id: command.delivery_lease_id,
         ok: result.is_ok(),
         error: result.err(),
     }

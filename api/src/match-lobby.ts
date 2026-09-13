@@ -22,7 +22,36 @@ export type MatchBootstrap = {
   matchSeed: number; startsAt: number; durationSeconds: number; maxPlayers: number
   scenarioId: string; visibility: MatchVisibility; participants: BootstrapParticipant[]
 }
-export type LobbyState = { matchId: string; hostId: string; status: LobbyStatus; slots: LobbySlot[]; error: string | null; bootstrap?: MatchBootstrap; updatedAt: number }
+export type MatchAllocation = {
+  serverId: string
+  leaseId: string
+  expiresAt: number
+  epoch: number
+}
+export type MatchCommand = {
+  id: string
+  serverId: string
+  type: string
+  payload: Record<string, unknown>
+  createdAt: number
+  attempts: number
+  status: 'pending' | 'leased' | 'completed' | 'failed'
+  leaseId: string | null
+  leaseExpiresAt: number | null
+  error: string | null
+}
+export type ClaimedMatchCommand = Pick<MatchCommand, 'id' | 'type' | 'payload'> & { deliveryLeaseId: string }
+export type LobbyState = {
+  matchId: string
+  hostId: string
+  status: LobbyStatus
+  slots: LobbySlot[]
+  error: string | null
+  allocation?: MatchAllocation
+  bootstrap?: MatchBootstrap
+  commands?: MatchCommand[]
+  updatedAt: number
+}
 export type LobbyUser = Pick<LobbyOccupant, 'userId' | 'name' | 'teamName'>
 
 const slot = (id: LobbySlotId): LobbySlot => {
@@ -34,6 +63,8 @@ const slot = (id: LobbySlotId): LobbySlot => {
 const createState = (matchId: string, hostId: string): LobbyState => ({
   matchId, hostId, status: 'LOBBY', slots: LOBBY_SLOT_IDS.map(slot), error: null, updatedAt: Date.now()
 })
+
+const boundedLease = (milliseconds: number) => Math.max(5_000, Math.min(milliseconds, 120_000))
 
 export class MatchLobby extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
@@ -48,10 +79,10 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
     return row ? JSON.parse(row.state) as LobbyState : null
   }
 
-  private write(state: LobbyState) {
+  private write(state: LobbyState, broadcast = true) {
     state.updatedAt = Date.now()
     this.ctx.storage.sql.exec('INSERT INTO lobby_state (id, state) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET state = excluded.state', JSON.stringify(state))
-    this.broadcast(state)
+    if (broadcast) this.broadcast(state)
   }
 
   private broadcast(state: LobbyState) {
@@ -78,6 +109,38 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
   }
 
   async getState(): Promise<LobbyState> { return this.requireLobby() }
+
+  /** A match has one host lease at a time. The DO serializes lease takeover. */
+  async acquireServerLease(serverId: string, leaseMilliseconds = 30_000): Promise<MatchAllocation> {
+    const state = this.requireLobby()
+    const now = Date.now()
+    const current = state.allocation
+    if (current && current.expiresAt > now && current.serverId !== serverId) return current
+    if (state.bootstrap && state.bootstrap.assignedServerId !== serverId) {
+      throw new Error('The locked bootstrap belongs to another game server.')
+    }
+
+    const allocation: MatchAllocation = current?.serverId === serverId && current.expiresAt > now
+      ? { ...current, expiresAt: now + boundedLease(leaseMilliseconds) }
+      : { serverId, leaseId: crypto.randomUUID(), expiresAt: now + boundedLease(leaseMilliseconds), epoch: (current?.epoch ?? 0) + 1 }
+    state.allocation = allocation
+    this.write(state)
+    return allocation
+  }
+
+  async getAllocation(): Promise<MatchAllocation | null> {
+    const allocation = this.requireLobby().allocation
+    return allocation && allocation.expiresAt > Date.now() ? allocation : null
+  }
+
+  async renewServerLease(serverId: string, leaseMilliseconds = 30_000): Promise<boolean> {
+    const state = this.requireLobby()
+    const allocation = state.allocation
+    if (!allocation || allocation.serverId !== serverId || allocation.expiresAt <= Date.now()) return false
+    allocation.expiresAt = Date.now() + boundedLease(leaseMilliseconds)
+    this.write(state, false)
+    return true
+  }
 
   async claimSlot(user: LobbyUser, slotId: LobbySlotId, robotId: string | null): Promise<LobbyState> {
     const state = this.requireLobby()
@@ -135,10 +198,13 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
   }
 
   /** Locks the roster and each selected robot revision once. */
-  async lockBootstrap(input: Omit<MatchBootstrap, 'matchId' | 'hostId'>): Promise<MatchBootstrap> {
+  async lockBootstrap(input: Omit<MatchBootstrap, 'matchId' | 'hostId'> & { bootstrapCommandId: string }): Promise<MatchBootstrap> {
     const state = this.requireLobby()
     if (state.bootstrap) return state.bootstrap
     if (state.status !== 'STARTING' && state.status !== 'IN_PROGRESS') throw new Error('Lobby is not ready to lock.')
+    if (!state.allocation || state.allocation.serverId !== input.assignedServerId || state.allocation.expiresAt <= Date.now()) {
+      throw new Error('The game-server allocation lease is no longer valid.')
+    }
     const roster = state.slots.flatMap((slot) => slot.occupant ? [{
       userId: slot.occupant.userId, name: slot.occupant.name, teamName: slot.occupant.teamName,
       role: slot.role, slotId: slot.id, alliance: slot.alliance, robotId: slot.occupant.robotId
@@ -148,7 +214,21 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
       const slot = roster[index]
       return !slot || participant.userId !== slot.userId || participant.role !== slot.role || participant.slotId !== slot.slotId || participant.alliance !== slot.alliance || participant.robotId !== slot.robotId
     })) throw new Error('The robot revision snapshot does not match the locked roster.')
-    state.bootstrap = { ...input, matchId: state.matchId, hostId: state.hostId }
+    const { bootstrapCommandId, ...bootstrapInput } = input
+    state.bootstrap = { ...bootstrapInput, matchId: state.matchId, hostId: state.hostId }
+    const commands = state.commands ??= []
+    commands.push({
+      id: bootstrapCommandId,
+      serverId: input.assignedServerId,
+      type: 'bootstrap_match',
+      payload: { matchId: state.matchId },
+      createdAt: Date.now(),
+      attempts: 0,
+      status: 'pending',
+      leaseId: null,
+      leaseExpiresAt: null,
+      error: null
+    })
     state.status = 'IN_PROGRESS'
     state.error = null
     this.write(state)
@@ -159,6 +239,68 @@ export class MatchLobby extends DurableObject<Cloudflare.Env> {
     const bootstrap = this.requireLobby().bootstrap
     if (!bootstrap) throw new Error('This match has not been assigned to a game server.')
     return bootstrap
+  }
+
+  /** Persists a control command before it can be exposed to a game server. */
+  async enqueueCommand(command: Omit<MatchCommand, 'attempts' | 'status' | 'leaseId' | 'leaseExpiresAt' | 'error'>): Promise<MatchCommand> {
+    const state = this.requireLobby()
+    const allocation = state.allocation
+    if (!allocation || allocation.serverId !== command.serverId || allocation.expiresAt <= Date.now()) {
+      throw new Error('This game server does not hold the match allocation lease.')
+    }
+    const commands = state.commands ??= []
+    const existing = commands.find((candidate) => candidate.id === command.id)
+    if (existing) return existing
+    const queued: MatchCommand = {
+      ...command,
+      attempts: 0,
+      status: 'pending',
+      leaseId: null,
+      leaseExpiresAt: null,
+      error: null
+    }
+    commands.push(queued)
+    this.write(state)
+    return queued
+  }
+
+  /** Claims work atomically. Expired delivery leases are safe to retry. */
+  async claimCommands(serverId: string, limit = 50, leaseMilliseconds = 15_000): Promise<ClaimedMatchCommand[]> {
+    const state = this.requireLobby()
+    const allocation = state.allocation
+    const now = Date.now()
+    if (!allocation || allocation.serverId !== serverId || allocation.expiresAt <= now) return []
+    allocation.expiresAt = now + boundedLease(leaseMilliseconds * 2)
+    const claimed: ClaimedMatchCommand[] = []
+    for (const command of state.commands ?? []) {
+      if (claimed.length >= Math.max(1, Math.min(limit, 50))) break
+      const canClaim = command.serverId === serverId && (
+        command.status === 'pending' ||
+        (command.status === 'leased' && (command.leaseExpiresAt ?? 0) <= now)
+      )
+      if (!canClaim) continue
+      const deliveryLeaseId = crypto.randomUUID()
+      command.status = 'leased'
+      command.leaseId = deliveryLeaseId
+      command.leaseExpiresAt = now + boundedLease(leaseMilliseconds)
+      command.attempts += 1
+      claimed.push({ id: command.id, type: command.type, payload: command.payload, deliveryLeaseId })
+    }
+    this.write(state, claimed.length > 0)
+    return claimed
+  }
+
+  /** Only the current delivery lease may settle a command. */
+  async settleCommand(serverId: string, commandId: string, deliveryLeaseId: string, ok: boolean, error: string | null): Promise<boolean> {
+    const state = this.requireLobby()
+    const command = state.commands?.find((candidate) => candidate.id === commandId)
+    if (!command || command.serverId !== serverId || command.status !== 'leased' || command.leaseId !== deliveryLeaseId) return false
+    command.status = ok ? 'completed' : 'failed'
+    command.leaseId = null
+    command.leaseExpiresAt = null
+    command.error = ok ? null : error || 'Host rejected the command.'
+    this.write(state)
+    return true
   }
 
   async complete(reason: string, cancelled = false): Promise<LobbyState> {
