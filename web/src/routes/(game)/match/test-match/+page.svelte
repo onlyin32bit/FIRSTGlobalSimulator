@@ -44,6 +44,9 @@
 		ballDebug: Uint8Array;
 		ballContacts: string[][];
 	};
+	type TimedPlayerSnapshot = { receivedAt: number; players: Player[] };
+	type TimedObjectSnapshot = { receivedAt: number; frame: ObjectFrame };
+	type VisualCorrection = { x: number; z: number; yaw: number };
 	type PerformanceWithMemory = Performance & {
 		memory?: {
 			usedJSHeapSize: number;
@@ -69,10 +72,16 @@
 		ballDebug: new Uint8Array(),
 		ballContacts: []
 	});
-	let prevSnapshotPositions = new Float32Array();
-	let currSnapshotPositions = new Float32Array();
 	let lastSnapshotTimestamp = 0;
-	let snapshotDeltaSeconds = 1 / 60;
+	let snapshotDeltaSeconds = 1 / 20;
+	let snapshotJitterSeconds = 0;
+	let interpolationDelaySeconds = 0.1;
+	let playerSnapshots = $state.raw<TimedPlayerSnapshot[]>([]);
+	let objectSnapshots = $state.raw<TimedObjectSnapshot[]>([]);
+	// 16 samples still stays tiny (about 96 KiB for 500 ball positions) and
+	// covers a 200 ms presentation delay even if an old deployment bursts at 65 Hz.
+	const MAX_PRESENTATION_SNAPSHOTS = 16;
+	const MAX_BALL_EXTRAPOLATION_SECONDS = 0.09;
 	let physics = $state.raw<PhysicsModel>({
 		ballMaterial: 'closed-cell polyurethane foam',
 		ballDiameterM: 0.1,
@@ -149,8 +158,13 @@
 		sentAt: number;
 	};
 	const MAX_REPLAY_WINDOW_MS = 350;
-	const MAX_PENDING_DRIVE_INPUTS = 24;
+	const MAX_PENDING_DRIVE_INPUTS = 21;
 	let pendingDriveInputs = $state.raw<PendingDriveInput[]>([]);
+	type PredictedInputState = PendingDriveInput & { tick: number; pose: RobotPose };
+	let predictedInputHistory = $state.raw<PredictedInputState[]>([]);
+	let currentDriveSequence = 0;
+	let localVisualCorrection: VisualCorrection = { x: 0, z: 0, yaw: 0 };
+	let forceExactReconciliationUntil = 0;
 	let lastAcknowledgedInputSequence = 0;
 	let awaitingReconnectBaseline = true;
 	let pingNonce = 0;
@@ -369,7 +383,9 @@
 				webSocketState: socket?.readyState ?? WebSocket.CLOSED,
 				bufferedBytes: socketBufferedBytes,
 				pingMs,
-				snapshotsPerSecond: snapshotRate
+				snapshotsPerSecond: snapshotRate,
+				interpolationDelayMs: interpolationDelaySeconds * 1000,
+				snapshotJitterMs: snapshotJitterSeconds * 1000
 			},
 			client: {
 				fps: clientFps,
@@ -572,8 +588,7 @@
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
 		const now = performance.now();
 		const driveChanged =
-			Math.abs(input.drive - lastSentDrive) > 0.005 ||
-			Math.abs(input.turn - lastSentTurn) > 0.005;
+			Math.abs(input.drive - lastSentDrive) > 0.005 || Math.abs(input.turn - lastSentTurn) > 0.005;
 		const changed =
 			driveChanged ||
 			Math.abs(input.intake - lastSentIntake) > 0.005 ||
@@ -597,15 +612,14 @@
 		const view = new DataView(buffer);
 		view.setUint8(0, 2);
 		const inputSequence = ++sequence;
-		if (force || driveChanged) {
-			const replayCutoff = now - MAX_REPLAY_WINDOW_MS;
-			pendingDriveInputs = [
-				...pendingDriveInputs,
-				{ sequence: inputSequence, drive: input.drive, turn: input.turn, sentAt: now }
-			]
-				.filter((entry) => entry.sentAt >= replayCutoff)
-				.slice(-MAX_PENDING_DRIVE_INPUTS);
-		}
+		currentDriveSequence = inputSequence;
+		const replayCutoff = now - MAX_REPLAY_WINDOW_MS;
+		pendingDriveInputs = [
+			...pendingDriveInputs,
+			{ sequence: inputSequence, drive: input.drive, turn: input.turn, sentAt: now }
+		]
+			.filter((entry) => entry.sentAt >= replayCutoff)
+			.slice(-MAX_PENDING_DRIVE_INPUTS);
 		view.setBigUint64(1, BigInt(inputSequence), true);
 		view.setFloat32(9, input.turn, true);
 		view.setFloat32(13, input.drive, true);
@@ -684,7 +698,8 @@
 	) {
 		if (!isAdmin || !activeMatchId || adminActionBusy) return;
 		const labels = {
-			reset_match: 'Reset this match? The field, score, and robots will return to their starting state after a new countdown.',
+			reset_match:
+				'Reset this match? The field, score, and robots will return to their starting state after a new countdown.',
 			clear_balls: 'Remove every active ball from this match?',
 			end_match: 'End this match for everyone? This cannot be resumed.',
 			kick_player: 'Remove this player from the match?'
@@ -701,7 +716,8 @@
 				matchHadStarted = false;
 			}
 		} catch (cause) {
-			adminActionError = cause instanceof ApiError ? cause.message : 'The admin action could not be queued.';
+			adminActionError =
+				cause instanceof ApiError ? cause.message : 'The admin action could not be queued.';
 		} finally {
 			adminActionBusy = null;
 		}
@@ -750,6 +766,105 @@
 			vx: player.velocityX ?? 0,
 			vz: player.velocityZ ?? 0,
 			angularVelocityY: player.angularVelocityY ?? 0
+		};
+	}
+
+	function shortestAngleDelta(from: number, to: number) {
+		return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+	}
+
+	function playerPresentationAt(renderAt: number): Player[] {
+		if (playerSnapshots.length === 0) return players;
+		let before = playerSnapshots[0];
+		let after: TimedPlayerSnapshot | undefined;
+		for (const sample of playerSnapshots) {
+			if (sample.receivedAt <= renderAt) before = sample;
+			if (sample.receivedAt >= renderAt) {
+				after = sample;
+				break;
+			}
+		}
+		if (!after || after === before) return before.players;
+		const span = Math.max(0.001, after.receivedAt - before.receivedAt);
+		const alpha = Math.min(1, Math.max(0, (renderAt - before.receivedAt) / span));
+		const previousById = new Map(before.players.map((player) => [player.id, player]));
+		return after.players.map((target) => {
+			const source = previousById.get(target.id);
+			if (!source) return target;
+			return {
+				...target,
+				x: source.x + (target.x - source.x) * alpha,
+				y: source.y + (target.y - source.y) * alpha,
+				z: source.z + (target.z - source.z) * alpha,
+				yaw: source.yaw + shortestAngleDelta(source.yaw, target.yaw) * alpha,
+				...blendRotation(source, target, alpha),
+				climbWheelAngle:
+					source.climbWheelAngle + (target.climbWheelAngle - source.climbWheelAngle) * alpha
+			};
+		});
+	}
+
+	function objectPresentationAt(renderAt: number) {
+		if (objectSnapshots.length === 0) return null;
+		let before = objectSnapshots[0];
+		let after: TimedObjectSnapshot | undefined;
+		for (const sample of objectSnapshots) {
+			if (sample.receivedAt <= renderAt) before = sample;
+			if (sample.receivedAt >= renderAt) {
+				after = sample;
+				break;
+			}
+		}
+		if (after && after !== before) {
+			const span = Math.max(0.001, after.receivedAt - before.receivedAt);
+			return {
+				from: before.frame,
+				to: after.frame,
+				alpha: Math.min(1, Math.max(0, (renderAt - before.receivedAt) / span))
+			};
+		}
+
+		const prior = objectSnapshots.at(-2);
+		if (!prior || prior.frame.positions.length !== before.frame.positions.length) {
+			return { from: before.frame, to: before.frame, alpha: 1 };
+		}
+		const overdueSeconds = Math.max(0, renderAt - before.receivedAt);
+		if (overdueSeconds > MAX_BALL_EXTRAPOLATION_SECONDS) {
+			// Do not invent a long ball trajectory when a packet is delayed.
+			return { from: before.frame, to: before.frame, alpha: 1 };
+		}
+		const interval = Math.max(0.008, before.receivedAt - prior.receivedAt);
+		return {
+			from: prior.frame,
+			to: before.frame,
+			alpha: 1 + Math.min(MAX_BALL_EXTRAPOLATION_SECONDS, overdueSeconds) / interval
+		};
+	}
+
+	function addVisualCorrection(before: RobotPose, after: RobotPose) {
+		localVisualCorrection = {
+			x: localVisualCorrection.x + before.x - after.x,
+			z: localVisualCorrection.z + before.z - after.z,
+			yaw: localVisualCorrection.yaw + shortestAngleDelta(after.yaw, before.yaw)
+		};
+	}
+
+	function recordPredictedInputState(entry: PredictedInputState) {
+		// Fixed-capacity rolling history: no frame-rate-sized replay queue.
+		if (predictedInputHistory.length === MAX_PENDING_DRIVE_INPUTS) {
+			predictedInputHistory.copyWithin(0, 1);
+			predictedInputHistory[MAX_PENDING_DRIVE_INPUTS - 1] = entry;
+			return;
+		}
+		predictedInputHistory.push(entry);
+	}
+
+	function decayVisualCorrection(dt: number) {
+		const decay = Math.exp(-dt / 0.1);
+		localVisualCorrection = {
+			x: localVisualCorrection.x * decay,
+			z: localVisualCorrection.z * decay,
+			yaw: localVisualCorrection.yaw * decay
 		};
 	}
 
@@ -803,20 +918,36 @@
 		const ballContactDistance = robotRadius + objectFrame.radius + 0.05;
 		let nearBall = false;
 		for (let index = 0; index < objectFrame.positions.length; index += 3) {
-			if (Math.hypot(objectFrame.positions[index] - server.x, objectFrame.positions[index + 2] - server.z) < ballContactDistance) {
+			if (
+				Math.hypot(
+					objectFrame.positions[index] - server.x,
+					objectFrame.positions[index + 2] - server.z
+				) < ballContactDistance
+			) {
 				nearBall = true;
 				break;
 			}
 		}
-		const exact = !server.floorSupported || server.braceContact || nearBall;
+		const exact =
+			!server.floorSupported ||
+			server.braceContact ||
+			nearBall ||
+			performance.now() < forceExactReconciliationUntil;
 		if (acknowledgedSequence === undefined) {
 			pred.setPose(poseOf(server));
 			return;
 		}
 		const acknowledged = Math.max(lastAcknowledgedInputSequence, acknowledgedSequence);
+		const acknowledgedState = [...predictedInputHistory]
+			.reverse()
+			.find((entry) => entry.sequence <= acknowledged);
+		const acknowledgedMismatch = acknowledgedState
+			? Math.hypot(acknowledgedState.pose.x - server.x, acknowledgedState.pose.z - server.z)
+			: 0;
+		const requiresExactCorrection = exact || acknowledgedMismatch >= 0.45;
 		const acknowledgementAdvanced = acknowledged > lastAcknowledgedInputSequence;
 		if (!acknowledgementAdvanced) {
-			if (pendingDriveInputs.length === 0 && exact) pred.setPose(poseOf(server));
+			if (pendingDriveInputs.length === 0 && requiresExactCorrection) pred.setPose(poseOf(server));
 			return;
 		}
 		lastAcknowledgedInputSequence = acknowledged;
@@ -825,6 +956,14 @@
 		pendingDriveInputs = pendingDriveInputs
 			.filter((entry) => entry.sequence > acknowledged && entry.sentAt >= replayCutoff)
 			.slice(-MAX_PENDING_DRIVE_INPUTS);
+		while (
+			predictedInputHistory.length > 0 &&
+			(predictedInputHistory[0].sequence <= acknowledged ||
+				predictedInputHistory[0].sentAt < replayCutoff)
+		) {
+			predictedInputHistory.shift();
+		}
+		const before = { ...pred.pose };
 		predictionErrorM = pred.reconcile(
 			poseOf(server),
 			pendingDriveInputs.map((entry, index) => ({
@@ -834,8 +973,11 @@
 					Math.max(0, ((pendingDriveInputs[index + 1]?.sentAt ?? now) - entry.sentAt) / 1000)
 				)
 			})),
-			exact
+			requiresExactCorrection
 		);
+		if (requiresExactCorrection || predictionErrorM >= 0.4 || pendingDriveInputs.length === 0) {
+			addVisualCorrection(before, pred.pose);
+		}
 	}
 
 	function resetReconnectBaseline() {
@@ -845,8 +987,15 @@
 		lastAcknowledgedInputSequence = 0;
 		awaitingReconnectBaseline = true;
 		lastSnapshotTimestamp = 0;
-		prevSnapshotPositions = new Float32Array();
-		currSnapshotPositions = new Float32Array();
+		snapshotDeltaSeconds = 1 / 20;
+		snapshotJitterSeconds = 0;
+		interpolationDelaySeconds = 0.1;
+		playerSnapshots = [];
+		objectSnapshots = [];
+		predictedInputHistory = [];
+		currentDriveSequence = 0;
+		localVisualCorrection = { x: 0, z: 0, yaw: 0 };
+		forceExactReconciliationUntil = 0;
 	}
 
 	onMount(() => {
@@ -873,6 +1022,7 @@
 			const frameDurationMs = frameTime - previousFrameTime;
 			const dt = Math.min(frameDurationMs / 1000, 0.05);
 			previousFrameTime = frameTime;
+			decayVisualCorrection(dt);
 			framesInWindow += 1;
 			frameSamples.push(frameDurationMs);
 			const statsElapsedMs = frameTime - statsWindowStartedAt;
@@ -940,12 +1090,30 @@
 						serverLocal.floorSupported &&
 						localUpY >= 0.7 &&
 						(input.climb <= 0 || !serverLocal.braceContact);
-					pred.step(
+					pred.advance(
 						{
 							turn: driveEnabled ? input.turn : 0,
 							drive: driveEnabled ? input.drive : 0
 						},
-						dt
+						dt,
+						(tick, pose) => {
+							const now = performance.now();
+							const replayCutoff = now - MAX_REPLAY_WINDOW_MS;
+							while (
+								predictedInputHistory.length > 0 &&
+								predictedInputHistory[0].sentAt < replayCutoff
+							) {
+								predictedInputHistory.shift();
+							}
+							recordPredictedInputState({
+								sequence: currentDriveSequence,
+								drive: input.drive,
+								turn: input.turn,
+								sentAt: now,
+								tick,
+								pose
+							});
+						}
 					);
 					localPose = pred.pose;
 					if (localPose) {
@@ -967,18 +1135,27 @@
 								z: localPose.z + (serverLocal.z - localPose.z) * blendToServer
 							};
 						}
+						localPose = {
+							...localPose,
+							x: localPose.x + localVisualCorrection.x,
+							z: localPose.z + localVisualCorrection.z,
+							yaw: localPose.yaw + localVisualCorrection.yaw
+						};
 					}
 				}
 			}
 
 			const currentById = new Map(renderedPlayers.map((player) => [player.id, player]));
 			const blend = 1 - Math.exp(-24 * dt);
+			const presentationPlayers = playerPresentationAt(
+				performance.now() - interpolationDelaySeconds * 1000
+			);
 
-			if (players.length === 0) {
+			if (presentationPlayers.length === 0) {
 				if (renderedPlayers.length !== 0) renderedPlayers = [];
 			} else {
-				let changed = players.length !== renderedPlayers.length;
-				const nextPlayers = players.map((target) => {
+				let changed = presentationPlayers.length !== renderedPlayers.length;
+				const nextPlayers = presentationPlayers.map((target) => {
 					if (localPose && target.id === localId) {
 						changed = true;
 						const predicted = withPredictedYaw(target, localPose.yaw);
@@ -1052,61 +1229,39 @@
 				if (changed) renderedPlayers = nextPlayers;
 			}
 
-			const targetPositions = objectFrame.positions;
-			const renderedPositions = renderedObjectFrame.positions;
-			if (targetPositions.length !== renderedPositions.length) {
-				// Allocate only when the pack changes its object count. Normal
-				// animation reuses these tuples to avoid allocations per frame.
-				renderedObjectFrame = {
-					...objectFrame,
-					positions: new Float32Array(targetPositions)
-				};
-				currSnapshotPositions = new Float32Array(targetPositions);
-				prevSnapshotPositions = new Float32Array(targetPositions);
-			} else {
-				const elapsed = Math.max(0, (performance.now() - lastSnapshotTimestamp) / 1000);
-				const interval = Math.max(0.008, snapshotDeltaSeconds);
-				// Progress alpha from 0 (at snapshot arrival) to 1.0 (at next expected snapshot).
-				// Extrapolate up to 1.35x if a packet is slightly late so balls don't freeze.
-				const alpha = Math.min(elapsed / interval, 1.35);
-
-				let changedProperties =
-					objectFrame.objectId !== renderedObjectFrame.objectId ||
-					objectFrame.radius !== renderedObjectFrame.radius ||
-					objectFrame.color !== renderedObjectFrame.color;
-				for (let index = 0; index < targetPositions.length; index += 3) {
-					const x0 = prevSnapshotPositions[index];
-					const y0 = prevSnapshotPositions[index + 1];
-					const z0 = prevSnapshotPositions[index + 2];
-
-					const x1 = currSnapshotPositions[index];
-					const y1 = currSnapshotPositions[index + 1];
-					const z1 = currSnapshotPositions[index + 2];
-
-					const dx = x1 - x0;
-					const dy = y1 - y0;
-					const dz = z1 - z0;
-					const dist = Math.hypot(dx, dy, dz);
-
-					if (dist > 2.5) {
-						// Teleport / spawn / score reset -> snap to latest
-						renderedPositions[index] = x1;
-						renderedPositions[index + 1] = y1;
-						renderedPositions[index + 2] = z1;
-					} else if (dist < 0.0001) {
-						// Stationary or sleeping ball -> exact position without arithmetic
-						renderedPositions[index] = x1;
-						renderedPositions[index + 1] = y1;
-						renderedPositions[index + 2] = z1;
-					} else {
-						// Moving or projectile ball -> 100% continuous, fluid, constant-velocity linear interpolation
-						renderedPositions[index] = x0 + dx * alpha;
-						renderedPositions[index + 1] = y0 + dy * alpha;
-						renderedPositions[index + 2] = z0 + dz * alpha;
+			const presentationObjects = objectPresentationAt(
+				performance.now() - interpolationDelaySeconds * 1000
+			);
+			if (presentationObjects) {
+				const { from, to, alpha } = presentationObjects;
+				const renderedPositions = renderedObjectFrame.positions;
+				if (to.positions.length !== renderedPositions.length) {
+					// Allocate only when the pack changes its object count. Normal
+					// presentation reuses the same typed array each frame.
+					renderedObjectFrame = { ...to, positions: new Float32Array(to.positions) };
+				} else {
+					for (let index = 0; index < to.positions.length; index += 3) {
+						const dx = to.positions[index] - from.positions[index];
+						const dy = to.positions[index + 1] - from.positions[index + 1];
+						const dz = to.positions[index + 2] - from.positions[index + 2];
+						if (Math.hypot(dx, dy, dz) > 2.5) {
+							// Spawn, score reset, and teleport are authoritative discontinuities.
+							renderedPositions[index] = to.positions[index];
+							renderedPositions[index + 1] = to.positions[index + 1];
+							renderedPositions[index + 2] = to.positions[index + 2];
+						} else {
+							renderedPositions[index] = from.positions[index] + dx * alpha;
+							renderedPositions[index + 1] = from.positions[index + 1] + dy * alpha;
+							renderedPositions[index + 2] = from.positions[index + 2] + dz * alpha;
+						}
 					}
-				}
-				if (changedProperties) {
-					renderedObjectFrame = { ...objectFrame, positions: renderedPositions };
+					if (
+						renderedObjectFrame.objectId !== to.objectId ||
+						renderedObjectFrame.radius !== to.radius ||
+						renderedObjectFrame.color !== to.color
+					) {
+						renderedObjectFrame = { ...to, positions: renderedPositions };
+					}
 				}
 			}
 
@@ -1249,19 +1404,24 @@
 							if (lastSnapshotTimestamp > 0) {
 								const measuredDelta = (now - lastSnapshotTimestamp) / 1000;
 								if (measuredDelta > 0.005 && measuredDelta < 0.2) {
-									snapshotDeltaSeconds = snapshotDeltaSeconds * 0.8 + measuredDelta * 0.2;
+									const previousInterval = snapshotDeltaSeconds;
+									snapshotDeltaSeconds = previousInterval * 0.8 + measuredDelta * 0.2;
+									snapshotJitterSeconds =
+										snapshotJitterSeconds * 0.85 +
+										Math.abs(measuredDelta - previousInterval) * 0.15;
 								}
 							}
 							lastSnapshotTimestamp = now;
-
-							const newPositions = message.positions;
-							if (isReconnectBaseline || currSnapshotPositions.length !== newPositions.length) {
-								currSnapshotPositions = new Float32Array(newPositions);
-								prevSnapshotPositions = new Float32Array(newPositions);
-							} else {
-								prevSnapshotPositions.set(currSnapshotPositions);
-								currSnapshotPositions.set(newPositions);
-							}
+							// Render remote state slightly behind live time. The delay grows only
+							// when arrival jitter does, which avoids adding latency on a clean link.
+							interpolationDelaySeconds = Math.min(
+								0.2,
+								Math.max(0.1, snapshotDeltaSeconds * 2 + snapshotJitterSeconds * 3)
+							);
+							playerSnapshots = [
+								...playerSnapshots,
+								{ receivedAt: now, players: message.players.map((player) => ({ ...player })) }
+							].slice(-MAX_PRESENTATION_SNAPSHOTS);
 
 							objectFrame = {
 								objectId: message.objectId,
@@ -1271,6 +1431,18 @@
 								ballDebug: message.ballDebug,
 								ballContacts: message.ballContacts
 							};
+							objectSnapshots = [
+								...objectSnapshots,
+								{
+									receivedAt: now,
+									frame: {
+										...objectFrame,
+										positions: new Float32Array(message.positions),
+										ballDebug: new Uint8Array(message.ballDebug),
+										ballContacts: message.ballContacts.map((contacts) => [...contacts])
+									}
+								}
+							].slice(-MAX_PRESENTATION_SNAPSHOTS);
 							if (isReconnectBaseline) {
 								renderedPlayers = message.players.map((player) => ({ ...player }));
 								renderedObjectFrame = {
@@ -1304,6 +1476,11 @@
 							preMatchRemainingSeconds = message.preMatchRemainingSeconds;
 							matchRunning = message.matchRunning;
 							practiceRunning = message.practiceRunning;
+							const scoreChanged =
+								receivedMatchState &&
+								(blueScore !== message.score.blue ||
+									redScore !== message.score.red ||
+									globalScore !== message.score.global);
 							blueScore = message.score.blue;
 							redScore = message.score.red;
 							globalScore = message.score.global;
@@ -1330,6 +1507,12 @@
 							packVersion = `${message.gamePackId} · v${message.gamePackVersion}`;
 							semanticEvents = message.semanticEvents;
 							transferDebug = message.transferDebug;
+							if (
+								scoreChanged ||
+								message.semanticEvents.some((entry) => /score|transfer|owner/i.test(entry))
+							) {
+								forceExactReconciliationUntil = now + 250;
+							}
 							return;
 						}
 						const message = JSON.parse(event.data);

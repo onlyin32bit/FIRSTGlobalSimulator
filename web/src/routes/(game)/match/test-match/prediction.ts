@@ -54,8 +54,11 @@ class FieldSpatialIndex {
 	private static readonly cellSizeM = 1;
 	private readonly cells = new Map<number, number[]>();
 	private readonly candidates: number[] = [];
+	private readonly seen: Uint32Array;
+	private queryGeneration = 0;
 
 	constructor(private readonly colliders: readonly FieldCollider[]) {
+		this.seen = new Uint32Array(colliders.length);
 		colliders.forEach((collider, index) => {
 			const minX = Math.floor(collider.min[0] / FieldSpatialIndex.cellSizeM);
 			const maxX = Math.floor(collider.max[0] / FieldSpatialIndex.cellSizeM);
@@ -74,6 +77,11 @@ class FieldSpatialIndex {
 
 	query(minX: number, maxX: number, minZ: number, maxZ: number): readonly number[] {
 		this.candidates.length = 0;
+		this.queryGeneration += 1;
+		if (this.queryGeneration === 0) {
+			this.seen.fill(0);
+			this.queryGeneration = 1;
+		}
 		const startX = Math.floor(minX / FieldSpatialIndex.cellSizeM);
 		const endX = Math.floor(maxX / FieldSpatialIndex.cellSizeM);
 		const startZ = Math.floor(minZ / FieldSpatialIndex.cellSizeM);
@@ -81,19 +89,16 @@ class FieldSpatialIndex {
 		for (let z = startZ; z <= endZ; z += 1) {
 			for (let x = startX; x <= endX; x += 1) {
 				const cell = this.cells.get(FieldSpatialIndex.key(x, z));
-				if (cell) this.candidates.push(...cell);
+				if (!cell) continue;
+				for (const index of cell) {
+					if (this.seen[index] === this.queryGeneration) continue;
+					this.seen[index] = this.queryGeneration;
+					this.candidates.push(index);
+				}
 			}
 		}
-		// Keep the authored order: positional projection is iterative.
-		this.candidates.sort((left, right) => left - right);
-		let write = 0;
-		for (const index of this.candidates) {
-			if (write === 0 || this.candidates[write - 1] !== index) {
-				this.candidates[write] = index;
-				write += 1;
-			}
-		}
-		this.candidates.length = write;
+		// Cell traversal is stable, and each collider is emitted once. Avoid a
+		// per-tick sort in the hot prediction path.
 		return this.candidates;
 	}
 
@@ -313,9 +318,13 @@ const projectBoundary = (p: RobotPose, params: DriveParams) => {
  * reconciles any remaining divergence (e.g. ball contacts).
  */
 export class DrivePredictor {
+	static readonly tickSeconds = 1 / 60;
+	private static readonly maxCatchUpTicks = 6;
 	private readonly params: DriveParams;
 	private readonly fieldIndex: FieldSpatialIndex;
 	private authoritative: RobotPose;
+	private accumulatorSeconds = 0;
+	private simulationTick = 0;
 	pose: RobotPose;
 
 	constructor(params: DriveParams, initial: RobotPose) {
@@ -328,21 +337,51 @@ export class DrivePredictor {
 	setPose(pose: RobotPose) {
 		this.pose = { ...pose };
 		this.authoritative = { ...pose };
+		this.accumulatorSeconds = 0;
+	}
+
+	get tick() {
+		return this.simulationTick;
 	}
 
 	reconcile(pose: RobotPose, replay: ReplayInput[] = [], exact = false) {
 		const distance = Math.hypot(pose.x - this.pose.x, pose.z - this.pose.z);
 		this.authoritative = { ...pose };
-		// A held drive input is stateful, not a one-tick action. Resetting the
-		// local pose after its acknowledgement rewinds the chassis by one network
-		// delay. Normal driving keeps its predicted pose; contacts and large drift
-		// still take the exact server state.
-		if (!exact && replay.length === 0 && distance < 0.45) return distance;
+		// No unacknowledged input means the server pose is the least surprising
+		// baseline. The page applies a short visual correction, so this does not
+		// make the chassis pop when an idle client receives a snapshot.
+		if (!exact && replay.length === 0) {
+			this.pose = { ...pose };
+			this.accumulatorSeconds = 0;
+			return distance;
+		}
 		this.pose = { ...pose };
+		this.accumulatorSeconds = 0;
 		for (const entry of replay) {
 			this.step(entry.input, entry.durationSeconds);
 		}
 		return distance;
+	}
+
+	/** Advance the local kinematic chassis on its own 60 Hz timeline. Rendering
+	 * may run at any rate; this keeps drivetrain integration deterministic. */
+	advance(input: DriveInput, frameDt: number, onTick?: (tick: number, pose: RobotPose) => void) {
+		this.accumulatorSeconds = Math.min(
+			this.accumulatorSeconds + clamp(frameDt, 0, 0.1),
+			DrivePredictor.tickSeconds * DrivePredictor.maxCatchUpTicks
+		);
+		let stepped = 0;
+		while (
+			this.accumulatorSeconds + Number.EPSILON >= DrivePredictor.tickSeconds &&
+			stepped < DrivePredictor.maxCatchUpTicks
+		) {
+			this.step(input, DrivePredictor.tickSeconds);
+			this.accumulatorSeconds -= DrivePredictor.tickSeconds;
+			this.simulationTick += 1;
+			onTick?.(this.simulationTick, { ...this.pose });
+			stepped += 1;
+		}
+		return stepped;
 	}
 
 	step(input: DriveInput, dt: number) {

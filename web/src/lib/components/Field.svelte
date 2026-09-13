@@ -4,6 +4,7 @@
 	import { RigidBody, Collider } from '@threlte/rapier';
 	import {
 		Euler,
+		BufferGeometry,
 		Matrix4,
 		Mesh,
 		MeshStandardMaterial,
@@ -14,6 +15,7 @@
 		Raycaster,
 		type Intersection
 	} from 'three';
+	import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 	import { onMount, untrack } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
 	import { get } from 'svelte/store';
@@ -107,7 +109,10 @@
 	});
 	const BRACE_COLLIDER_IDS = new Set(['Cylinder', 'Cylinder.001', 'Cylinder.002', 'Cylinder.003']);
 	const meshoptDecoder = useMeshopt();
-	const visualGltf = useGltf(untrack(() => assetUrls.visual), { meshoptDecoder });
+	const visualGltf = useGltf(
+		untrack(() => assetUrls.visual),
+		{ meshoptDecoder }
+	);
 	const configuredScenes = new WeakSet<Object3D>();
 
 	let colliders = $state<ParsedCollider[]>([]);
@@ -655,6 +660,8 @@
 				: configuredMaterials[0];
 		});
 
+		batchStaticFieldMeshes(scene);
+
 		if (redHandleMesh && !redHandleAura) {
 			redHandleAura = createHandleAura(redHandleMesh);
 		}
@@ -664,6 +671,90 @@
 
 		configuredScenes.add(scene);
 		return scene;
+	}
+
+	function isInteractiveFieldPart(object: Object3D) {
+		for (let current: Object3D | null = object; current; current = current.parent) {
+			if (
+				current.name === 'RedHandle' ||
+				current.name === 'BlueHandle' ||
+				current.name === 'HandleAuraWrapper'
+			)
+				return true;
+		}
+		return false;
+	}
+
+	function batchStaticFieldMeshes(scene: Object3D) {
+		const rootInverse = new Matrix4();
+		const relativeMatrix = new Matrix4();
+		const geometryUsers = new Map<BufferGeometry, number>();
+		const hiddenGeometryUsers = new Map<BufferGeometry, number>();
+		const batches = new Map<
+			string,
+			{
+				material: MeshStandardMaterial | MeshBasicMaterial;
+				geometries: BufferGeometry[];
+				sources: Mesh[];
+			}
+		>();
+		scene.updateMatrixWorld(true);
+		rootInverse.copy(scene.matrixWorld).invert();
+		scene.traverse((object) => {
+			if (object instanceof Mesh) {
+				geometryUsers.set(object.geometry, (geometryUsers.get(object.geometry) ?? 0) + 1);
+			}
+		});
+
+		scene.traverse((object) => {
+			if (!(object instanceof Mesh) || isInteractiveFieldPart(object)) return;
+			if (Array.isArray(object.material) || object.material.transparent) return;
+			if (!(
+				object.material instanceof MeshStandardMaterial ||
+				object.material instanceof MeshBasicMaterial
+			))
+				return;
+			if (Object.keys(object.geometry.morphAttributes).length > 0) return;
+			const attributes = Object.keys(object.geometry.attributes).sort().join(',');
+			const key = `${object.material.uuid}:${attributes}`;
+			const batch = batches.get(key) ?? {
+				material: object.material,
+				geometries: [],
+				sources: []
+			};
+			relativeMatrix.multiplyMatrices(rootInverse, object.matrixWorld);
+			batch.geometries.push(object.geometry.clone().applyMatrix4(relativeMatrix));
+			batch.sources.push(object);
+			batches.set(key, batch);
+		});
+
+		const batchedRoot = new Object3D();
+		batchedRoot.name = 'StaticFieldBatches';
+		for (const { material, geometries, sources } of batches.values()) {
+			if (geometries.length < 2) continue;
+			const merged = mergeGeometries(geometries, false);
+			if (!merged) continue;
+			const mesh = new Mesh(merged, material);
+			mesh.name = 'StaticFieldBatch';
+			mesh.matrixAutoUpdate = false;
+			mesh.updateMatrix();
+			mesh.castShadow = false;
+			mesh.receiveShadow = true;
+			batchedRoot.add(mesh);
+			for (const source of sources) {
+				source.visible = false;
+				hiddenGeometryUsers.set(
+					source.geometry,
+					(hiddenGeometryUsers.get(source.geometry) ?? 0) + 1
+				);
+			}
+		}
+		if (batchedRoot.children.length > 0) scene.add(batchedRoot);
+		// Hidden originals would otherwise retain their WebGL buffers beside the
+		// merged mesh. Dispose only when every user of a source geometry is hidden.
+		for (const [geometry, hiddenCount] of hiddenGeometryUsers) {
+			if (hiddenCount === geometryUsers.get(geometry)) geometry.dispose();
+		}
 	}
 </script>
 
