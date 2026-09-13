@@ -571,9 +571,11 @@
 	function sendInputFrom(input: ReturnType<typeof sampleInput>, force = false) {
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
 		const now = performance.now();
-		const changed =
+		const driveChanged =
 			Math.abs(input.drive - lastSentDrive) > 0.005 ||
-			Math.abs(input.turn - lastSentTurn) > 0.005 ||
+			Math.abs(input.turn - lastSentTurn) > 0.005;
+		const changed =
+			driveChanged ||
 			Math.abs(input.intake - lastSentIntake) > 0.005 ||
 			Math.abs(input.outtake - lastSentOuttake) > 0.005 ||
 			Math.abs(input.climb - lastSentClimb) > 0.005;
@@ -595,13 +597,15 @@
 		const view = new DataView(buffer);
 		view.setUint8(0, 2);
 		const inputSequence = ++sequence;
-		const replayCutoff = now - MAX_REPLAY_WINDOW_MS;
-		pendingDriveInputs = [
-			...pendingDriveInputs,
-			{ sequence: inputSequence, drive: input.drive, turn: input.turn, sentAt: now }
-		]
-			.filter((entry) => entry.sentAt >= replayCutoff)
-			.slice(-MAX_PENDING_DRIVE_INPUTS);
+		if (force || driveChanged) {
+			const replayCutoff = now - MAX_REPLAY_WINDOW_MS;
+			pendingDriveInputs = [
+				...pendingDriveInputs,
+				{ sequence: inputSequence, drive: input.drive, turn: input.turn, sentAt: now }
+			]
+				.filter((entry) => entry.sentAt >= replayCutoff)
+				.slice(-MAX_PENDING_DRIVE_INPUTS);
+		}
 		view.setBigUint64(1, BigInt(inputSequence), true);
 		view.setFloat32(9, input.turn, true);
 		view.setFloat32(13, input.drive, true);
@@ -795,6 +799,16 @@
 	function reconcileLocal(server: Player, acknowledgedSequence: number | undefined) {
 		const pred = ensurePredictor(poseOf(server));
 		if (!pred) return;
+		const robotRadius = Math.hypot(physics.robotWidthM, physics.robotLengthM) * 0.5;
+		const ballContactDistance = robotRadius + objectFrame.radius + 0.05;
+		let nearBall = false;
+		for (let index = 0; index < objectFrame.positions.length; index += 3) {
+			if (Math.hypot(objectFrame.positions[index] - server.x, objectFrame.positions[index + 2] - server.z) < ballContactDistance) {
+				nearBall = true;
+				break;
+			}
+		}
+		const exact = !server.floorSupported || server.braceContact || nearBall;
 		if (acknowledgedSequence === undefined) {
 			pred.setPose(poseOf(server));
 			return;
@@ -802,7 +816,7 @@
 		const acknowledged = Math.max(lastAcknowledgedInputSequence, acknowledgedSequence);
 		const acknowledgementAdvanced = acknowledged > lastAcknowledgedInputSequence;
 		if (!acknowledgementAdvanced) {
-			if (pendingDriveInputs.length === 0) pred.setPose(poseOf(server));
+			if (pendingDriveInputs.length === 0 && exact) pred.setPose(poseOf(server));
 			return;
 		}
 		lastAcknowledgedInputSequence = acknowledged;
@@ -819,7 +833,8 @@
 					MAX_REPLAY_WINDOW_MS / 1000,
 					Math.max(0, ((pendingDriveInputs[index + 1]?.sentAt ?? now) - entry.sentAt) / 1000)
 				)
-			}))
+			})),
+			exact
 		);
 	}
 

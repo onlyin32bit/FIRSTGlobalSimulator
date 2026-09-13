@@ -330,9 +330,15 @@ export class DrivePredictor {
 		this.authoritative = { ...pose };
 	}
 
-	reconcile(pose: RobotPose, replay: ReplayInput[] = []) {
+	reconcile(pose: RobotPose, replay: ReplayInput[] = [], exact = false) {
 		const distance = Math.hypot(pose.x - this.pose.x, pose.z - this.pose.z);
-		this.setPose(pose);
+		this.authoritative = { ...pose };
+		// A held drive input is stateful, not a one-tick action. Resetting the
+		// local pose after its acknowledgement rewinds the chassis by one network
+		// delay. Normal driving keeps its predicted pose; contacts and large drift
+		// still take the exact server state.
+		if (!exact && replay.length === 0 && distance < 0.45) return distance;
+		this.pose = { ...pose };
 		for (const entry of replay) {
 			this.step(entry.input, entry.durationSeconds);
 		}
@@ -354,8 +360,10 @@ export class DrivePredictor {
 		// The local model cannot reproduce Rapier's carpet contacts exactly.
 		// A damped target follows the latest server velocity and removes drift
 		// continuously instead of periodically snapping the rendered chassis.
-		const positionPull = 1 - Math.exp(-8 * frameDt);
-		const velocityPull = 1 - Math.exp(-12 * frameDt);
+		const controlled =
+			Math.abs(input.drive) > CONTROL_DEADBAND || Math.abs(input.turn) > CONTROL_DEADBAND;
+		const positionPull = controlled ? 0 : 1 - Math.exp(-8 * frameDt);
+		const velocityPull = controlled ? 0 : 1 - Math.exp(-12 * frameDt);
 		const yawDelta = Math.atan2(
 			Math.sin(this.authoritative.yaw - this.pose.yaw),
 			Math.cos(this.authoritative.yaw - this.pose.yaw)
