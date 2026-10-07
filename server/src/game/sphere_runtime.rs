@@ -2126,9 +2126,14 @@ impl SphereRuntime {
                     && !(touches_outtake && player.outtake_power > 0.0)
                     && !is_shooting_out
                 {
-                    let sync_factor = (15.0 * dt).min(1.0);
-                    ball.velocity[0] += (player.velocity[0] - ball.velocity[0]) * sync_factor;
-                    ball.velocity[2] += (player.velocity[2] - ball.velocity[2]) * sync_factor;
+                    let r = [
+                        ball.position[0] - player.position[0],
+                        0.0,
+                        ball.position[2] - player.position[2],
+                    ];
+                    let rot_vel = cross(player.angular_velocity, r);
+                    ball.velocity[0] = player.velocity[0] + rot_vel[0];
+                    ball.velocity[2] = player.velocity[2] + rot_vel[2];
                 }
 
                 // Intake physical force
@@ -2140,7 +2145,6 @@ impl SphereRuntime {
                     } else {
                         None
                     };
-
                     if let Some(dir_world) = intake_dir {
                         // Intake power drives only the intake mouth. Applying
                         // this force to the whole robot envelope made Space

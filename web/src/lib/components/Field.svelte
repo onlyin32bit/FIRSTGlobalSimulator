@@ -584,13 +584,8 @@
 		if (configuredScenes.has(scene)) return scene;
 
 		const transparentMaterials = new SvelteMap<MeshStandardMaterial, MeshStandardMaterial>();
-		const strayArtifacts: Object3D[] = [];
 
 		scene.traverse((object) => {
-			if (object.name && object.name.includes('FG_F_02_03')) {
-				strayArtifacts.push(object);
-				return;
-			}
 			if (object.name === 'RedHandle') {
 				redHandleMesh = object;
 				if (!object.userData.initialQuat) {
@@ -637,8 +632,9 @@
 					(panelColor.b - SUPPRESSION_PANEL_COLOR[2]) ** 2;
 				const isSuppressionPanel =
 					sourceMaterial.name === '0.796078_0.905882_0.745098_0.000000_0.380392' ||
+					sourceMaterial.name === 'Clear Polycarbonate' ||
+					sourceMaterial.name === 'Polyurethane' ||
 					panelColorDistanceSquared < 0.00001;
-				if (!isSuppressionPanel) return sourceMaterial;
 
 				const existingMaterial = transparentMaterials.get(sourceMaterial);
 				if (existingMaterial) return existingMaterial;
@@ -664,15 +660,6 @@
 				? configuredMaterials
 				: configuredMaterials[0];
 		});
-		for (const artifact of strayArtifacts) {
-			artifact.removeFromParent();
-			artifact.traverse((child) => {
-				if (child instanceof Mesh) {
-					child.geometry?.dispose();
-				}
-			});
-		}
-
 		batchStaticFieldMeshes(scene);
 
 		if (redHandleMesh && !redHandleAura) {
@@ -714,13 +701,18 @@
 		scene.updateMatrixWorld(true);
 		rootInverse.copy(scene.matrixWorld).invert();
 		scene.traverse((object) => {
-			if (object instanceof Mesh) {
+			if (object instanceof Mesh && !(object as any).isInstancedMesh) {
 				geometryUsers.set(object.geometry, (geometryUsers.get(object.geometry) ?? 0) + 1);
 			}
 		});
 
 		scene.traverse((object) => {
-			if (!(object instanceof Mesh) || isInteractiveFieldPart(object)) return;
+			if (
+				!(object instanceof Mesh) ||
+				(object as any).isInstancedMesh ||
+				isInteractiveFieldPart(object)
+			)
+				return;
 			if (Array.isArray(object.material) || object.material.transparent) return;
 			if (!(
 				object.material instanceof MeshStandardMaterial ||
