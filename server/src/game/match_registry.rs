@@ -169,6 +169,7 @@ impl MatchHandle {
         }
     }
 
+    #[allow(deprecated)]
     pub fn set_debug_subscription(&self, enabled: bool) {
         if enabled {
             self.debug_subscribers.fetch_add(1, Ordering::Relaxed);
