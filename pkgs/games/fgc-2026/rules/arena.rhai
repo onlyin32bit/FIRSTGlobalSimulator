@@ -3,7 +3,7 @@
 // and does not hard-code the object count, shape, or motion parameters.
 fn arena_config() {
     #{
-        physics_backend: "rapier",
+        physics_backend: "sphere_xpbd",
         solver: #{
             // Kept for the sphere_xpbd fallback pack profile.
             position_iterations: 3.0,

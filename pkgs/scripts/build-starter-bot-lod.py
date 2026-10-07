@@ -15,17 +15,37 @@ def ratio_for(face_count):
     return 1.0
 
 scene_meshes = [item for item in bpy.context.scene.objects if item.type == 'MESH']
-processed_meshes = set()
+processed_objects = set()
+
+MECHANISM_NAMES = ('climbwheel', 'intakeroller', 'outtakeroller', 'transferroller')
+
+def is_mechanism_object(obj):
+    current = obj
+    while current is not None:
+        key = ''.join(ch for ch in current.name.lower() if ch.isalnum())
+        if any(name in key for name in MECHANISM_NAMES):
+            return True
+        current = current.parent
+    return False
+
 for obj in scene_meshes:
-    source_mesh = obj.data
-    if source_mesh.name in processed_meshes:
+    if obj.name in processed_objects:
         continue
-    processed_meshes.add(source_mesh.name)
+    source_mesh = obj.data
+    instances = [item for item in scene_meshes if item.data == source_mesh]
+    processed_objects.update(item.name for item in instances)
+    # These pieces animate independently at runtime. Preserve their exact shape
+    # (especially the grooved climbing wheel contact profile).
+    if any(is_mechanism_object(item) for item in instances):
+        continue
     ratio = ratio_for(len(source_mesh.polygons))
     if ratio >= 1.0:
         continue
 
-    instances = [item for item in scene_meshes if item.data == source_mesh]
+    # Blender 5 refuses to apply a modifier to multi-user mesh data. Make one
+    # working copy, decimate it once, then reconnect every original instance to
+    # the resulting shared LOD mesh.
+    obj.data = source_mesh.copy()
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
     modifier = obj.modifiers.new('runtime_lod', 'DECIMATE')

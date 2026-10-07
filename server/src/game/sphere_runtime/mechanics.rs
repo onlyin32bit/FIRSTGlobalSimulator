@@ -35,13 +35,17 @@ impl SphereRuntime {
                 let queued: Vec<_> = player.stored.drain(..).collect();
                 for index in queued {
                     let owned = self.balls[index].owner.as_deref() == Some(player_id);
+                    let in_intake = intake_zone.as_ref().is_some_and(|z| {
+                        sphere_authored_obb_contact(self.balls[index].position, radius, z).is_some()
+                    });
                     let inside = self.balls[index].active
-                        && sphere_authored_obb_contact(
-                            self.balls[index].position,
-                            radius,
-                            &envelope,
-                        )
-                        .is_some();
+                        && (in_intake
+                            || sphere_authored_obb_contact(
+                                self.balls[index].position,
+                                radius,
+                                &envelope,
+                            )
+                            .is_some());
                     if owned && inside {
                         player.stored.push_back(index);
                     } else if owned {
@@ -98,30 +102,26 @@ impl SphereRuntime {
                     if !ball.active {
                         continue;
                     }
-                    if let Some(zone) = &intake_zone {
-                        if sphere_authored_obb_contact(ball.position, radius, zone).is_none() {
-                            continue;
-                        }
-                        self.intake_candidates
-                            .push((length_sq(sub(ball.position, zone.center)), index));
-                        continue;
-                    }
+                    let touches_authored = intake_zone.as_ref().is_some_and(|zone| {
+                        sphere_authored_obb_contact(ball.position, radius, zone).is_some()
+                    });
                     let delta = sub(ball.position, player.position);
                     let forward_dist = dot(delta, forward);
-                    if forward_dist < -0.10
-                        || forward_dist > robot.intake_forward_offset_m + radius + 0.10
-                    {
-                        continue;
-                    }
                     let lateral_dist = dot(delta, right);
-                    if lateral_dist.abs() > robot.intake_width_m * 0.5 + 0.08 {
-                        continue;
-                    }
                     let vertical_dist = (ball.position[1] - intake_world_y).abs();
-                    if vertical_dist > radius + robot.intake_radius_m + 0.10 {
+                    let in_reach = forward_dist >= -0.10
+                        && forward_dist <= robot.intake_forward_offset_m + radius + 0.10
+                        && lateral_dist.abs() <= robot.intake_width_m * 0.5 + 0.08
+                        && vertical_dist <= radius + robot.intake_radius_m + 0.10;
+                    if !touches_authored && !in_reach {
                         continue;
                     }
-                    self.intake_candidates.push((forward_dist.abs(), index));
+                    let score = if touches_authored {
+                        length_sq(sub(ball.position, intake_zone.as_ref().unwrap().center))
+                    } else {
+                        forward_dist.abs()
+                    };
+                    self.intake_candidates.push((score, index));
                 }
                 self.intake_candidates.sort_by(|left, right| {
                     left.0

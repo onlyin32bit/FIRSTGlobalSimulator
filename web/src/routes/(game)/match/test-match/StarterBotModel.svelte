@@ -2,7 +2,17 @@
 	import { T, useTask } from '@threlte/core';
 	import { useGltf, useMeshopt } from '@threlte/extras';
 	import { untrack } from 'svelte';
-	import { FrontSide, Mesh, MeshStandardMaterial, Object3D } from 'three';
+	import { SvelteMap } from 'svelte/reactivity';
+	import {
+		BatchedMesh,
+		BufferGeometry,
+		FrontSide,
+		Matrix4,
+		Mesh,
+		MeshStandardMaterial,
+		Object3D,
+		SkinnedMesh
+	} from 'three';
 
 	import defaultRollerSettings from './robot-rollers.json';
 
@@ -22,7 +32,6 @@
 
 	let {
 		assetUrl,
-		detailAssetUrl,
 		climbing = false,
 		wheelAngle = 0,
 		isIntaking = false,
@@ -30,7 +39,6 @@
 		rollerSettings = defaultRollerSettings as RobotRollerSettings
 	}: {
 		assetUrl: string;
-		detailAssetUrl?: string;
 		climbing?: boolean;
 		wheelAngle?: number;
 		isIntaking?: boolean;
@@ -63,6 +71,113 @@
 			}
 		});
 		return found;
+	}
+
+	function isMechanismPart(object: Object3D, root: Object3D, targetKeys: string[]): boolean {
+		for (
+			let current: Object3D | null = object;
+			current && current !== root;
+			current = current.parent
+		) {
+			const key = sanitizeName(current.name);
+			if (
+				key &&
+				targetKeys.some(
+					(target) => key === target || key.startsWith(target) || key.includes(target)
+				)
+			) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * CAD exports contain hundreds of immutable meshes. Rendering every mesh as a
+	 * separate draw call is much more expensive than drawing them as a batch.
+	 * BatchedMesh stores each unique geometry once and reuses it for repeated CAD
+	 * parts, avoiding the large GPU-memory duplication caused by merging every
+	 * transformed instance. Actuated mechanism subtrees remain independent.
+	 */
+	function batchStaticRobotMeshes(root: Object3D) {
+		const rootInverse = new Matrix4();
+		const relativeMatrix = new Matrix4();
+		const targetKeys = Object.values(rollerSettings)
+			.flatMap((config) => config?.parts ?? [])
+			.map(sanitizeName);
+		const batches = new SvelteMap<
+			string,
+			{
+				material: MeshStandardMaterial;
+				entries: Array<{ source: Mesh; geometry: BufferGeometry; matrix: Matrix4 }>;
+			}
+		>();
+		root.updateMatrixWorld(true);
+		rootInverse.copy(root.matrixWorld).invert();
+
+		root.traverse((object) => {
+			if (
+				!(object instanceof Mesh) ||
+				object instanceof SkinnedMesh ||
+				object instanceof BatchedMesh ||
+				isMechanismPart(object, root, targetKeys)
+			)
+				return;
+			if (Array.isArray(object.material) || !(object.material instanceof MeshStandardMaterial))
+				return;
+			if (object.material.transparent || Object.keys(object.geometry.morphAttributes).length > 0)
+				return;
+			const attributes = Object.keys(object.geometry.attributes).sort().join(',');
+			const key = `${object.material.uuid}:${attributes}:${object.geometry.index ? 'indexed' : 'plain'}`;
+			const batch = batches.get(key) ?? {
+				material: object.material,
+				entries: []
+			};
+			relativeMatrix.multiplyMatrices(rootInverse, object.matrixWorld);
+			// BatchedMesh does not support mirrored instance transforms. Leave those
+			// uncommon CAD nodes as ordinary meshes rather than corrupting them.
+			if (relativeMatrix.determinant() < 0) return;
+			batch.entries.push({
+				source: object,
+				geometry: object.geometry,
+				matrix: relativeMatrix.clone()
+			});
+			batches.set(key, batch);
+		});
+
+		const batchedRoot = new Object3D();
+		batchedRoot.name = 'StaticRobotBatches';
+		for (const { material, entries } of batches.values()) {
+			if (entries.length < 2) continue;
+			const geometries = new SvelteMap<string, BufferGeometry>();
+			for (const { geometry } of entries) geometries.set(geometry.uuid, geometry);
+			let vertexCapacity = 0;
+			let indexCapacity = 0;
+			for (const geometry of geometries.values()) {
+				vertexCapacity += geometry.getAttribute('position').count;
+				indexCapacity += geometry.index?.count ?? 0;
+			}
+			const mesh = new BatchedMesh(entries.length, vertexCapacity, indexCapacity, material);
+			mesh.name = 'StaticRobotBatch';
+			mesh.perObjectFrustumCulled = false;
+			mesh.sortObjects = false;
+			mesh.castShadow = false;
+			mesh.receiveShadow = false;
+			const geometryIds = new SvelteMap<string, number>();
+			for (const geometry of geometries.values()) {
+				geometryIds.set(geometry.uuid, mesh.addGeometry(geometry));
+			}
+			for (const { source, geometry, matrix } of entries) {
+				const geometryId = geometryIds.get(geometry.uuid);
+				if (geometryId === undefined) continue;
+				mesh.setMatrixAt(mesh.addInstance(geometryId), matrix);
+				source.visible = false;
+			}
+			mesh.computeBoundingBox();
+			mesh.computeBoundingSphere();
+			batchedRoot.add(mesh);
+		}
+		if (batchedRoot.children.length > 0) root.add(batchedRoot);
 	}
 
 	function buildCache(root: Object3D) {
@@ -134,6 +249,7 @@
 				}
 			}
 		});
+		batchStaticRobotMeshes(instance);
 		return instance;
 	}
 

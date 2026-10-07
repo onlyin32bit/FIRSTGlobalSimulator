@@ -207,18 +207,24 @@ pub(super) fn load_robot_definition(
     let outtake_zone = zones
         .iter()
         .find(|zone| zone.kind == RobotSemanticKind::Outtake);
-
     let is_intake_collider = colliders
         .iter()
         .map(|c| {
-            intake_zone.map_or(false, |z| {
-                crate::game::sphere_runtime::collision::sphere_authored_obb_contact(
-                    c.center,
-                    1.0e-5,
-                    &z.collider,
-                )
-                .is_some()
-            })
+            c.id == "Cylinder.001"
+                || c.id == "Cylinder.002"
+                || c.id == "Cylinder.003"
+                || c.id.to_lowercase().contains("intake")
+                || intake_zone.map_or(false, |z| {
+                    let extent = c.half_extents[0]
+                        .max(c.half_extents[1])
+                        .max(c.half_extents[2]);
+                    crate::game::sphere_runtime::collision::sphere_authored_obb_contact(
+                        c.center,
+                        extent,
+                        &z.collider,
+                    )
+                    .is_some()
+                })
         })
         .collect();
     let is_transfer_collider = colliders

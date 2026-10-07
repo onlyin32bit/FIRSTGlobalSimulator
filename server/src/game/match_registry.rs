@@ -965,7 +965,15 @@ impl MatchRegistry {
                     if now < next_publish {
                         std::thread::sleep(next_publish - now);
                     }
+                    // A delayed publisher must drop missed slots instead of
+                    // emitting a catch-up burst. Clients only need the newest
+                    // authoritative state and otherwise waste time decoding
+                    // stale snapshots back-to-back.
+                    let after_sleep = Instant::now();
                     next_publish += interval;
+                    if next_publish <= after_sleep {
+                        next_publish = after_sleep + interval;
+                    }
                     if publisher_tx.receiver_count() == 0 {
                         continue;
                     }

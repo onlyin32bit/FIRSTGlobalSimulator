@@ -584,8 +584,13 @@
 		if (configuredScenes.has(scene)) return scene;
 
 		const transparentMaterials = new SvelteMap<MeshStandardMaterial, MeshStandardMaterial>();
+		const strayArtifacts: Object3D[] = [];
 
 		scene.traverse((object) => {
+			if (object.name && object.name.includes('FG_F_02_03')) {
+				strayArtifacts.push(object);
+				return;
+			}
 			if (object.name === 'RedHandle') {
 				redHandleMesh = object;
 				if (!object.userData.initialQuat) {
@@ -659,6 +664,14 @@
 				? configuredMaterials
 				: configuredMaterials[0];
 		});
+		for (const artifact of strayArtifacts) {
+			artifact.removeFromParent();
+			artifact.traverse((child) => {
+				if (child instanceof Mesh) {
+					child.geometry?.dispose();
+				}
+			});
+		}
 
 		batchStaticFieldMeshes(scene);
 

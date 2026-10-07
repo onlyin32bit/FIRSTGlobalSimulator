@@ -10,7 +10,6 @@
 		physics,
 		local,
 		visualAsset,
-		detailVisualAsset,
 		isIntaking = false,
 		isOuttaking = false,
 		rollerSettings,
@@ -26,7 +25,6 @@
 		physics: MatchPhysics;
 		local: boolean;
 		visualAsset?: string;
-		detailVisualAsset?: string;
 		isIntaking?: boolean;
 		isOuttaking?: boolean;
 		rollerSettings?: RobotRollerSettings;
@@ -97,7 +95,6 @@
 		<T.Group position={[0, -physics.robotHeightM * 0.5, 0]} rotation={[0, Math.PI, 0]}>
 			<StarterBotModel
 				assetUrl={visualAsset}
-				detailAssetUrl={detailVisualAsset}
 				climbing={isClimbing}
 				wheelAngle={player.climbWheelAngle}
 				{isIntaking}
@@ -215,7 +212,7 @@
 			semanticsUrl={semanticsAsset}
 			{climber}
 			{ballContacts}
-			ballPositions={ballPositions}
+			{ballPositions}
 			robotPosition={[player.x, player.y, player.z]}
 			robotQuaternion={[player.rotationX, player.rotationY, player.rotationZ, player.rotationW]}
 			height={physics.robotHeightM}

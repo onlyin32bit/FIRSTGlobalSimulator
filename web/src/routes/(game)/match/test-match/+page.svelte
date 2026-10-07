@@ -159,6 +159,7 @@
 	};
 	const MAX_REPLAY_WINDOW_MS = 350;
 	const MAX_PENDING_DRIVE_INPUTS = 21;
+	const INPUT_SEND_INTERVAL_MS = 1000 / 60;
 	let pendingDriveInputs = $state.raw<PendingDriveInput[]>([]);
 	type PredictedInputState = PendingDriveInput & { tick: number; pose: RobotPose };
 	let predictedInputHistory = $state.raw<PredictedInputState[]>([]);
@@ -177,7 +178,7 @@
 		ui?: { scoreboard: string; lobbyField: string };
 	} | null>(null);
 	let starterBotVisual = $state<string | null>(null);
-	let starterBotDetailVisual = $state<string | null>(null);
+	let starterBotLodVisual = $state<string | null>(null);
 	let starterBotPhysics = $state<string | null>(null);
 	let starterBotSemantics = $state<string | null>(null);
 	let starterBotRollers = $state<RobotRollerSettings | null>(null);
@@ -594,7 +595,10 @@
 			Math.abs(input.intake - lastSentIntake) > 0.005 ||
 			Math.abs(input.outtake - lastSentOuttake) > 0.005 ||
 			Math.abs(input.climb - lastSentClimb) > 0.005;
-		if (!force && !changed && now - lastInputSentAt < 250) return;
+		// Keep a real 60 Hz command timeline even while a stick is held steady.
+		// Otherwise a high-latency acknowledgement can consume the only pending
+		// command and leave reconciliation with no elapsed input to replay.
+		if (!force && !changed && now - lastInputSentAt < INPUT_SEND_INTERVAL_MS) return;
 
 		controlSource = input.source;
 		inputDrive = input.drive;
@@ -916,14 +920,12 @@
 		if (!pred) return;
 		const robotRadius = Math.hypot(physics.robotWidthM, physics.robotLengthM) * 0.5;
 		const ballContactDistance = robotRadius + objectFrame.radius + 0.05;
+		const ballContactDistanceSquared = ballContactDistance * ballContactDistance;
 		let nearBall = false;
 		for (let index = 0; index < objectFrame.positions.length; index += 3) {
-			if (
-				Math.hypot(
-					objectFrame.positions[index] - server.x,
-					objectFrame.positions[index + 2] - server.z
-				) < ballContactDistance
-			) {
+			const dx = objectFrame.positions[index] - server.x;
+			const dz = objectFrame.positions[index + 2] - server.z;
+			if (dx * dx + dz * dz < ballContactDistanceSquared) {
 				nearBall = true;
 				break;
 			}
@@ -975,8 +977,12 @@
 			})),
 			requiresExactCorrection
 		);
-		if (requiresExactCorrection || predictionErrorM >= 0.4 || pendingDriveInputs.length === 0) {
+		if (!requiresExactCorrection && predictionErrorM < 0.4) {
 			addVisualCorrection(before, pred.pose);
+		} else {
+			// Contacts, teleports, and large divergence are authoritative
+			// discontinuities. Do not drag a stale visual offset through them.
+			localVisualCorrection = { x: 0, z: 0, yaw: 0 };
 		}
 	}
 
@@ -1005,6 +1011,10 @@
 		let statsWindowStartedAt = previousFrameTime;
 		let framesInWindow = 0;
 		let stateMessagesInWindow = 0;
+		let pendingSnapshot: ArrayBuffer | null = null;
+		let applyingPendingSnapshot = false;
+		let lastSnapshotAppliedAt = 0;
+		let applyPendingSnapshot: ((frameTime: number) => void) | undefined;
 		let longTaskTimeMs = 0;
 		let frameSamples: number[] = [];
 		logicalCpuCores = navigator.hardwareConcurrency || 0;
@@ -1019,6 +1029,10 @@
 			longTaskObserver.observe({ type: 'longtask', buffered: false });
 		}
 		const interpolateScene = (frameTime: number) => {
+			// Decode and reconcile only the newest queued authoritative state. If a
+			// deployment accidentally publishes at simulation rate, stale 60 Hz
+			// snapshots are dropped instead of blocking rendering and input sampling.
+			applyPendingSnapshot?.(frameTime);
 			const frameDurationMs = frameTime - previousFrameTime;
 			const dt = Math.min(frameDurationMs / 1000, 0.05);
 			previousFrameTime = frameTime;
@@ -1117,24 +1131,9 @@
 					);
 					localPose = pred.pose;
 					if (localPose) {
-						const robotRadius = Math.hypot(physics.robotWidthM, physics.robotLengthM) * 0.5;
-						const reach = robotRadius + objectFrame.radius;
-						const renderedPositions = renderedObjectFrame.positions;
-						let nearestBall = Infinity;
-						for (let index = 0; index < renderedPositions.length; index += 3) {
-							const dx = renderedPositions[index] - localPose.x;
-							const dz = renderedPositions[index + 2] - localPose.z;
-							const distance = Math.hypot(dx, dz);
-							if (distance < nearestBall) nearestBall = distance;
-						}
-						if (nearestBall < reach) {
-							const blendToServer = ((reach - nearestBall) / reach) * 0.55;
-							localPose = {
-								...localPose,
-								x: localPose.x + (serverLocal.x - localPose.x) * blendToServer,
-								z: localPose.z + (serverLocal.z - localPose.z) * blendToServer
-							};
-						}
+						// Network correction is applied by acknowledgement replay above.
+						// Pulling the predicted chassis toward the server every render frame
+						// reintroduced ping-dependent steering lag whenever a ball was nearby.
 						localPose = {
 							...localPose,
 							x: localPose.x + localVisualCorrection.x,
@@ -1244,7 +1243,7 @@
 						const dx = to.positions[index] - from.positions[index];
 						const dy = to.positions[index + 1] - from.positions[index + 1];
 						const dz = to.positions[index + 2] - from.positions[index + 2];
-						if (Math.hypot(dx, dy, dz) > 2.5) {
+						if (dx * dx + dy * dy + dz * dz > 6.25) {
 							// Spawn, score reset, and teleport are authoritative discontinuities.
 							renderedPositions[index] = to.positions[index];
 							renderedPositions[index + 1] = to.positions[index + 1];
@@ -1338,7 +1337,7 @@
 				robotCameraFov = savedPreferences.graphics.cameraFov;
 				fieldAssets = assets;
 				starterBotVisual = starterBot.visual;
-				starterBotDetailVisual = starterBot.lod1 ?? null;
+				starterBotLodVisual = starterBot.lod1 ?? null;
 				starterBotPhysics = starterBot.physics ?? null;
 				starterBotSemantics = starterBot.semantics ?? null;
 				starterBotClimber = starterBot.climber ?? null;
@@ -1377,8 +1376,14 @@
 					if (!disposed)
 						error = 'Unable to reach ws://localhost:3000. Start the Rust match server.';
 				};
-				nextSocket.onmessage = (event) => {
+				const handleSocketMessage = (event: MessageEvent) => {
 					if (disposed) return;
+					if (event.data instanceof ArrayBuffer && !applyingPendingSnapshot) {
+						stateMessagesInWindow += 1;
+						snapshotBytes = event.data.byteLength;
+						pendingSnapshot = event.data;
+						return;
+					}
 					try {
 						if (event.data instanceof ArrayBuffer) {
 							const message = decodeMatchSnapshot(event.data);
@@ -1389,8 +1394,6 @@
 								status = 'Connected';
 								error = '';
 							}
-							stateMessagesInWindow += 1;
-							snapshotBytes = event.data.byteLength;
 							players = message.players;
 							if (localId) {
 								const localServer = message.players.find((player) => player.id === localId);
@@ -1533,6 +1536,21 @@
 						error = `Server snapshot rejected: ${cause instanceof Error ? cause.message : 'unknown format'}`;
 					}
 				};
+				nextSocket.onmessage = handleSocketMessage;
+				applyPendingSnapshot = (frameTime) => {
+					if (!pendingSnapshot) return;
+					const reconnectBaseline = awaitingReconnectBaseline;
+					if (!reconnectBaseline && frameTime - lastSnapshotAppliedAt < 45) return;
+					const snapshot = pendingSnapshot;
+					pendingSnapshot = null;
+					lastSnapshotAppliedAt = frameTime;
+					applyingPendingSnapshot = true;
+					try {
+						handleSocketMessage({ data: snapshot } as MessageEvent<ArrayBuffer>);
+					} finally {
+						applyingPendingSnapshot = false;
+					}
+				};
 			} catch (e) {
 				if (disposed) return;
 				error = e instanceof ApiError ? e.message : 'Unable to join the live test match.';
@@ -1556,6 +1574,8 @@
 			socket?.close();
 			socket = undefined;
 			pendingPings.clear();
+			pendingSnapshot = null;
+			applyPendingSnapshot = undefined;
 		};
 	});
 </script>
@@ -2168,10 +2188,7 @@
 				<RobotModel
 					{player}
 					{physics}
-					visualAsset={starterBotVisual ?? undefined}
-					detailVisualAsset={player.id === localId && userPreferences?.graphics.quality === 'high'
-						? (starterBotDetailVisual ?? undefined)
-						: undefined}
+					visualAsset={starterBotLodVisual ?? starterBotVisual ?? undefined}
 					local={player.id === localId}
 					isIntaking={player.id === localId ? inputIntake > 0 : false}
 					isOuttaking={player.id === localId ? inputOuttake > 0 : false}
