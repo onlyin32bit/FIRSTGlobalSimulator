@@ -1254,6 +1254,29 @@
 							renderedPositions[index + 2] = from.positions[index + 2] + dz * alpha;
 						}
 					}
+					const serverLocal = players.find((p) => p.id === localId);
+					if (localPose && serverLocal) {
+						const robotRadius = Math.hypot(physics.robotWidthM, physics.robotLengthM) * 0.5;
+						const deltaYaw = localPose.yaw - (serverLocal.yaw ?? 0);
+						const cos = Math.cos(deltaYaw);
+						const sin = Math.sin(deltaYaw);
+						for (let index = 0; index < to.positions.length; index += 3) {
+							const ballIndex = index / 3;
+							const distToServer = Math.hypot(
+								to.positions[index] - serverLocal.x,
+								to.positions[index + 2] - serverLocal.z
+							);
+							const isInsideLocal =
+								(to.ballDebug && to.ballDebug.length > ballIndex && (to.ballDebug[ballIndex] & 1) !== 0) ||
+								(serverLocal.storedBalls > 0 && distToServer < robotRadius);
+							if (isInsideLocal) {
+								const relX = renderedPositions[index] - serverLocal.x;
+								const relZ = renderedPositions[index + 2] - serverLocal.z;
+								renderedPositions[index] = localPose.x + relX * cos - relZ * sin;
+								renderedPositions[index + 2] = localPose.z + relX * sin + relZ * cos;
+							}
+						}
+					}
 					if (
 						renderedObjectFrame.objectId !== to.objectId ||
 						renderedObjectFrame.radius !== to.radius ||

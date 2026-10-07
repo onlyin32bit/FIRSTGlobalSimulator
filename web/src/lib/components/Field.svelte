@@ -632,10 +632,8 @@
 					(panelColor.b - SUPPRESSION_PANEL_COLOR[2]) ** 2;
 				const isSuppressionPanel =
 					sourceMaterial.name === '0.796078_0.905882_0.745098_0.000000_0.380392' ||
-					sourceMaterial.name === 'Clear Polycarbonate' ||
-					sourceMaterial.name === 'Polyurethane' ||
 					panelColorDistanceSquared < 0.00001;
-
+				if (!isSuppressionPanel) return sourceMaterial;
 				const existingMaterial = transparentMaterials.get(sourceMaterial);
 				if (existingMaterial) return existingMaterial;
 
