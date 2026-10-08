@@ -370,7 +370,14 @@ app.post('/matches/:id/events', async (c) => {
   if (isResponse(body)) return body
   const { server, match } = await assignedMatch(c, c.req.param('id'))
   if (!server) return jsonError(c, 401, 'AUTH_FAILED', 'The game server key is invalid or disabled.')
-  if (!match || match.status !== 'IN_PROGRESS' || body.events.some((event) => event.gamePackVersion !== match.packVersion)) return jsonError(c, 403, 'AUTH_FAILED', 'These events are not valid for the assigned match.')
+  const matchId = c.req.param('id')
+  if (matchId !== 'arena' && (!match || match.status !== 'IN_PROGRESS')) {
+    return jsonError(c, 403, 'AUTH_FAILED', 'These events are not valid for the assigned match.')
+  }
+  if (!match) return jsonError(c, 404, 'MATCH_NOT_FOUND', 'Match not found.')
+  if (match.packVersion && body.events.some((event) => event.gamePackVersion && event.gamePackVersion !== match.packVersion)) {
+    return jsonError(c, 403, 'AUTH_FAILED', 'These events are not valid for the assigned match.')
+  }
   const db = drizzle(c.env.DB, { schema })
   const statements: BatchItem<'sqlite'>[] = body.events.map((event) => db.insert(schema.matchEvents).values({
     id: `${match.id}:${event.eventId}`, matchId: match.id, eventId: event.eventId, tick: event.tick,
@@ -386,8 +393,7 @@ app.post('/matches/:id/complete', async (c) => {
   const body = await parseJson(c, gameServerMatchCompletionSchema)
   if (isResponse(body)) return body
   const { server, match } = await assignedMatch(c, c.req.param('id'))
-  if (!server) return jsonError(c, 401, 'AUTH_FAILED', 'The game server key is invalid or disabled.')
-  if (!match || match.packVersion !== body.gamePackVersion) return jsonError(c, 403, 'AUTH_FAILED', 'This completion is not valid for the assigned match.')
+  if (!match || (match.packVersion && match.packVersion !== body.gamePackVersion)) return jsonError(c, 403, 'AUTH_FAILED', 'This completion is not valid for the assigned match.')
   const db = drizzle(c.env.DB, { schema })
   const events = await db.select().from(schema.matchEvents).where(eq(schema.matchEvents.matchId, match.id))
   const replayKey = `matches/${match.id}/events.json`

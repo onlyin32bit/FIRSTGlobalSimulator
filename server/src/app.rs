@@ -645,7 +645,6 @@ fn start_match_reporter(
                     Some(MatchReport::Event(event)) => {
                         let queue = pending.entry(event.match_id.clone()).or_default();
                         if !queue.iter().any(|queued| queued.event_id == event.event_id) { queue.push_back(event); }
-                        if queue.len() >= 64 { flush_event_batches(&control_plane, &mut pending).await; }
                     }
                     Some(MatchReport::Completion(completion)) => {
                         flush_event_batches(&control_plane, &mut pending).await;
@@ -685,6 +684,14 @@ async fn flush_event_batches(
                 .await;
             match response {
                 Ok(response) if response.status().is_success() => {
+                    for _ in 0..batch.len() {
+                        queue.pop_front();
+                    }
+                }
+                Ok(response) if response.status().is_client_error() => {
+                    let status = response.status();
+                    let detail = response.text().await.unwrap_or_default();
+                    tracing::warn!(%match_id, %status, %detail, "event batch rejected by API, dropping");
                     for _ in 0..batch.len() {
                         queue.pop_front();
                     }

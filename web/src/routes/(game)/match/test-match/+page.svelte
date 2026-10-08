@@ -918,22 +918,9 @@
 	function reconcileLocal(server: Player, acknowledgedSequence: number | undefined) {
 		const pred = ensurePredictor(poseOf(server));
 		if (!pred) return;
-		const robotRadius = Math.hypot(physics.robotWidthM, physics.robotLengthM) * 0.5;
-		const ballContactDistance = robotRadius + objectFrame.radius + 0.05;
-		const ballContactDistanceSquared = ballContactDistance * ballContactDistance;
-		let nearBall = false;
-		for (let index = 0; index < objectFrame.positions.length; index += 3) {
-			const dx = objectFrame.positions[index] - server.x;
-			const dz = objectFrame.positions[index + 2] - server.z;
-			if (dx * dx + dz * dz < ballContactDistanceSquared) {
-				nearBall = true;
-				break;
-			}
-		}
 		const exact =
 			!server.floorSupported ||
 			server.braceContact ||
-			nearBall ||
 			performance.now() < forceExactReconciliationUntil;
 		if (acknowledgedSequence === undefined) {
 			pred.setPose(poseOf(server));
